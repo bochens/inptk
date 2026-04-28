@@ -5,13 +5,13 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from ufolaf_models import (
+from .models import (
     CumulativeNucleusSpectrumTable,
     NormalizedInpSpectrumTable,
     SampleMetadata,
     processing_metadata_for,
 )
-from ufolaf_qc import qc_blank_corrected_spectrum
+from .qc import qc_blank_corrected_spectrum
 
 
 FilterBlankSpectrum = CumulativeNucleusSpectrumTable | NormalizedInpSpectrumTable

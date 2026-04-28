@@ -6,7 +6,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from ufolaf_math import (
+from .math import (
     PROFILE_LIKELIHOOD_DROP_95,
     binomial_poisson_mle_with_profile_errors,
     cumulative_inp_per_ml_with_errors_from_counts,
@@ -17,7 +17,7 @@ from ufolaf_math import (
     temperature_thresholds,
     water_blank_corrected_counts,
 )
-from ufolaf_models import (
+from .models import (
     CountsTable,
     CumulativeNucleusSpectrumTable,
     DifferentialNucleusSpectrumTable,

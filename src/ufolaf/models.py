@@ -701,6 +701,28 @@ class DifferentialNucleusSpectrumTable(TemperatureDependentTable):
         data["basis"] = _basis_column(self.basis, len(self.value))
         return data
 
+    @classmethod
+    def from_dataframe(
+        cls,
+        df: pd.DataFrame,
+        *,
+        value_unit: str | None = None,
+        basis: SpectrumBasis | Any = "suspension",
+        metadata: MetadataLike = None,
+        processing_metadata: ProcessingMetadata | None = None,
+    ) -> DifferentialNucleusSpectrumTable:
+        return cls(
+            **_temperature_kwargs_from_dataframe(df),
+            value=df["value"].to_numpy(dtype=float),
+            value_unit=_value_unit_from_dataframe(df, value_unit),
+            basis=_basis_from_dataframe(df, basis),
+            lower_ci=df["lower_ci"].to_numpy(dtype=float) if "lower_ci" in df else None,
+            upper_ci=df["upper_ci"].to_numpy(dtype=float) if "upper_ci" in df else None,
+            qc_flag=df["qc_flag"].to_numpy(dtype=int) if "qc_flag" in df else None,
+            metadata=metadata,
+            processing_metadata=processing_metadata,
+        )
+
 
 @dataclass(frozen=True, kw_only=True)
 class CumulativeNucleusSpectrumTable(TemperatureDependentTable):
