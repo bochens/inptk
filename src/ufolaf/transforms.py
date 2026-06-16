@@ -7,7 +7,7 @@ from typing import Any, Literal, Mapping
 import numpy as np
 import pandas as pd
 
-from ufolaf_math import (
+from .math import (
     PROFILE_LIKELIHOOD_DROP_95,
     binomial_poisson_mle_with_profile_errors,
     cumulative_inp_per_ml_with_errors_from_counts,
@@ -18,7 +18,7 @@ from ufolaf_math import (
     temperature_thresholds,
     water_blank_corrected_counts,
 )
-from ufolaf_models import (
+from .models import (
     CountsTable,
     CumulativeNucleusSpectrumTable,
     DifferentialNucleusSpectrumTable,
@@ -109,11 +109,13 @@ def _fraction_frozen_parameters(
     step_C: float,
     method: TemperatureReductionMethod,
     temperature_tolerance_C: float,
+    cooling_only: bool,
 ) -> dict[str, Any]:
     return {
         "step_C": step_C,
         "method": method,
         "temperature_tolerance_C": temperature_tolerance_C,
+        "cooling_only": cooling_only,
     }
 
 
@@ -246,6 +248,7 @@ def counts_to_temperature_frozen_fraction(
     step_C: float = 0.5,
     method: TemperatureReductionMethod = "max",
     temperature_tolerance_C: float = 0.05,
+    cooling_only: bool = True,
     **unexpected_kwargs: Any,
 ) -> TemperatureFrozenFractionTable | list[Any] | dict[str, Any]:
     """Reduce raw count observations to threshold-evaluated frozen-fraction table(s).
@@ -261,6 +264,9 @@ def counts_to_temperature_frozen_fraction(
     construction: four warmer zero rows, the first observed frozen row rounded
     to 0.1 C, then regular thresholds using an exact temperature band before
     carrying forward the warm-side maximum frozen count.
+    By default, only the cooling phase is used: rows after each sample/cycle's
+    coldest observed temperature are dropped before threshold reduction, so
+    post-run warm-up cannot be re-counted at already-visited temperatures.
     Cycle selection is handled by ``read_counts``. If a table was read with
     ``cycle_policy="pooled"``, this function reduces each cycle first, then sums
     n_frozen/n_total across cycles on the temperature-threshold grid. Dict and
@@ -280,6 +286,7 @@ def counts_to_temperature_frozen_fraction(
             step_C=step_C,
             method=method,
             temperature_tolerance_C=temperature_tolerance_C,
+            cooling_only=cooling_only,
         ),
     )
 
@@ -290,6 +297,7 @@ def _counts_to_temperature_frozen_fraction_one(
     step_C: float,
     method: TemperatureReductionMethod,
     temperature_tolerance_C: float,
+    cooling_only: bool,
 ) -> TemperatureFrozenFractionTable:
     if not isinstance(counts, CountsTable):
         raise TypeError("counts must be a CountsTable")
@@ -301,6 +309,8 @@ def _counts_to_temperature_frozen_fraction_one(
         raise ValueError("temperature_tolerance_C cannot be negative")
 
     reduction_label = f"cold_threshold_{method}_tol_{temperature_tolerance_C:g}C"
+    if cooling_only:
+        reduction_label += "_cooling_only"
     df = counts.to_dataframe()
     if df.empty:
         empty_table = _empty_temperature_frozen_fraction(
@@ -314,6 +324,7 @@ def _counts_to_temperature_frozen_fraction_one(
                     step_C,
                     method,
                     temperature_tolerance_C,
+                    cooling_only,
                 ),
                 source_sample_ids=tuple(pd.Series(counts.sample_id).astype(str).unique()),
             ),
@@ -333,6 +344,7 @@ def _counts_to_temperature_frozen_fraction_one(
                     step_C,
                     method,
                     temperature_tolerance_C,
+                    cooling_only,
                 ),
                 source_sample_ids=tuple(pd.Series(counts.sample_id).astype(str).unique()),
             ),
@@ -350,6 +362,8 @@ def _counts_to_temperature_frozen_fraction_one(
                 f"cycle_policy='single' or 'preserve'). Available cycles: {available}"
             )
         selected_df = df.drop(columns="_ufolaf_cycle_key")
+        if cooling_only:
+            selected_df = _cooling_phase_counts_dataframe(selected_df)
         return _counts_dataframe_to_temperature_frozen_fraction(
             selected_df,
             step_C=step_C,
@@ -364,34 +378,40 @@ def _counts_to_temperature_frozen_fraction_one(
                     step_C,
                     method,
                     temperature_tolerance_C,
+                    cooling_only,
                 ),
                 source_sample_ids=_table_sample_ids_from_dataframe(selected_df),
                 source_cycles=tuple(cycle_keys),
             ),
         )
 
-    cycle_tables = [
-        _counts_dataframe_to_temperature_frozen_fraction(
-            cycle_df,
-            step_C=step_C,
-            method=method,
-            temperature_tolerance_C=temperature_tolerance_C,
-            temperature_bin_method=reduction_label,
-            metadata=counts.metadata,
-            processing_metadata=processing_metadata_for(
-                "fraction_frozen",
-                inputs=(counts,),
-                parameters=_fraction_frozen_parameters(
-                    step_C,
-                    method,
-                    temperature_tolerance_C,
-                ),
-                source_sample_ids=_table_sample_ids_from_dataframe(cycle_df),
-                source_cycles=(cycle_key,),
-            ),
+    cycle_tables = []
+    for cycle_key, cycle_df in _iter_cycle_dataframes(df):
+        reduced_cycle_df = (
+            _cooling_phase_counts_dataframe(cycle_df) if cooling_only else cycle_df
         )
-        for cycle_key, cycle_df in _iter_cycle_dataframes(df)
-    ]
+        cycle_tables.append(
+            _counts_dataframe_to_temperature_frozen_fraction(
+                reduced_cycle_df,
+                step_C=step_C,
+                method=method,
+                temperature_tolerance_C=temperature_tolerance_C,
+                temperature_bin_method=reduction_label,
+                metadata=counts.metadata,
+                processing_metadata=processing_metadata_for(
+                    "fraction_frozen",
+                    inputs=(counts,),
+                    parameters=_fraction_frozen_parameters(
+                        step_C,
+                        method,
+                        temperature_tolerance_C,
+                        cooling_only,
+                    ),
+                    source_sample_ids=_table_sample_ids_from_dataframe(reduced_cycle_df),
+                    source_cycles=(cycle_key,),
+                ),
+            )
+        )
     return _pool_temperature_frozen_fraction_tables(
         cycle_tables,
         step_C=step_C,
@@ -399,6 +419,44 @@ def _counts_to_temperature_frozen_fraction_one(
         metadata=counts.metadata,
         source_counts=counts,
     )
+
+
+def _cooling_phase_counts_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Return count rows through each sample's coldest observation."""
+
+    if df.empty:
+        return df.copy()
+    frames = [
+        _cooling_phase_sample_counts(sample_df)
+        for _, sample_df in df.groupby("sample_id", sort=False)
+    ]
+    return pd.concat(frames, ignore_index=True) if frames else df.iloc[0:0].copy()
+
+
+def _cooling_phase_sample_counts(sample_df: pd.DataFrame) -> pd.DataFrame:
+    if sample_df.empty:
+        return sample_df.copy()
+    time_values = (
+        pd.to_numeric(sample_df["time_s"], errors="coerce").to_numpy(dtype=float)
+        if "time_s" in sample_df
+        else np.array([], dtype=float)
+    )
+    if time_values.size and np.isfinite(time_values).any():
+        ordered = sample_df.sort_values(
+            ["time_s", "temperature_C"],
+            ascending=[True, False],
+        )
+    else:
+        ordered = sample_df.copy()
+    ordered = ordered.reset_index(drop=True)
+    temperatures = pd.to_numeric(ordered["temperature_C"], errors="coerce")
+    valid_positions = np.flatnonzero(np.isfinite(temperatures.to_numpy(dtype=float)))
+    if valid_positions.size == 0:
+        return ordered.iloc[0:0].copy()
+    valid_temperatures = temperatures.iloc[valid_positions].to_numpy(dtype=float)
+    coldest_valid_offset = int(np.argmin(valid_temperatures))
+    coldest_position = int(valid_positions[coldest_valid_offset])
+    return ordered.iloc[: coldest_position + 1].copy()
 
 
 def _counts_dataframe_to_temperature_frozen_fraction(

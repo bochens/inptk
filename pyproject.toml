@@ -1,26 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "olaf"
+name = "ufolaf"
 version = "0.1.0"
-description = "OpenSource Library for Automating Freezing data acquisition from Ice Nucleation Spectrometer (OLAF DaQ INS)"
+description = "UFOLAF analysis tools for ice nucleating particle freezing assays"
 authors = [
-    {name = "SiGran", email = "simongrannetia@gmail.com"}
+    {name = "UFOLAF contributors"}
 ]
-license = "AGPL-3.0"
+license = {text = "AGPL-3.0"}
 readme = "README.md"
-keywords = ["freezing", "data acquisition", "spectrometer"]
+keywords = ["freezing", "ice nucleation", "INP", "Icescopy", "OLAF"]
 
 
 requires-python = ">=3.11.0"
 dependencies = [
-    "matplotlib>=3.10.3",
     "numpy>=2.0.0",
     "pandas>=2.2.3",
 ]
 
+[project.scripts]
+ufolaf = "ufolaf.cli:main"
+
 [project.urls]
-"Repository" = "https://github.com/SiGran/OLAF"
+"Repository" = "https://github.com/bochens/UFOLAF"
+"Wiki" = "https://github.com/bochens/UFOLAF/wiki"
 
 [project.optional-dependencies]
+plot = [
+    "matplotlib>=3.10.3",
+]
 dev = [
     "ruff>=0.5.6",
     "pre-commit>=3.8.0",
@@ -31,6 +41,9 @@ dev = [
     "sphinx-autoapi>=3.2.1",
 ]
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.ruff]
 line-length = 100
 
@@ -39,6 +52,7 @@ extend-select = ["I", "F", "E", "W"]
 
 [tool.pytest.ini_options]
 testpaths = "tests"
+pythonpath = "src"
 
 [tool.bandit]
 exclude = ["tests"]

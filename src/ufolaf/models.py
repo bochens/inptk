@@ -90,7 +90,15 @@ def _optional_int(value: Any) -> int | None:
 
 def _normalize_sample_type(value: Any) -> SampleType:
     text = _text_or_empty(value).casefold()
-    return text if text in SAMPLE_TYPES else "other"  # type: ignore[return-value]
+    if not text:
+        return "other"
+    if text in SAMPLE_TYPES:
+        return text  # type: ignore[return-value]
+    raise ValueError(
+        f"Unknown sample_type {value!r}. Use 'air' for aerosol/filter samples normalized "
+        "by sampled air volume, 'soil' for dry-soil normalization, or 'other' for "
+        "suspension units."
+    )
 
 
 @dataclass(frozen=True)
@@ -700,6 +708,28 @@ class DifferentialNucleusSpectrumTable(TemperatureDependentTable):
         data = _spectrum_dataframe(self)
         data["basis"] = _basis_column(self.basis, len(self.value))
         return data
+
+    @classmethod
+    def from_dataframe(
+        cls,
+        df: pd.DataFrame,
+        *,
+        value_unit: str | None = None,
+        basis: SpectrumBasis | Any = "suspension",
+        metadata: MetadataLike = None,
+        processing_metadata: ProcessingMetadata | None = None,
+    ) -> DifferentialNucleusSpectrumTable:
+        return cls(
+            **_temperature_kwargs_from_dataframe(df),
+            value=df["value"].to_numpy(dtype=float),
+            value_unit=_value_unit_from_dataframe(df, value_unit),
+            basis=_basis_from_dataframe(df, basis),
+            lower_ci=df["lower_ci"].to_numpy(dtype=float) if "lower_ci" in df else None,
+            upper_ci=df["upper_ci"].to_numpy(dtype=float) if "upper_ci" in df else None,
+            qc_flag=df["qc_flag"].to_numpy(dtype=int) if "qc_flag" in df else None,
+            metadata=metadata,
+            processing_metadata=processing_metadata,
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

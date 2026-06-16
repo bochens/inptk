@@ -167,7 +167,6 @@ cython_debug/
 .pre-commit-config.yaml
 uv.lock
 docs/
-tests/
 olaf/
 notebook/
 tmp/

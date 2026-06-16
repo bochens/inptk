@@ -9,7 +9,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from ufolaf_models import (
+from .models import (
     CountsTable,
     SampleMetadata,
     TemperatureFrozenFractionTable,
