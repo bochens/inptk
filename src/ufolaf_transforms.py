@@ -33,7 +33,9 @@ from ufolaf_models import (
 )
 
 
-TemperatureReductionMethod = Literal["max", "latest"]
+TemperatureReductionMethod = Literal["max", "latest", "olaf"]
+MleMaskMode = Literal["drop_rows", "rebase_counts"]
+MLE_MASK_MODES = {"drop_rows", "rebase_counts"}
 OLAF_AGRESTI_COULL_UNCERTAIN_VALUES = 2
 TableSequence = list[Any] | tuple[Any, ...]
 TableMapping = dict[str, Any]
@@ -255,6 +257,10 @@ def counts_to_temperature_frozen_fraction(
     threshold while preserving paired n_total/n_frozen counts.
     ``method="latest"`` uses the first observed row after crossing the threshold
     and does not force monotonicity.
+    ``method="olaf"`` follows legacy OLAF's frozen-at-temperature table
+    construction: four warmer zero rows, the first observed frozen row rounded
+    to 0.1 C, then regular thresholds using an exact temperature band before
+    carrying forward the warm-side maximum frozen count.
     Cycle selection is handled by ``read_counts``. If a table was read with
     ``cycle_policy="pooled"``, this function reduces each cycle first, then sums
     n_frozen/n_total across cycles on the temperature-threshold grid. Dict and
@@ -287,8 +293,10 @@ def _counts_to_temperature_frozen_fraction_one(
 ) -> TemperatureFrozenFractionTable:
     if not isinstance(counts, CountsTable):
         raise TypeError("counts must be a CountsTable")
-    if method not in ("max", "latest"):
-        raise ValueError("method must be 'max' or 'latest'")
+    if method not in ("max", "latest", "olaf"):
+        raise ValueError("method must be 'max', 'latest', or 'olaf'")
+    if step_C <= 0:
+        raise ValueError("step_C must be positive")
     if temperature_tolerance_C < 0:
         raise ValueError("temperature_tolerance_C cannot be negative")
 
@@ -470,6 +478,14 @@ def _sample_counts_to_temperature_thresholds(
         sample_df = sample_df.sort_values("temperature_C", ascending=False)
     sample_df = sample_df.reset_index(drop=True)
 
+    if method == "olaf":
+        return _sample_counts_to_olaf_temperature_thresholds(
+            sample_id,
+            sample_df,
+            step_C=step_C,
+            temperature_tolerance_C=temperature_tolerance_C,
+        )
+
     thresholds = temperature_thresholds(sample_df["temperature_C"].to_numpy(dtype=float), step_C)
     if thresholds.size == 0:
         return pd.DataFrame()
@@ -503,6 +519,136 @@ def _sample_counts_to_temperature_thresholds(
         )
         previous_observation_count = int(observed_positions.size)
     return pd.DataFrame.from_records(rows)
+
+
+def _sample_counts_to_olaf_temperature_thresholds(
+    sample_id: Any,
+    sample_df: pd.DataFrame,
+    *,
+    step_C: float,
+    temperature_tolerance_C: float,
+) -> pd.DataFrame:
+    temperatures = sample_df["temperature_C"].to_numpy(dtype=float, copy=True)
+    n_total = sample_df["n_total"].to_numpy(dtype=float, copy=True)
+    n_frozen = sample_df["n_frozen"].to_numpy(dtype=float, copy=True)
+    if temperatures.size == 0:
+        return pd.DataFrame()
+
+    positive_positions = np.flatnonzero(n_frozen > 0)
+    if positive_positions.size == 0:
+        return _sample_counts_to_olaf_zero_thresholds(
+            sample_id,
+            temperatures=temperatures,
+            n_total=n_total,
+            step_C=step_C,
+        )
+
+    first_frozen_position = int(positive_positions[0])
+    first_frozen_temperature = round(float(temperatures[first_frozen_position]), 1)
+    first_threshold = float(np.ceil(first_frozen_temperature / step_C) * step_C)
+    coldest_temperature = float(np.min(temperatures))
+
+    rows: list[dict[str, Any]] = []
+    warm_total = n_total[first_frozen_position]
+    for offset in range(4, 0, -1):
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "temperature_C": first_threshold + offset * step_C,
+                "n_total": warm_total,
+                "n_frozen": 0.0,
+                "obs_count": 1,
+            }
+        )
+
+    rows.append(
+        {
+            "sample_id": sample_id,
+            "temperature_C": first_frozen_temperature,
+            "n_total": n_total[first_frozen_position],
+            "n_frozen": n_frozen[first_frozen_position],
+            "obs_count": 1,
+        }
+    )
+
+    threshold = first_threshold
+    while threshold - step_C > coldest_temperature:
+        threshold -= step_C
+        selected_position = _olaf_threshold_position(
+            temperatures,
+            n_frozen,
+            threshold=threshold,
+            temperature_tolerance_C=temperature_tolerance_C,
+        )
+        if selected_position is None:
+            continue
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "temperature_C": float(threshold),
+                "n_total": n_total[selected_position],
+                "n_frozen": n_frozen[selected_position],
+                "obs_count": 1,
+            }
+        )
+
+    return pd.DataFrame.from_records(rows)
+
+
+def _sample_counts_to_olaf_zero_thresholds(
+    sample_id: Any,
+    *,
+    temperatures: np.ndarray,
+    n_total: np.ndarray,
+    step_C: float,
+) -> pd.DataFrame:
+    thresholds = temperature_thresholds(temperatures, step_C)
+    if thresholds.size == 0:
+        return pd.DataFrame()
+    warm_total = n_total[0]
+    return pd.DataFrame.from_records(
+        {
+            "sample_id": sample_id,
+            "temperature_C": float(threshold),
+            "n_total": warm_total,
+            "n_frozen": 0.0,
+            "obs_count": 1,
+        }
+        for threshold in thresholds
+    )
+
+
+def _olaf_threshold_position(
+    temperatures: np.ndarray,
+    n_frozen: np.ndarray,
+    *,
+    threshold: float,
+    temperature_tolerance_C: float,
+) -> int | None:
+    exact_band_positions = np.flatnonzero(
+        (temperatures > threshold - temperature_tolerance_C)
+        & (temperatures < threshold + temperature_tolerance_C)
+    )
+    selected = _olaf_latest_max_count_position(n_frozen, exact_band_positions)
+    if selected is not None:
+        return selected
+
+    warm_side_positions = np.flatnonzero(temperatures > threshold + temperature_tolerance_C)
+    return _olaf_latest_max_count_position(n_frozen, warm_side_positions)
+
+
+def _olaf_latest_max_count_position(
+    n_frozen: np.ndarray,
+    positions: np.ndarray,
+) -> int | None:
+    if positions.size == 0:
+        return None
+    window = n_frozen[positions]
+    finite = np.isfinite(window)
+    if not finite.any():
+        return int(positions[-1])
+    max_count = np.max(window[finite])
+    return int(positions[np.flatnonzero(finite & (window == max_count))[-1]])
 
 
 def _latest_fraction_max_position(fraction: np.ndarray, positions: np.ndarray) -> int:
@@ -1001,6 +1147,7 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
     enforce_monotone: bool = False,
     confidence_drop: float = PROFILE_LIKELIHOOD_DROP_95,
     temperature_eligibility_C: Mapping[Any, float] | None = None,
+    mask_mode: MleMaskMode | None = None,
     dilution_likelihood_weights: Mapping[Any, float] | None = None,
     dilution_action_counts: Mapping[Any, float] | None = None,
     action_weight_lambda: float | None = None,
@@ -1026,9 +1173,16 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
     widths, not absolute limits.
 
     ``temperature_eligibility_C`` maps dilution fold to the warmest temperature
-    that dilution is allowed to contribute. For example ``{169: -20.0}`` keeps
-    dilution 169 only at ``T <= -20 C``. ``dilution_likelihood_weights`` maps
-    dilution fold to direct likelihood weights. Alternatively,
+    that dilution is allowed to contribute. For example ``{169: -20.0}`` applies
+    the selected ``mask_mode`` to dilution 169 above ``-20 C``. ``mask_mode`` is
+    required when ``temperature_eligibility_C`` is passed. ``"drop_rows"`` keeps
+    the previous behavior: warmer rows are omitted, but retained colder rows keep
+    their original cumulative frozen counts. ``"rebase_counts"`` also omits the
+    warmer rows, then subtracts the warm-side cumulative frozen baseline from
+    retained rows and removes those wells from ``n_total``. Use ``"rebase_counts"``
+    when the warm-side events are treated as contamination rather than true
+    original-sample INPs. ``dilution_likelihood_weights`` maps dilution fold to
+    direct likelihood weights. Alternatively,
     ``dilution_action_counts`` can be combined with ``action_weight_lambda`` or
     ``action_weight_half_life`` to compute exponential action-decay weights.
     """
@@ -1038,6 +1192,7 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
         enforce_monotone=enforce_monotone,
         confidence_drop=confidence_drop,
         temperature_eligibility_C=temperature_eligibility_C,
+        mask_mode=mask_mode,
         dilution_likelihood_weights=dilution_likelihood_weights,
         dilution_action_counts=dilution_action_counts,
         action_weight_lambda=action_weight_lambda,
@@ -1054,6 +1209,7 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
                 enforce_monotone=enforce_monotone,
                 confidence_drop=confidence_drop,
                 temperature_eligibility_C=temperature_eligibility_C,
+                mask_mode=mask_mode,
                 dilution_likelihood_weights=dilution_likelihood_weights,
                 dilution_action_counts=dilution_action_counts,
                 action_weight_lambda=action_weight_lambda,
@@ -1091,6 +1247,7 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
         source_df,
         metadata_by_sample_id,
         temperature_eligibility_C,
+        mask_mode,
     )
     source_df["mle_likelihood_weight"] = _mle_likelihood_weights(
         source_df,
@@ -1511,6 +1668,7 @@ def _mle_processing_parameters(
     enforce_monotone: bool,
     confidence_drop: float,
     temperature_eligibility_C: Mapping[Any, float] | None,
+    mask_mode: MleMaskMode | None,
     dilution_likelihood_weights: Mapping[Any, float] | None,
     dilution_action_counts: Mapping[Any, float] | None,
     action_weight_lambda: float | None,
@@ -1531,16 +1689,20 @@ def _mle_processing_parameters(
         action_weight_half_life,
         require=dilution_action_counts is not None,
     )
+    temperature_eligibility = _normalize_numeric_mapping(
+        temperature_eligibility_C,
+        name="temperature_eligibility_C",
+    )
+    resolved_mask_mode = _resolve_mle_mask_mode(
+        mask_mode,
+        temperature_eligibility_C=temperature_eligibility_C,
+    )
     return {
         "sample_group_by": _sample_group_by_parameter(sample_group_by),
         "enforce_monotone": enforce_monotone,
         "confidence_drop": confidence_drop,
-        "temperature_eligibility_C": _plain_processing_value(
-            _normalize_numeric_mapping(
-                temperature_eligibility_C,
-                name="temperature_eligibility_C",
-            )
-        ),
+        "temperature_eligibility_C": _plain_processing_value(temperature_eligibility),
+        "mask_mode": resolved_mask_mode,
         "dilution_likelihood_weights": _plain_processing_value(
             _normalize_numeric_mapping(
                 dilution_likelihood_weights,
@@ -1564,6 +1726,7 @@ def _apply_mle_temperature_eligibility(
     source_df: pd.DataFrame,
     metadata_by_sample_id: dict[str, SampleMetadata],
     temperature_eligibility_C: Mapping[Any, float] | None,
+    mask_mode: MleMaskMode | None,
 ) -> pd.DataFrame:
     eligibility = _normalize_numeric_mapping(
         temperature_eligibility_C,
@@ -1571,13 +1734,17 @@ def _apply_mle_temperature_eligibility(
     )
     if not eligibility or source_df.empty:
         return source_df
+    resolved_mask_mode = _resolve_mle_mask_mode(
+        mask_mode,
+        temperature_eligibility_C=temperature_eligibility_C,
+    )
 
-    keep: list[bool] = []
-    for _, row in source_df.iterrows():
-        sample_id = str(row["source_sample_id"])
+    frames: list[pd.DataFrame] = []
+    for sample_id, sample_df in source_df.groupby("source_sample_id", sort=False):
+        source_sample_id = str(sample_id)
         dilution = _metadata_dilution(
-            metadata_by_sample_id[sample_id],
-            sample_id,
+            metadata_by_sample_id[source_sample_id],
+            source_sample_id,
             context="temperature_eligibility_C",
         )
         warmest_allowed = _mapped_dilution_value(
@@ -1586,11 +1753,132 @@ def _apply_mle_temperature_eligibility(
             default=None,
             name="temperature_eligibility_C",
         )
-        keep.append(
-            warmest_allowed is None
-            or float(row["temperature_C"]) <= float(warmest_allowed)
+        if warmest_allowed is None:
+            frames.append(sample_df.copy())
+            continue
+
+        kept_mask = sample_df["temperature_C"].astype(float) <= float(warmest_allowed)
+        if resolved_mask_mode == "drop_rows":
+            frames.append(sample_df.loc[kept_mask].copy())
+            continue
+        if resolved_mask_mode == "rebase_counts":
+            frames.append(
+                _rebase_mle_masked_counts(
+                    sample_df,
+                    kept_mask,
+                    source_sample_id=source_sample_id,
+                    warmest_allowed=float(warmest_allowed),
+                )
+            )
+            continue
+        raise AssertionError(f"Unhandled MLE mask mode: {resolved_mask_mode!r}")
+
+    if not frames:
+        return source_df.iloc[0:0].copy()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _resolve_mle_mask_mode(
+    mask_mode: MleMaskMode | None,
+    *,
+    temperature_eligibility_C: Mapping[Any, float] | None,
+) -> MleMaskMode | None:
+    if temperature_eligibility_C is None:
+        if mask_mode is not None:
+            raise ValueError("mask_mode requires temperature_eligibility_C")
+        return None
+    if mask_mode is None:
+        raise ValueError(
+            "mask_mode is required when temperature_eligibility_C is passed; "
+            "use 'drop_rows' or 'rebase_counts'"
         )
-    return source_df.loc[np.array(keep, dtype=bool)].copy()
+    if mask_mode not in MLE_MASK_MODES:
+        raise ValueError("mask_mode must be 'drop_rows' or 'rebase_counts'")
+    return mask_mode
+
+
+def _rebase_mle_masked_counts(
+    sample_df: pd.DataFrame,
+    kept_mask: pd.Series,
+    *,
+    source_sample_id: str,
+    warmest_allowed: float,
+) -> pd.DataFrame:
+    kept_df = sample_df.loc[kept_mask].copy()
+    if kept_df.empty:
+        return kept_df
+
+    masked_df = sample_df.loc[~kept_mask]
+    if masked_df.empty:
+        return kept_df
+
+    masked_temperatures = masked_df["temperature_C"].to_numpy(dtype=float, copy=True)
+    coldest_masked_temperature = float(np.min(masked_temperatures))
+    coldest_masked = np.isclose(
+        masked_temperatures,
+        coldest_masked_temperature,
+        rtol=0.0,
+        atol=1e-12,
+    )
+    baseline = float(
+        masked_df.loc[coldest_masked, "n_frozen"].to_numpy(dtype=float, copy=True).max()
+    )
+    if not np.isfinite(baseline):
+        raise ValueError(
+            f"Cannot rebase MLE temperature mask for sample {source_sample_id!r}: "
+            "masked n_frozen values must be finite"
+        )
+    if baseline < 0:
+        raise ValueError(
+            f"Cannot rebase MLE temperature mask for sample {source_sample_id!r}: "
+            "masked n_frozen baseline cannot be negative"
+        )
+    if baseline == 0:
+        return kept_df
+
+    original_frozen = kept_df["n_frozen"].to_numpy(dtype=float, copy=True)
+    original_total = kept_df["n_total"].to_numpy(dtype=float, copy=True)
+    tolerance = 1e-9
+    nonmonotone = (original_total > baseline + tolerance) & (
+        original_frozen < baseline - tolerance
+    )
+    if np.any(nonmonotone):
+        raise ValueError(
+            f"Cannot rebase MLE temperature mask for sample {source_sample_id!r}: "
+            f"kept cumulative n_frozen falls below the masked baseline above "
+            f"{warmest_allowed:g} C"
+        )
+
+    rebasable = (original_total > baseline + tolerance) & (
+        original_frozen >= baseline - tolerance
+    )
+    if not np.any(rebasable):
+        return kept_df.iloc[0:0].copy()
+    if not np.all(rebasable):
+        kept_df = kept_df.loc[rebasable].copy()
+        original_frozen = original_frozen[rebasable]
+        original_total = original_total[rebasable]
+
+    rebased_frozen = original_frozen - baseline
+    rebased_total = original_total - baseline
+    if np.any(rebased_frozen < -tolerance):
+        raise ValueError(
+            f"Cannot rebase MLE temperature mask for sample {source_sample_id!r}: "
+            f"kept cumulative n_frozen falls below the masked baseline above "
+            f"{warmest_allowed:g} C"
+        )
+    if np.any(rebased_frozen > rebased_total + tolerance):
+        raise ValueError(
+            f"Cannot rebase MLE temperature mask for sample {source_sample_id!r}: "
+            "rebased n_frozen exceeds rebased n_total"
+        )
+
+    rebased_frozen = np.where(np.abs(rebased_frozen) <= tolerance, 0.0, rebased_frozen)
+    kept_df["n_frozen"] = rebased_frozen
+    kept_df["n_total"] = rebased_total
+    if "fraction_frozen" in kept_df.columns:
+        kept_df["fraction_frozen"] = kept_df["n_frozen"] / kept_df["n_total"]
+    return kept_df
 
 
 def _mle_likelihood_weights(
