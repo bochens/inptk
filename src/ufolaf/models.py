@@ -90,7 +90,15 @@ def _optional_int(value: Any) -> int | None:
 
 def _normalize_sample_type(value: Any) -> SampleType:
     text = _text_or_empty(value).casefold()
-    return text if text in SAMPLE_TYPES else "other"  # type: ignore[return-value]
+    if not text:
+        return "other"
+    if text in SAMPLE_TYPES:
+        return text  # type: ignore[return-value]
+    raise ValueError(
+        f"Unknown sample_type {value!r}. Use 'air' for aerosol/filter samples normalized "
+        "by sampled air volume, 'soil' for dry-soil normalization, or 'other' for "
+        "suspension units."
+    )
 
 
 @dataclass(frozen=True)

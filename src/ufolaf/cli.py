@@ -181,8 +181,15 @@ def _add_pipeline_command(subcommands: argparse._SubParsersAction) -> None:
 
 def _add_fraction_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--step-C", type=float, default=0.5)
-    parser.add_argument("--method", choices=("max", "latest"), default="max")
-    parser.add_argument("--temperature-tolerance-C", type=float, default=0.0)
+    parser.add_argument("--method", choices=("max", "latest", "olaf"), default="max")
+    parser.add_argument("--temperature-tolerance-C", type=float)
+    parser.add_argument(
+        "--include-warming",
+        dest="cooling_only",
+        action="store_false",
+        default=True,
+        help="Include rows after the coldest observation instead of using cooling-only counts",
+    )
 
 
 def _add_overwrite(parser: argparse.ArgumentParser) -> None:
@@ -211,7 +218,8 @@ def _cmd_fraction(args: argparse.Namespace) -> None:
         read_artifact(args.input),
         step_C=args.step_C,
         method=args.method,
-        temperature_tolerance_C=args.temperature_tolerance_C,
+        temperature_tolerance_C=_resolved_temperature_tolerance_C(args),
+        cooling_only=args.cooling_only,
     )
     write_artifact(fraction, args.out, overwrite=args.overwrite)
 
@@ -289,7 +297,8 @@ def _cmd_pipeline(args: argparse.Namespace) -> None:
         counts,
         step_C=args.step_C,
         method=args.method,
-        temperature_tolerance_C=args.temperature_tolerance_C,
+        temperature_tolerance_C=_resolved_temperature_tolerance_C(args),
+        cooling_only=args.cooling_only,
         combine=args.combine,
         sample_group_by=_sample_group_by(args.sample_group_by),
         enforce_monotone=args.enforce_monotone,
@@ -304,6 +313,14 @@ def _read_table_source(path: str) -> pd.DataFrame | str:
     if input_path.suffix.lower() in {".csv", ".txt"}:
         return str(input_path)
     return pd.read_csv(input_path)
+
+
+def _resolved_temperature_tolerance_C(args: argparse.Namespace) -> float:
+    if args.temperature_tolerance_C is not None:
+        return args.temperature_tolerance_C
+    if args.method == "olaf":
+        return 0.01
+    return 0.0
 
 
 def _load_columns(value: str | None) -> dict[str, str] | None:

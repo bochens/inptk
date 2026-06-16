@@ -560,6 +560,8 @@ def _subtract_filter_blank_table(
     error_signal: float,
     clamp_zero: bool,
 ) -> NormalizedInpSpectrumTable:
+    _require_suspension_normalized_table(sample, name="sample")
+    _require_suspension_normalized_table(blank, name="blank")
     sample_df = _prepare_spectrum_frame(sample, name="sample")
     blank = _blank_with_required_temperatures(
         blank,
@@ -631,6 +633,23 @@ def _subtract_filter_blank_table(
                 "basis": "suspension",
             },
         ),
+    )
+
+
+def _require_suspension_normalized_table(
+    spectrum: NormalizedInpSpectrumTable,
+    *,
+    name: str,
+) -> None:
+    frame = spectrum.to_dataframe()
+    basis = _single_text(frame, "basis", name=f"{name} spectrum")
+    value_unit = _single_text(frame, "value_unit", name=f"{name} spectrum")
+    if basis == "suspension" and value_unit == "INP_per_mL_suspension":
+        return
+    raise ValueError(
+        "Filter blank correction must be applied to INP_per_mL_suspension spectra "
+        "before sample-basis normalization. Pass CumulativeNucleusSpectrumTable inputs "
+        "to subtract_filter_blank_spectrum(), then call normalize_spec()."
     )
 
 

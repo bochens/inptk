@@ -283,6 +283,7 @@ def binomial_poisson_log_likelihood(
     well_volume_uL: float,
     dilution: Any = 1.0,
     *,
+    likelihood_weight: Any = 1.0,
     include_binomial_constant: bool = False,
 ) -> float:
     """Return binomial log-likelihood for frozen counts under Poisson occupancy.
@@ -294,11 +295,17 @@ def binomial_poisson_log_likelihood(
 
     By default the binomial coefficient is omitted because it does not depend on
     K and therefore cancels for maximum likelihood estimation and profile
-    likelihood confidence intervals.
+    likelihood confidence intervals. ``likelihood_weight`` raises each row's
+    likelihood contribution to that power; weights less than 1 discount rows.
     """
 
     concentration = _scalar_nonnegative_concentration(inp_per_mL, name="inp_per_mL")
-    frozen, total, dilution_array = _count_likelihood_arrays(n_frozen, n_total, dilution)
+    frozen, total, dilution_array, weight = _weighted_count_likelihood_arrays(
+        n_frozen,
+        n_total,
+        dilution,
+        likelihood_weight,
+    )
     occupancy = _poisson_occupancy_mean(concentration, well_volume_uL, dilution_array)
     unfrozen = total - frozen
     log_frozen_probability = _log_one_minus_exp_neg(occupancy)
@@ -311,9 +318,9 @@ def binomial_poisson_log_likelihood(
     unfrozen_term[unfrozen_mask] = (
         unfrozen[unfrozen_mask] * log_unfrozen_probability[unfrozen_mask]
     )
-    loglike = float(np.sum(frozen_term + unfrozen_term))
+    loglike = float(np.sum(weight * (frozen_term + unfrozen_term)))
     if include_binomial_constant:
-        loglike += _binomial_log_constant(frozen, total)
+        loglike += _binomial_log_constant(frozen, total, weight)
     return loglike
 
 
@@ -323,12 +330,18 @@ def binomial_poisson_mle_inp_per_ml(
     well_volume_uL: float,
     dilution: Any = 1.0,
     *,
+    likelihood_weight: Any = 1.0,
     relative_tolerance: float = 1e-10,
     max_iterations: int = 200,
 ) -> float:
     """Return the MLE of K(T), expressed as INP/mL original suspension."""
 
-    frozen, total, dilution_array = _count_likelihood_arrays(n_frozen, n_total, dilution)
+    frozen, total, dilution_array, weight = _weighted_count_likelihood_arrays(
+        n_frozen,
+        n_total,
+        dilution,
+        likelihood_weight,
+    )
     _validate_likelihood_options(relative_tolerance, max_iterations)
     occupancy_scale = _occupancy_scale(well_volume_uL, dilution_array)
     unfrozen = total - frozen
@@ -339,7 +352,7 @@ def binomial_poisson_mle_inp_per_ml(
 
     high = _initial_upper_inp_per_ml(frozen, total, well_volume_uL, dilution_array)
     for _ in range(max_iterations):
-        if _binomial_poisson_score(high, frozen, total, occupancy_scale) <= 0:
+        if _binomial_poisson_score(high, frozen, total, occupancy_scale, weight) <= 0:
             break
         high *= 2.0
     else:
@@ -348,7 +361,7 @@ def binomial_poisson_mle_inp_per_ml(
     low = 0.0
     for _ in range(max_iterations):
         midpoint = (low + high) / 2.0
-        if _binomial_poisson_score(midpoint, frozen, total, occupancy_scale) > 0:
+        if _binomial_poisson_score(midpoint, frozen, total, occupancy_scale, weight) > 0:
             low = midpoint
         else:
             high = midpoint
@@ -363,6 +376,7 @@ def binomial_poisson_profile_ci_inp_per_ml(
     well_volume_uL: float,
     dilution: Any = 1.0,
     *,
+    likelihood_weight: Any = 1.0,
     confidence_drop: float = PROFILE_LIKELIHOOD_DROP_95,
     relative_tolerance: float = 1e-10,
     max_iterations: int = 200,
@@ -374,7 +388,12 @@ def binomial_poisson_profile_ci_inp_per_ml(
     (= chi-square_0.95,df=1 / 2).
     """
 
-    frozen, total, dilution_array = _count_likelihood_arrays(n_frozen, n_total, dilution)
+    frozen, total, dilution_array, weight = _weighted_count_likelihood_arrays(
+        n_frozen,
+        n_total,
+        dilution,
+        likelihood_weight,
+    )
     _validate_likelihood_options(relative_tolerance, max_iterations)
     if confidence_drop <= 0:
         raise ValueError("confidence_drop must be positive")
@@ -384,6 +403,7 @@ def binomial_poisson_profile_ci_inp_per_ml(
         total,
         well_volume_uL,
         dilution_array,
+        likelihood_weight=weight,
         relative_tolerance=relative_tolerance,
         max_iterations=max_iterations,
     )
@@ -393,6 +413,7 @@ def binomial_poisson_profile_ci_inp_per_ml(
         total,
         well_volume_uL,
         dilution_array,
+        likelihood_weight=weight,
     )
     target = loglike_hat - confidence_drop
 
@@ -403,6 +424,7 @@ def binomial_poisson_profile_ci_inp_per_ml(
             total,
             well_volume_uL,
             dilution_array,
+            weight,
             relative_tolerance=relative_tolerance,
             max_iterations=max_iterations,
         )
@@ -415,6 +437,7 @@ def binomial_poisson_profile_ci_inp_per_ml(
             total,
             well_volume_uL,
             dilution_array,
+            weight,
             relative_tolerance=relative_tolerance,
             max_iterations=max_iterations,
         )
@@ -428,6 +451,7 @@ def binomial_poisson_profile_ci_inp_per_ml(
         total,
         well_volume_uL,
         dilution_array,
+        weight,
         relative_tolerance=relative_tolerance,
         max_iterations=max_iterations,
     )
@@ -441,6 +465,7 @@ def binomial_poisson_profile_ci_inp_per_ml(
                 total,
                 well_volume_uL,
                 dilution_array,
+                likelihood_weight=weight,
             )
             <= target
         ):
@@ -456,6 +481,7 @@ def binomial_poisson_profile_ci_inp_per_ml(
         total,
         well_volume_uL,
         dilution_array,
+        weight,
         relative_tolerance=relative_tolerance,
         max_iterations=max_iterations,
     )
@@ -468,6 +494,7 @@ def binomial_poisson_mle_with_profile_errors(
     well_volume_uL: float,
     dilution: Any = 1.0,
     *,
+    likelihood_weight: Any = 1.0,
     confidence_drop: float = PROFILE_LIKELIHOOD_DROP_95,
     relative_tolerance: float = 1e-10,
     max_iterations: int = 200,
@@ -479,6 +506,7 @@ def binomial_poisson_mle_with_profile_errors(
         n_total,
         well_volume_uL,
         dilution,
+        likelihood_weight=likelihood_weight,
         confidence_drop=confidence_drop,
         relative_tolerance=relative_tolerance,
         max_iterations=max_iterations,
@@ -640,6 +668,30 @@ def _count_likelihood_arrays(
     return frozen, total, dilution_array
 
 
+def _weighted_count_likelihood_arrays(
+    n_frozen: Any,
+    n_total: Any,
+    dilution: Any,
+    likelihood_weight: Any,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    frozen, total, dilution_array = _count_likelihood_arrays(n_frozen, n_total, dilution)
+    weight = as_float_array(likelihood_weight, name="likelihood_weight")
+    frozen, total, dilution_array, weight = np.broadcast_arrays(
+        frozen,
+        total,
+        dilution_array,
+        weight,
+    )
+    if np.any(~np.isfinite(weight)):
+        raise ValueError("likelihood_weight must be finite")
+    if np.any(weight < 0):
+        raise ValueError("likelihood_weight cannot be negative")
+    active = weight > 0
+    if not np.any(active):
+        raise ValueError("at least one likelihood_weight must be positive")
+    return frozen[active], total[active], dilution_array[active], weight[active]
+
+
 def _log_one_minus_exp_neg(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     result = np.empty_like(values, dtype=float)
@@ -652,17 +704,25 @@ def _log_one_minus_exp_neg(values: np.ndarray) -> np.ndarray:
     return result
 
 
-def _binomial_log_constant(frozen: np.ndarray, total: np.ndarray) -> float:
+def _binomial_log_constant(
+    frozen: np.ndarray,
+    total: np.ndarray,
+    weight: np.ndarray | None = None,
+) -> float:
     if np.any(~np.isclose(frozen, np.rint(frozen))) or np.any(~np.isclose(total, np.rint(total))):
         raise ValueError("binomial constant requires integer counts")
     frozen_int = np.rint(frozen).astype(int)
     total_int = np.rint(total).astype(int)
+    weight_array = np.ones_like(frozen, dtype=float) if weight is None else weight
     return float(
         sum(
-            math.lgamma(int(n) + 1)
-            - math.lgamma(int(x) + 1)
-            - math.lgamma(int(n - x) + 1)
-            for x, n in zip(frozen_int.flat, total_int.flat, strict=True)
+            float(w)
+            * (
+                math.lgamma(int(n) + 1)
+                - math.lgamma(int(x) + 1)
+                - math.lgamma(int(n - x) + 1)
+            )
+            for x, n, w in zip(frozen_int.flat, total_int.flat, weight_array.flat, strict=True)
         )
     )
 
@@ -698,6 +758,7 @@ def _binomial_poisson_score(
     frozen: np.ndarray,
     total: np.ndarray,
     occupancy_scale: np.ndarray,
+    weight: np.ndarray,
 ) -> float:
     occupancy = inp_per_mL * occupancy_scale
     with np.errstate(over="ignore"):
@@ -708,7 +769,7 @@ def _binomial_poisson_score(
         frozen[frozen_mask] * occupancy_scale[frozen_mask] / denominator[frozen_mask]
     )
     unfrozen_term = (total - frozen) * occupancy_scale
-    return float(np.sum(frozen_term - unfrozen_term))
+    return float(np.sum(weight * (frozen_term - unfrozen_term)))
 
 
 def _solve_profile_upper_from_zero(
@@ -717,13 +778,24 @@ def _solve_profile_upper_from_zero(
     total: np.ndarray,
     well_volume_uL: float,
     dilution: np.ndarray,
+    weight: np.ndarray,
     *,
     relative_tolerance: float,
     max_iterations: int,
 ) -> float:
     high = _initial_upper_inp_per_ml(frozen, total, well_volume_uL, dilution)
     for _ in range(max_iterations):
-        if binomial_poisson_log_likelihood(high, frozen, total, well_volume_uL, dilution) <= target:
+        if (
+            binomial_poisson_log_likelihood(
+                high,
+                frozen,
+                total,
+                well_volume_uL,
+                dilution,
+                likelihood_weight=weight,
+            )
+            <= target
+        ):
             break
         high *= 2.0
     else:
@@ -736,6 +808,7 @@ def _solve_profile_upper_from_zero(
         total,
         well_volume_uL,
         dilution,
+        weight,
         relative_tolerance=relative_tolerance,
         max_iterations=max_iterations,
     )
@@ -747,13 +820,24 @@ def _solve_profile_lower_to_infinity(
     total: np.ndarray,
     well_volume_uL: float,
     dilution: np.ndarray,
+    weight: np.ndarray,
     *,
     relative_tolerance: float,
     max_iterations: int,
 ) -> float:
     high = _initial_upper_inp_per_ml(frozen, total, well_volume_uL, dilution)
     for _ in range(max_iterations):
-        if binomial_poisson_log_likelihood(high, frozen, total, well_volume_uL, dilution) >= target:
+        if (
+            binomial_poisson_log_likelihood(
+                high,
+                frozen,
+                total,
+                well_volume_uL,
+                dilution,
+                likelihood_weight=weight,
+            )
+            >= target
+        ):
             break
         high *= 2.0
     else:
@@ -766,6 +850,7 @@ def _solve_profile_lower_to_infinity(
         total,
         well_volume_uL,
         dilution,
+        weight,
         relative_tolerance=relative_tolerance,
         max_iterations=max_iterations,
     )
@@ -779,12 +864,27 @@ def _solve_profile_crossing(
     total: np.ndarray,
     well_volume_uL: float,
     dilution: np.ndarray,
+    weight: np.ndarray,
     *,
     relative_tolerance: float,
     max_iterations: int,
 ) -> float:
-    low_value = binomial_poisson_log_likelihood(low, frozen, total, well_volume_uL, dilution)
-    high_value = binomial_poisson_log_likelihood(high, frozen, total, well_volume_uL, dilution)
+    low_value = binomial_poisson_log_likelihood(
+        low,
+        frozen,
+        total,
+        well_volume_uL,
+        dilution,
+        likelihood_weight=weight,
+    )
+    high_value = binomial_poisson_log_likelihood(
+        high,
+        frozen,
+        total,
+        well_volume_uL,
+        dilution,
+        likelihood_weight=weight,
+    )
     low_above = low_value >= target
     high_above = high_value >= target
     if low_above == high_above:
@@ -797,6 +897,7 @@ def _solve_profile_crossing(
             total,
             well_volume_uL,
             dilution,
+            likelihood_weight=weight,
         )
         midpoint_above = midpoint_value >= target
         if midpoint_above == low_above:
