@@ -3,8 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import ufolaf
-from ufolaf.cli import _resolved_temperature_tolerance_C, build_parser
+from inptk import _engine as ufolaf
 
 
 def _first_freeze_near_threshold_counts() -> ufolaf.CountsTable:
@@ -95,49 +94,3 @@ def test_olaf_fraction_mode_rejects_nonpositive_step() -> None:
             method="olaf",
             step_C=0.0,
         )
-
-
-def test_cli_accepts_olaf_fraction_method() -> None:
-    args = build_parser().parse_args(
-        [
-            "fraction",
-            "counts.ufolaf",
-            "--out",
-            "fraction.ufolaf",
-            "--method",
-            "olaf",
-        ]
-    )
-
-    assert args.method == "olaf"
-    assert _resolved_temperature_tolerance_C(args) == 0.01
-    assert args.cooling_only is True
-
-
-def test_cli_can_include_warming_rows_for_fraction() -> None:
-    args = build_parser().parse_args(
-        [
-            "fraction",
-            "counts.ufolaf",
-            "--out",
-            "fraction.ufolaf",
-            "--include-warming",
-        ]
-    )
-
-    assert args.cooling_only is False
-
-
-def test_cli_keeps_existing_default_tolerance_for_max_fraction_method() -> None:
-    args = build_parser().parse_args(
-        [
-            "fraction",
-            "counts.ufolaf",
-            "--out",
-            "fraction.ufolaf",
-            "--method",
-            "max",
-        ]
-    )
-
-    assert _resolved_temperature_tolerance_C(args) == 0.0

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-import ufolaf
+from inptk import _engine as ufolaf
 
 
 def _fraction_table(

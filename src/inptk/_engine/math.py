@@ -75,11 +75,7 @@ def mask_valid_count_rows(n_frozen: Any, n_total: Any) -> np.ndarray:
     total = as_float_array(n_total, name="n_total")
     frozen, total = np.broadcast_arrays(frozen, total)
     return (
-        np.isfinite(frozen)
-        & np.isfinite(total)
-        & (total > 0)
-        & (frozen >= 0)
-        & (frozen <= total)
+        np.isfinite(frozen) & np.isfinite(total) & (total > 0) & (frozen >= 0) & (frozen <= total)
     )
 
 
@@ -315,9 +311,7 @@ def binomial_poisson_log_likelihood(
     frozen_term[frozen_mask] = frozen[frozen_mask] * log_frozen_probability[frozen_mask]
     unfrozen_term = np.zeros_like(unfrozen, dtype=float)
     unfrozen_mask = unfrozen != 0
-    unfrozen_term[unfrozen_mask] = (
-        unfrozen[unfrozen_mask] * log_unfrozen_probability[unfrozen_mask]
-    )
+    unfrozen_term[unfrozen_mask] = unfrozen[unfrozen_mask] * log_unfrozen_probability[unfrozen_mask]
     loglike = float(np.sum(weight * (frozen_term + unfrozen_term)))
     if include_binomial_constant:
         loglike += _binomial_log_constant(frozen, total, weight)
@@ -547,18 +541,19 @@ def differential_inp_per_ml_per_c_from_counts(
     delta_frozen = frozen - previous_frozen
     unfrozen_before_bin = total - previous_frozen
     valid_interval = (
-        (unfrozen_before_bin > 0)
-        & (delta_frozen >= 0)
-        & (delta_frozen <= unfrozen_before_bin)
+        (unfrozen_before_bin > 0) & (delta_frozen >= 0) & (delta_frozen <= unfrozen_before_bin)
     )
     with np.errstate(divide="ignore", invalid="ignore"):
         fraction_freezing_in_bin = delta_frozen / unfrozen_before_bin
     fraction_freezing_in_bin = np.where(valid_interval, fraction_freezing_in_bin, np.nan)
-    return cumulative_inp_per_ml_from_fraction(
-        fraction_freezing_in_bin,
-        well_volume_uL,
-        dilution_array,
-    ) / temperature_bin_width_C
+    return (
+        cumulative_inp_per_ml_from_fraction(
+            fraction_freezing_in_bin,
+            well_volume_uL,
+            dilution_array,
+        )
+        / temperature_bin_width_C
+    )
 
 
 def ci_limits_to_errors(
@@ -603,8 +598,10 @@ def normalize_inp_air(
         raise ValueError("air_volume_L must be positive")
     if filter_fraction_used <= 0:
         raise ValueError("filter_fraction_used must be positive")
-    return as_float_array(inp_per_mL, name="inp_per_mL") * suspension_volume_mL / (
-        air_volume_L * filter_fraction_used
+    return (
+        as_float_array(inp_per_mL, name="inp_per_mL")
+        * suspension_volume_mL
+        / (air_volume_L * filter_fraction_used)
     )
 
 
@@ -717,11 +714,7 @@ def _binomial_log_constant(
     return float(
         sum(
             float(w)
-            * (
-                math.lgamma(int(n) + 1)
-                - math.lgamma(int(x) + 1)
-                - math.lgamma(int(n - x) + 1)
-            )
+            * (math.lgamma(int(n) + 1) - math.lgamma(int(x) + 1) - math.lgamma(int(n - x) + 1))
             for x, n, w in zip(frozen_int.flat, total_int.flat, weight_array.flat, strict=True)
         )
     )

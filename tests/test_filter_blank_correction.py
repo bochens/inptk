@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import ufolaf
+from inptk import _engine as ufolaf
 
 
 def _air_metadata(sample_id: str) -> ufolaf.SampleMetadata:

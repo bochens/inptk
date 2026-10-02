@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -8,11 +8,9 @@ import pandas as pd
 from .models import (
     CumulativeNucleusSpectrumTable,
     NormalizedInpSpectrumTable,
-    SampleMetadata,
     processing_metadata_for,
 )
 from .qc import qc_blank_corrected_spectrum
-
 
 FilterBlankSpectrum = CumulativeNucleusSpectrumTable | NormalizedInpSpectrumTable
 SpectrumSequence = list[FilterBlankSpectrum] | tuple[FilterBlankSpectrum, ...]
@@ -28,7 +26,7 @@ def _is_spectrum_mapping(value: Any) -> bool:
 
 
 def _require_spectrum_sequence(value: Any, name: str) -> SpectrumSequence:
-    if not _is_spectrum_sequence(value):
+    if not isinstance(value, (list, tuple)):
         raise TypeError(
             f"{name} must be a CumulativeNucleusSpectrumTable, "
             "NormalizedInpSpectrumTable, or a list of them"
@@ -237,10 +235,10 @@ def _average_cumulative_blank_spectra(
 
 
 def _rms_or_nan(values: pd.Series) -> float:
-    values = values.dropna().to_numpy(dtype=float)
-    if values.size == 0:
+    array = values.dropna().to_numpy(dtype=float)
+    if array.size == 0:
         return np.nan
-    return float(np.sqrt(np.mean(values**2)))
+    return float(np.sqrt(np.mean(array**2)))
 
 
 def _nan_like(_: pd.Series) -> float:
@@ -292,13 +290,12 @@ def subtract_filter_blank_spectrum(
 ) -> FilterBlankSpectrum | list[Any] | dict[str, Any]:
     """Apply OLAF-style filter blank correction to suspension or normalized spectra."""
 
-    if _is_spectrum_mapping(sample) or _is_spectrum_mapping(blank):
-        if _is_spectrum_mapping(sample) and _is_spectrum_mapping(blank):
+    if isinstance(sample, dict) or isinstance(blank, dict):
+        if isinstance(sample, dict) and isinstance(blank, dict):
             missing = set(sample) ^ set(blank)
             if missing:
                 raise KeyError(
-                    "sample and blank dictionaries must use the same keys: "
-                    f"{sorted(missing)}"
+                    f"sample and blank dictionaries must use the same keys: {sorted(missing)}"
                 )
             return {
                 key: subtract_filter_blank_spectrum(
@@ -312,7 +309,7 @@ def subtract_filter_blank_spectrum(
                 )
                 for key in sample
             }
-        if _is_spectrum_mapping(sample):
+        if isinstance(sample, dict):
             return {
                 key: subtract_filter_blank_spectrum(
                     nested,
@@ -335,11 +332,11 @@ def subtract_filter_blank_spectrum(
                 error_signal=error_signal,
                 clamp_zero=clamp_zero,
             )
-            for key, nested_blank in blank.items()
+            for key, nested_blank in cast(SpectrumMapping, blank).items()
         }
 
-    if _is_spectrum_sequence(sample) or _is_spectrum_sequence(blank):
-        if _is_spectrum_sequence(sample) and _is_spectrum_sequence(blank):
+    if isinstance(sample, (list, tuple)) or isinstance(blank, (list, tuple)):
+        if isinstance(sample, (list, tuple)) and isinstance(blank, (list, tuple)):
             sample_tables = _require_spectrum_sequence(sample, "sample")
             blank_tables = _require_spectrum_sequence(blank, "blank")
             if len(sample_tables) != len(blank_tables):
@@ -356,15 +353,14 @@ def subtract_filter_blank_spectrum(
                 )
                 for sample_table, blank_table in zip(sample_tables, blank_tables)
             ]
-        if _is_spectrum_sequence(sample):
+        if isinstance(sample, (list, tuple)):
             sample_tables = _require_spectrum_sequence(sample, "sample")
             if not isinstance(
                 blank,
                 (CumulativeNucleusSpectrumTable, NormalizedInpSpectrumTable),
             ):
                 raise TypeError(
-                    "blank must be a CumulativeNucleusSpectrumTable or "
-                    "NormalizedInpSpectrumTable"
+                    "blank must be a CumulativeNucleusSpectrumTable or NormalizedInpSpectrumTable"
                 )
             return [
                 subtract_filter_blank_spectrum(
@@ -384,8 +380,7 @@ def subtract_filter_blank_spectrum(
             (CumulativeNucleusSpectrumTable, NormalizedInpSpectrumTable),
         ):
             raise TypeError(
-                "sample must be a CumulativeNucleusSpectrumTable or "
-                "NormalizedInpSpectrumTable"
+                "sample must be a CumulativeNucleusSpectrumTable or NormalizedInpSpectrumTable"
             )
         return [
             subtract_filter_blank_spectrum(
@@ -476,10 +471,13 @@ def _subtract_filter_blank_cumulative_table(
     clamp_zero: bool,
 ) -> CumulativeNucleusSpectrumTable:
     sample_df = _prepare_cumulative_spectrum_frame(sample, name="sample")
-    blank = _blank_with_required_temperatures(
-        blank,
-        sample_df["temperature_C"].to_numpy(dtype=float),
-        extrapolate_missing_cold=extrapolate_missing_cold,
+    blank = cast(
+        CumulativeNucleusSpectrumTable,
+        _blank_with_required_temperatures(
+            blank,
+            sample_df["temperature_C"].to_numpy(dtype=float),
+            extrapolate_missing_cold=extrapolate_missing_cold,
+        ),
     )
     blank_df = _prepare_cumulative_spectrum_frame(blank, name="blank").set_index(
         "temperature_C",
@@ -494,8 +492,8 @@ def _subtract_filter_blank_cumulative_table(
     corrected["correction_state"] = "blank_corrected"
     _require_compatible_confidence_columns(sample_df, matched_blank)
 
-    corrected["value"] = (
-        sample_df["value"].to_numpy(dtype=float) - matched_blank["value"].to_numpy(dtype=float)
+    corrected["value"] = sample_df["value"].to_numpy(dtype=float) - matched_blank["value"].to_numpy(
+        dtype=float
     )
     if _has_complete_confidence_columns(sample_df):
         corrected["lower_ci"] = propagate_uncertainty_rss(
@@ -563,10 +561,13 @@ def _subtract_filter_blank_table(
     _require_suspension_normalized_table(sample, name="sample")
     _require_suspension_normalized_table(blank, name="blank")
     sample_df = _prepare_spectrum_frame(sample, name="sample")
-    blank = _blank_with_required_temperatures(
-        blank,
-        sample_df["temperature_C"].to_numpy(dtype=float),
-        extrapolate_missing_cold=extrapolate_missing_cold,
+    blank = cast(
+        NormalizedInpSpectrumTable,
+        _blank_with_required_temperatures(
+            blank,
+            sample_df["temperature_C"].to_numpy(dtype=float),
+            extrapolate_missing_cold=extrapolate_missing_cold,
+        ),
     )
     blank_df = _prepare_spectrum_frame(blank, name="blank").set_index(
         "temperature_C",
@@ -581,8 +582,8 @@ def _subtract_filter_blank_table(
     corrected["correction_state"] = "blank_corrected"
     _require_compatible_confidence_columns(sample_df, matched_blank)
 
-    corrected["value"] = (
-        sample_df["value"].to_numpy(dtype=float) - matched_blank["value"].to_numpy(dtype=float)
+    corrected["value"] = sample_df["value"].to_numpy(dtype=float) - matched_blank["value"].to_numpy(
+        dtype=float
     )
     if _has_complete_confidence_columns(sample_df):
         corrected["lower_ci"] = propagate_uncertainty_rss(
@@ -690,15 +691,16 @@ def _require_suspension_per_ml(df: pd.DataFrame, *, name: str) -> None:
     value_unit = _single_text(df, "value_unit", name=f"{name} spectrum")
     if basis != "suspension" or value_unit != "INP_per_mL_suspension":
         raise ValueError(
-            f"{name} spectrum must use value_unit='INP_per_mL_suspension' "
-            "and basis='suspension'"
+            f"{name} spectrum must use value_unit='INP_per_mL_suspension' and basis='suspension'"
         )
 
 
 def _ensure_inp_per_ml_column(df: pd.DataFrame, *, name: str) -> pd.DataFrame:
     if "inp_per_mL" in df:
         return df
-    basis_values = pd.Series(df["basis"]).dropna().astype(str).unique() if "basis" in df else []
+    basis_values = (
+        list(pd.Series(df["basis"]).dropna().astype(str).unique()) if "basis" in df else []
+    )
     if len(basis_values) == 1 and basis_values[0] == "suspension":
         df = df.copy()
         df["inp_per_mL"] = df["value"].to_numpy(dtype=float)
@@ -722,7 +724,7 @@ def _blank_with_required_temperatures(
             dtype=float,
         )
         if cold_missing.size:
-            prepared = extrapolate_blank_tail(prepared, cold_missing)
+            prepared = cast(FilterBlankSpectrum, extrapolate_blank_tail(prepared, cold_missing))
             blank_temperatures = _table_temperatures(prepared)
             missing = _missing_temperatures(sample_temperatures_C, blank_temperatures)
     if missing:
@@ -742,7 +744,7 @@ def _table_temperatures(table: FilterBlankSpectrum) -> np.ndarray:
 
 
 def _missing_temperatures(required: np.ndarray, available: np.ndarray) -> list[float]:
-    available_set = set(float(value) for value in available)
+    available_set = {float(value) for value in available}
     return sorted(
         {float(value) for value in required if float(value) not in available_set},
         reverse=True,
@@ -801,16 +803,16 @@ def extrapolate_blank_tail(
 ) -> FilterBlankSpectrum | list[Any] | dict[str, Any]:
     """Linearly extrapolate a blank spectrum to colder target temperatures."""
 
-    if _is_spectrum_mapping(blank):
+    if isinstance(blank, dict):
         return {
             key: extrapolate_blank_tail(
                 nested_blank,
                 target_temperatures_C,
                 tail_points=tail_points,
             )
-            for key, nested_blank in blank.items()
+            for key, nested_blank in cast(SpectrumMapping, blank).items()
         }
-    if _is_spectrum_sequence(blank):
+    if isinstance(blank, (list, tuple)):
         blank_tables = _require_spectrum_sequence(blank, "blank")
         return [
             extrapolate_blank_tail(

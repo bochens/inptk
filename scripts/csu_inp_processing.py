@@ -5,9 +5,10 @@ import argparse
 import json
 import math
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict, fields
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import pandas as pd
 
@@ -16,8 +17,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if SRC_ROOT.exists():
     sys.path.insert(0, str(SRC_ROOT))
 
-import ufolaf  # noqa: E402
-
+from inptk import _engine as engine  # noqa: E402
 
 HEADER_ORDER = (
     "site",
@@ -34,7 +34,7 @@ HEADER_ORDER = (
     "IS",
 )
 
-SAMPLE_METADATA_FIELDS = {field.name for field in fields(ufolaf.SampleMetadata)}
+SAMPLE_METADATA_FIELDS = {field.name for field in fields(engine.SampleMetadata)}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -49,13 +49,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         fraction = _read_frozen_at_temp_fraction(args, header_overrides)
         source_for_metadata = fraction
     else:
-        if args.cycle_policy == "preserve":
-            raise ValueError(
-                "CSU INPs_L export writes one analysis table. Use --cycle-policy single "
-                "or --cycle-policy averaged, not preserve."
-            )
         counts = _read_count_inputs(args)
-        fraction = ufolaf.fraction_frozen(
+        fraction = engine.fraction_frozen(
             counts,
             step_C=args.step_C,
             method=args.method,
@@ -63,48 +58,63 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         source_for_metadata = counts
 
-    cumulative = _combine_fraction_tables(fraction, args)
-    normalized = ufolaf.normalize_spec(cumulative)
-    data = _csu_data_frame(
-        normalized,
-        cumulative,
-        sample_id=args.sample_id,
-        allow_multiple=bool(args.out_dir),
-    )
-    if args.out_dir:
-        _write_csu_csvs_by_sample(
-            data,
-            source_for_metadata,
-            normalized,
-            args=args,
-            overrides=header_overrides,
+    cycles = fraction if isinstance(fraction, dict) else {"1": fraction}
+    if len(cycles) > 1 and not args.out_dir:
+        raise ValueError("Multiple cycles require --out-dir; each cycle is exported separately")
+    for cycle_id, cycle_fraction in cycles.items():
+        cycle_source = (
+            source_for_metadata.get(cycle_id)
+            if isinstance(source_for_metadata, dict)
+            else source_for_metadata
         )
-    else:
-        header = _csu_header(
-            data,
-            source_for_metadata,
+        cumulative = _combine_fraction_tables(cycle_fraction, args)
+        normalized = engine.normalize_spec(cumulative)
+        data = _csu_data_frame(
             normalized,
-            args=args,
-            overrides=header_overrides,
+            cumulative,
+            sample_id=args.sample_id,
+            allow_multiple=bool(args.out_dir),
         )
-        _write_csu_csv(data, header, args.out, overwrite=args.overwrite)
+        if len(cycles) > 1:
+            cycle_dir = Path(args.out_dir) / (
+                "cycle-" + str(cycle_id).replace("/", "_").replace("\\", "_")
+            )
+            cycle_dir.mkdir(parents=True, exist_ok=True)
+            cycle_args = argparse.Namespace(**vars(args))
+            cycle_args.out_dir = str(cycle_dir)
+        else:
+            cycle_args = args
+        if args.out_dir:
+            _write_csu_csvs_by_sample(
+                data,
+                cycle_source,
+                normalized,
+                args=cycle_args,
+                overrides=header_overrides,
+            )
+        else:
+            header = _csu_header(
+                data,
+                cycle_source,
+                normalized,
+                args=cycle_args,
+                overrides=header_overrides,
+            )
+            _write_csu_csv(data, header, args.out, overwrite=args.overwrite)
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert Icescopy/UFOLAF freezing data to the CSU DOES INP Mentor "
+            "Convert Icescopy/INP-toolkit freezing data to the CSU DOES INP Mentor "
             "Program INPs_L CSV format."
         )
     )
     parser.add_argument(
         "inputs",
         nargs="+",
-        help=(
-            "Icescopy freeze_count_timeseries/canonical count CSV(s), or one "
-            "frozen_at_temp CSV"
-        ),
+        help=("Icescopy freeze_count_timeseries/canonical count CSV(s), or one frozen_at_temp CSV"),
     )
     parser.add_argument("--out", help="Output INPs_L CSV path for one sample/group")
     parser.add_argument(
@@ -148,15 +158,9 @@ def build_parser() -> argparse.ArgumentParser:
             "comma-separated values for multiple samples."
         ),
     )
-    counts.add_argument(
-        "--cycle-policy",
-        choices=("single", "averaged", "preserve"),
-        default="single",
-    )
-    counts.add_argument("--cycle", help="Cycle to select when cycle-policy is single")
     counts.add_argument("--step-C", type=float, default=0.5)
     counts.add_argument("--method", choices=("max", "latest"), default="max")
-    counts.add_argument("--temperature-tolerance-C", type=float, default=0.0)
+    counts.add_argument("--temperature-tolerance-C", type=float, default=0.05)
 
     frozen = parser.add_argument_group("frozen_at_temp input options")
     frozen.add_argument(
@@ -250,28 +254,29 @@ def _read_table_source(path: str) -> pd.DataFrame | str:
     return pd.read_csv(input_path)
 
 
-def _read_count_inputs(args: argparse.Namespace) -> list[Any]:
+def _read_count_inputs(args: argparse.Namespace) -> dict[str, list[Any]]:
     metadata = _load_metadata_source(args.metadata)
     columns = _load_columns(args.columns)
-    tables: list[Any] = []
+    cycles: dict[str, list[Any]] = {}
     for input_path in args.inputs:
-        read = ufolaf.read_counts(
+        read = engine.read_counts(
             _read_table_source(input_path),
             format=args.format,
             columns=columns,
             metadata=metadata,
-            cycle_policy=args.cycle_policy,
-            cycle=args.cycle,
         )
-        tables.extend(_filter_sample_tables(_flatten_table_shape(read), args, input_path))
-    if not tables:
+        for cycle_id, tables in read.items():
+            selected = _filter_sample_tables(tables, args, input_path)
+            if selected:
+                cycles.setdefault(cycle_id, []).extend(selected)
+    if not cycles:
         raise ValueError("No count tables were read")
-    return tables
+    return cycles
 
 
 def _flatten_table_shape(value: Any) -> list[Any]:
     if isinstance(value, dict):
-        raise ValueError("Nested count dictionaries are not supported for CSU export")
+        raise TypeError("Nested count dictionaries are not supported for CSU export")
     if isinstance(value, (list, tuple)):
         tables: list[Any] = []
         for item in value:
@@ -286,9 +291,7 @@ def _filter_sample_tables(
     source_path: str,
 ) -> list[Any]:
     return [
-        table
-        for table in tables
-        if _sample_allowed(_table_sample_labels(table), args, source_path)
+        table for table in tables if _sample_allowed(_table_sample_labels(table), args, source_path)
     ]
 
 
@@ -320,16 +323,8 @@ def _iter_sample_filter_parts(value: str) -> list[tuple[str, str]]:
     if "::" in value:
         source, sample_values = value.split("::", 1)
         source = source.strip()
-        return [
-            (source, sample.strip())
-            for sample in sample_values.split(",")
-            if sample.strip()
-        ]
-    return [
-        ("", sample.strip())
-        for sample in value.split(",")
-        if sample.strip()
-    ]
+        return [(source, sample.strip()) for sample in sample_values.split(",") if sample.strip()]
+    return [("", sample.strip()) for sample in value.split(",") if sample.strip()]
 
 
 def _source_path_labels(source_path: str) -> set[str]:
@@ -360,11 +355,11 @@ def _table_sample_labels(table: Any) -> set[str]:
         if "sample_id" in df:
             labels.update(df["sample_id"].dropna().astype(str))
     metadata = getattr(table, "metadata", None)
-    if isinstance(metadata, ufolaf.SampleMetadata):
+    if isinstance(metadata, engine.SampleMetadata):
         labels.update(_sample_labels("", metadata))
     elif isinstance(metadata, dict):
         for sample_id, value in metadata.items():
-            if isinstance(value, ufolaf.SampleMetadata):
+            if isinstance(value, engine.SampleMetadata):
                 labels.update(_sample_labels(str(sample_id), value))
     return {label for label in labels if label}
 
@@ -395,7 +390,7 @@ def _read_frozen_at_temp_fraction(
             )
         n_total_by_sample = _infer_n_total_by_sample(source)
 
-    parsed = ufolaf.parse_olaf_frozen_at_temp(source, n_total_by_sample=n_total_by_sample)
+    parsed = engine.parse_olaf_frozen_at_temp(source, n_total_by_sample=n_total_by_sample)
     metadata_by_sample = _load_sample_metadata_mapping(args.metadata)
     group_id = args.group_id or header_overrides.get("site")
     output: list[Any] = []
@@ -420,7 +415,7 @@ def _read_frozen_at_temp_fraction(
         if not _sample_allowed(_sample_labels(sample_id, metadata), args, args.inputs[0]):
             continue
         output.append(
-            ufolaf.TemperatureFrozenFractionTable.from_dataframe(
+            engine.TemperatureFrozenFractionTable.from_dataframe(
                 table.to_dataframe(),
                 metadata=metadata,
             )
@@ -445,7 +440,7 @@ def _metadata_for_frozen_at_temp_sample(
     args: argparse.Namespace,
     header_overrides: dict[str, str],
 ) -> Any:
-    payload = asdict(base) if isinstance(base, ufolaf.SampleMetadata) else {}
+    payload = asdict(base) if isinstance(base, engine.SampleMetadata) else {}
     raw_sample_metadata = dict(payload.get("raw_sample_metadata") or {})
     raw_sample_metadata.update(header_overrides)
 
@@ -485,27 +480,27 @@ def _metadata_for_frozen_at_temp_sample(
 
     if _missing(payload.get("well_volume_uL")):
         raise ValueError(f"Missing well volume for frozen-at-temp sample {sample_id!r}")
-    return ufolaf.SampleMetadata(**_sample_metadata_kwargs(payload))
+    return engine.SampleMetadata(**_sample_metadata_kwargs(payload))
 
 
 def _combine_fraction_tables(fraction: Any, args: argparse.Namespace) -> Any:
     sample_group_by = _sample_group_by(args.sample_group_by)
     if args.combine == "stitch":
-        return ufolaf.cumulative_spec_stitch(
+        return engine.cumulative_spec_stitch(
             fraction,
             sample_group_by=sample_group_by,
             enforce_monotone=args.enforce_monotone,
             z=args.z,
         )
     if args.combine == "mle":
-        return ufolaf.cumulative_spec_mle(
+        return engine.cumulative_spec_mle(
             fraction,
             sample_group_by=sample_group_by,
             enforce_monotone=args.enforce_monotone,
             confidence_drop=args.confidence_drop,
         )
     if args.combine == "none":
-        return ufolaf.cumulative_spec(fraction, z=args.z)
+        return engine.cumulative_spec(fraction, z=args.z)
     raise ValueError("--combine must be stitch, mle, or none")
 
 
@@ -516,8 +511,8 @@ def _csu_data_frame(
     sample_id: str | None,
     allow_multiple: bool,
 ) -> pd.DataFrame:
-    normalized_df = ufolaf.tables_to_dataframe(normalized).reset_index(drop=True)
-    cumulative_df = ufolaf.tables_to_dataframe(cumulative).reset_index(drop=True)
+    normalized_df = engine.tables_to_dataframe(normalized).reset_index(drop=True)
+    cumulative_df = engine.tables_to_dataframe(cumulative).reset_index(drop=True)
     if len(normalized_df) != len(cumulative_df):
         raise ValueError("Normalized and cumulative spectra have different row counts")
     if normalized_df.empty:
@@ -713,8 +708,7 @@ def _write_csu_csvs_by_sample(
 
 def _safe_filename(value: str) -> str:
     safe = "".join(
-        character if character.isalnum() or character in "._-" else "_"
-        for character in value
+        character if character.isalnum() or character in "._-" else "_" for character in value
     )
     return safe.strip("._") or "sample"
 
@@ -763,7 +757,7 @@ def _load_columns(value: str | None) -> dict[str, str] | None:
     payload = path.read_text(encoding="utf-8") if path.exists() else value
     loaded = json.loads(payload)
     if not isinstance(loaded, dict):
-        raise ValueError("--columns must be a JSON object or a path to one")
+        raise TypeError("--columns must be a JSON object or a path to one")
     return {str(key): str(column) for key, column in loaded.items()}
 
 
@@ -801,15 +795,13 @@ def _load_sample_metadata_mapping(value: str | None) -> dict[str, Any]:
         sample_id = str(row.get("sample_id", "")).strip()
         if not sample_id:
             raise ValueError("metadata rows must include sample_id")
-        metadata[sample_id] = ufolaf.SampleMetadata(**_sample_metadata_kwargs(row))
+        metadata[sample_id] = engine.SampleMetadata(**_sample_metadata_kwargs(row))
     return metadata
 
 
 def _sample_metadata_kwargs(record: dict[str, Any]) -> dict[str, Any]:
     raw_preamble = (
-        record.get("raw_preamble")
-        if isinstance(record.get("raw_preamble"), dict)
-        else {}
+        record.get("raw_preamble") if isinstance(record.get("raw_preamble"), dict) else {}
     )
     raw_sample_metadata = (
         record.get("raw_sample_metadata")
@@ -855,7 +847,7 @@ def _load_n_total_by_sample(value: str | None) -> dict[str, float] | None:
     payload = path.read_text(encoding="utf-8") if path.exists() else value
     loaded = json.loads(payload)
     if not isinstance(loaded, dict):
-        raise ValueError("--n-total-by-sample must be a JSON object, JSON file, or CSV")
+        raise TypeError("--n-total-by-sample must be a JSON object, JSON file, or CSV")
     return {str(key): float(raw) for key, raw in loaded.items()}
 
 
@@ -896,14 +888,14 @@ def _collect_metadata(value: Any) -> dict[str, Any]:
             collected.update(_collect_metadata(item))
         return collected
     metadata = getattr(value, "metadata", None)
-    if isinstance(metadata, ufolaf.SampleMetadata):
+    if isinstance(metadata, engine.SampleMetadata):
         key = metadata.sample_id or _single_table_sample_id(value)
         return {key: metadata} if key else {}
     if isinstance(metadata, dict):
         return {
             str(key): item
             for key, item in metadata.items()
-            if isinstance(item, ufolaf.SampleMetadata)
+            if isinstance(item, engine.SampleMetadata)
         }
     return {}
 
@@ -1006,11 +998,15 @@ def _values_match(left: Any, right: Any) -> bool:
     left_number = _float_or_none(left)
     right_number = _float_or_none(right)
     if left_number is not None or right_number is not None:
-        return left_number is not None and right_number is not None and math.isclose(
-            left_number,
-            right_number,
-            rel_tol=0.0,
-            abs_tol=1e-12,
+        return (
+            left_number is not None
+            and right_number is not None
+            and math.isclose(
+                left_number,
+                right_number,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
         )
     return str(left).strip() == str(right).strip()
 

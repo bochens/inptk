@@ -1,0 +1,91 @@
+"""Command-line access to the same workflow used by Python and external apps."""
+
+import argparse
+import json
+from pathlib import Path
+
+from . import __version__, analyze_concentration, load, read_counts, read_icescopy
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="inptk", description="INP-toolkit droplet-freezing analysis"
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    commands = parser.add_subparsers(dest="command", required=True)
+    analyze = commands.add_parser(
+        "analyze", help="Combine dilutions into a spectrum for each sample and cycle"
+    )
+    analyze.add_argument("input")
+    analyze.add_argument("--metadata", help="Native metadata or Icescopy metadata overrides")
+    analyze.add_argument("--format", choices=("native", "icescopy", "saved"), default="native")
+    analyze.add_argument(
+        "--sample-map", help="JSON file mapping Icescopy measurement names to parent samples"
+    )
+    analyze.add_argument("--run-id", default="1")
+    analyze.add_argument("--out", required=True)
+    analyze.add_argument("--dilution-method", choices=("stitch", "mle"), default="stitch")
+    analyze.add_argument(
+        "--output-basis", choices=("suspension", "sampled_air", "dry_soil"), default="suspension"
+    )
+    analyze.add_argument("--step-C", type=float, default=0.5)
+    analyze.add_argument("--temperature-method", choices=("max", "latest", "olaf"), default="max")
+    analyze.add_argument("--temperature-tolerance-C", type=float)
+    analyze.add_argument("--z", type=float, default=1.96)
+    analyze.add_argument("--differential", action="store_true")
+    analyze.add_argument("--enforce-monotone", action="store_true")
+    export = commands.add_parser(
+        "export-csv", help="Export final concentration rows from a saved analysis"
+    )
+    export.add_argument("input")
+    export.add_argument("--out", required=True)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "export-csv":
+            load(args.input).export_csv(args.out)
+            return 0
+        if args.format == "native":
+            if args.sample_map:
+                raise ValueError("--sample-map applies only to Icescopy input")
+            if not args.metadata:
+                raise ValueError("Native input requires --metadata")
+            experiment = read_counts(args.input, metadata=args.metadata, run_id=args.run_id)
+        elif args.format == "icescopy":
+            mapping = json.loads(Path(args.sample_map).read_text()) if args.sample_map else None
+            overrides = None
+            if args.metadata:
+                from .readers import _frame
+
+                overrides = _frame(args.metadata)
+            experiment = read_icescopy(
+                args.input, sample_map=mapping, metadata=overrides, run_id=args.run_id
+            )
+        else:
+            if args.metadata or args.sample_map:
+                raise ValueError("Saved input already contains its metadata and sample mapping")
+            experiment = load(args.input)
+            if hasattr(experiment, "experiment"):
+                experiment = experiment.experiment
+        result = analyze_concentration(
+            experiment,
+            dilution_method=args.dilution_method,
+            output_basis=args.output_basis,
+            step_C=args.step_C,
+            temperature_method=args.temperature_method,
+            temperature_tolerance_C=args.temperature_tolerance_C,
+            z=args.z,
+            differential=args.differential,
+            enforce_monotone=args.enforce_monotone,
+        )
+        result.save(args.out)
+        for warning in result.warnings:
+            print(f"Warning: {warning}")
+        print(f"Saved {len(result.final)} concentration rows to {args.out}")
+    except (ValueError, TypeError, KeyError, OSError, AttributeError) as error:
+        parser.exit(1, f"inptk: {error}\n")
+    return 0

@@ -62,3 +62,48 @@ def test_file_qualified_exclude_sample_only_matches_that_input_file() -> None:
         _args(exclude_sample=["run1.csv::sample-a"]),
         "run1.csv",
     )
+
+
+def test_csu_export_keeps_repeated_cycles_in_separate_files(tmp_path):
+    import pandas as pd
+
+    csu = _load_csu_script()
+    counts = tmp_path / "counts.csv"
+    metadata = tmp_path / "metadata.csv"
+    pd.DataFrame(
+        {
+            "sample_id": ["A"] * 6,
+            "cycle": [1, 1, 1, 2, 2, 2],
+            "temperature_C": [-5, -6, -7] * 2,
+            "n_total": [32] * 6,
+            "n_frozen": [0, 2, 8, 0, 3, 9],
+        }
+    ).to_csv(counts, index=False)
+    pd.DataFrame(
+        [
+            {
+                "sample_id": "A",
+                "sample_type": "air",
+                "well_volume_uL": 50,
+                "dilution": 1,
+                "suspension_volume_mL": 5,
+                "air_volume_L": 100,
+                "filter_fraction_used": 1,
+            }
+        ]
+    ).to_csv(metadata, index=False)
+    assert (
+        csu.main(
+            [
+                str(counts),
+                "--metadata",
+                str(metadata),
+                "--out-dir",
+                str(tmp_path / "out"),
+                "--allow-missing-header",
+            ]
+        )
+        == 0
+    )
+    assert (tmp_path / "out" / "cycle-1" / "A_INPs_L.csv").exists()
+    assert (tmp_path / "out" / "cycle-2" / "A_INPs_L.csv").exists()
