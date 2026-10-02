@@ -142,3 +142,71 @@ def test_workflow_selects_after_blank_subtraction_and_unit_conversion(policy):
 def test_public_interface_has_no_forced_monotone_fitting_setting():
     for function in (inptk.combine_dilutions, inptk.analyze_concentration):
         assert "enforce_monotone" not in inspect.signature(function).parameters
+
+
+@pytest.mark.parametrize("policy", ["stop_at_decrease", "skip_decreases"])
+def test_raw_blank_contributor_change_keeps_equal_concentration_with_optimizer_roundoff(policy):
+    rows = []
+    for measurement, temperatures, count in (
+        ("A", [-5, -6], 8), ("B", [-6], 11), ("blank", [-5, -6], 4),
+    ):
+        rows.extend({
+            "measurement_id": measurement, "cycle_id": "1",
+            "temperature_C": temperature, "n_frozen": count, "n_total": 32,
+        } for temperature in temperatures)
+    source = inptk.read_counts(
+        pd.DataFrame(rows),
+        metadata=[
+            {"measurement_id": "A", "sample_id": "S", "run_id": "R",
+             "dilution": 1, "droplet_volume_uL": 50},
+            {"measurement_id": "B", "sample_id": "S", "run_id": "R",
+             "dilution": 2, "droplet_volume_uL": 100},
+            {"measurement_id": "blank", "sample_id": "water", "run_id": "R",
+             "dilution": 1, "droplet_volume_uL": 50},
+        ],
+        water_blank_map={"A": ["blank"], "B": ["blank"]},
+    )
+    result = inptk.analyze_concentration(source, step_C=1, decrease_policy=policy)
+    combined = result.combined.to_dataframe()
+    final = result.final.to_dataframe()
+    assert len(final) == 2
+    expected_concentration = (-np.log(0.75) + np.log(0.875)) / 0.05
+    np.testing.assert_allclose(final.concentration, expected_concentration, rtol=1e-9)
+    for column in ("concentration", "lower_error", "upper_error"):
+        np.testing.assert_array_equal(final[column], combined[column])
+    event = result.final.history[-1]
+    assert event["numerical_relative_tolerance"] == 1e-9
+    assert event["numerical_absolute_tolerance"] == 0
+
+
+@pytest.mark.parametrize("policy", ["stop_at_decrease", "skip_decreases"])
+@pytest.mark.parametrize("values", [[1e-20, 0.0], [1e-20, 0.99e-20], [1.0, 0.999]])
+def test_numerical_equality_does_not_hide_real_decreases_or_tiny_signals(policy, values):
+    final = inptk.finalize_spectrum(spectrum(values), decrease_policy=policy)
+    assert final.to_dataframe().concentration.tolist() == [values[0]]
+    assert final.history[-1]["groups"][0]["excluded"][0]["reason"] == "decrease"
+
+
+
+def test_filter_blank_uncertainty_labels_only_corrected_rows_and_retains_source_methods():
+    sample = spectrum([4.0, np.nan, 8.0]).to_dataframe()
+    sample["uncertainty_method"] = "joint_sample_water_blank_profile_likelihood"
+    other = spectrum([2.0, 3.0, 4.0], sample="other").to_dataframe()
+    other["uncertainty_method"] = "binomial_Poisson_profile_likelihood"
+    source = inptk.CumulativeSpectrumTable(pd.concat([sample, other], ignore_index=True))
+    blank = spectrum([1.0, 1.0, 1.0], sample="blank").select(temperature_C=[-5, -7])
+    result = inptk.subtract_blanks(source, {"S": blank})
+    frame = result.to_dataframe()
+    corrected = (frame.sample_id == "S") & frame.concentration.notna()
+    assert frame.loc[corrected, "uncertainty_method"].eq(
+        "approximate_independent_filter_blank_error_propagation"
+    ).all()
+    np.testing.assert_array_equal(
+        frame.loc[~corrected, "uncertainty_method"],
+        source.to_dataframe().loc[~corrected, "uncertainty_method"],
+    )
+    prior = result.history[-1]["source_uncertainty_methods"]
+    assert [(row["sample_id"], row["temperature_C"]) for row in prior] == [("S", -5), ("S", -7)]
+    assert all(row["uncertainty_method"] == "joint_sample_water_blank_profile_likelihood"
+               for row in prior)
+    pd.testing.assert_frame_equal(source.to_dataframe().iloc[:3].reset_index(drop=True), sample)

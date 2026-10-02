@@ -26,7 +26,7 @@ def raw_source(tmp_path):
                 "measurement_id": measurement,
                 "sample_id": sample,
                 "dilution": dilution,
-                "droplet_volume_uL": 50,
+                "droplet_volume_uL": 20 if measurement == "W0" else 50,
                 "run_id": "R1",
             }
         )
@@ -89,7 +89,7 @@ def test_selection_keeps_only_blanks_assigned_to_the_selected_original_sample(ra
 
 
 @pytest.mark.parametrize("input_format", ["native", "saved"])
-@pytest.mark.parametrize("method", ["stitch", "mle"])
+@pytest.mark.parametrize("method", ["mle", "average"])
 def test_cli_raw_blank_analysis_preserves_context_without_outputting_blank_samples(
     tmp_path, raw_source, input_format, method
 ):
@@ -107,14 +107,16 @@ def test_cli_raw_blank_analysis_preserves_context_without_outputting_blank_sampl
     process = run_cli(
         "analyze",
         *arguments,
+        "--method",
+        method,
         "--sample",
         "007",
         "--cycle",
         "01",
         "--step-C",
         "1",
-        "--dilution-method",
-        method,
+        "--temperature-ranges",
+        '{"M0":{"max_C":-6},"M1":{"min_C":-8}}',
         "--out",
         output,
     )
@@ -122,11 +124,16 @@ def test_cli_raw_blank_analysis_preserves_context_without_outputting_blank_sampl
     result = inptk.load(output)
     assert result.experiment.water_blank_map == {"M0": ["W0", "W1"], "M1": ["W1", "W0"]}
     assert len(result.experiment.counts) == 20
+    assert result.experiment.measurements["W0"].droplet_volume_uL == 20
+    assert result.experiment.measurements["W1"].droplet_volume_uL == 50
     assert set(result.final_candidates.to_dataframe().sample_id) == {"007"}
     assert set(result.final_candidates.to_dataframe().cycle_id) == {"01"}
     assert set(result.per_dilution.to_dataframe().measurement_id) == {"M0", "M1"}
     expected = inptk.analyze_concentration(
-        _select_experiment(raw_source, ["007"], ["01"]), step_C=1.0, dilution_method=method
+        _select_experiment(raw_source, ["007"], ["01"]),
+        step_C=1.0,
+        method=method,
+        temperature_ranges_C={"M0": {"max_C": -6}, "M1": {"min_C": -8}},
     )
     pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
     pd.testing.assert_frame_equal(
@@ -173,3 +180,33 @@ def test_cli_rejects_blank_only_parent_sample_selection(tmp_path, raw_source):
     assert process.returncode == 1
     assert "Water-blank parent samples cannot be selected" in process.stderr
     assert not output.exists()
+
+
+def test_cli_disabling_water_correction_preserves_blank_context(tmp_path, raw_source):
+    output = tmp_path / "uncorrected.inptk"
+    process = run_cli(
+        "analyze",
+        tmp_path / "raw.inptk",
+        "--format",
+        "saved",
+        "--sample",
+        "007",
+        "--cycle",
+        "01",
+        "--no-water-blank-correction",
+        "--out",
+        output,
+    )
+    assert process.returncode == 0, process.stderr
+    result = inptk.load(output)
+    assert result.experiment.water_blank_map == {"M0": ["W0", "W1"], "M1": ["W1", "W0"]}
+    assert len(result.experiment.counts) == 20
+    assert result.experiment.measurements["W0"].droplet_volume_uL == 20
+    assert result.experiment.measurements["W1"].droplet_volume_uL == 50
+    assert result.settings["water_blank_correction"] is False
+    assert result.settings["water_blank_correction_applied"] is False
+    assert set(result.per_dilution.to_dataframe().measurement_id) == {"M0", "M1"}
+    expected = inptk.analyze_concentration(
+        _select_experiment(raw_source, ["007"], ["01"]), water_blank_correction=False
+    )
+    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())

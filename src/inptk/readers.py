@@ -86,9 +86,11 @@ def read_counts(
     With water_blank_map, supply raw counts for samples and water blanks. Map
     each sample measurement name to a list of blank measurement names; import preserves
     the observations unchanged. Do not map counts already corrected by Icescopy.
-    The map declares a common water-background concentration per volume from the
-    same prepared-water protocol. Each sample and blank set needs its own known
-    positive droplet_volume_uL; their volumes and droplet counts may differ.
+    Correction assumes the full assay-blank background scales with droplet volume.
+    Each sample and blank set needs its own positive droplet_volume_uL; volumes
+    and observed droplet counts may differ. The caller supplies blanks with the
+    intended material, geometry, preparation and cooling conditions; these are
+    not inferred from measurement names.
     """
     data = _frame(source)
     records = _frame(metadata)

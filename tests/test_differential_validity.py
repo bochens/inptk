@@ -53,9 +53,10 @@ def test_initial_frozen_count_does_not_invent_a_warm_zero_baseline():
     assert result.concentration.iloc[0] == pytest.approx(-np.log(24 / 31) / 0.05)
 
 
-def test_irregular_first_freezing_row_uses_actual_adjacent_interval_edges():
+def test_irregular_observations_use_actual_adjacent_interval_edges():
     source = experiment(temperatures=(0, -7.23, -9), frozen=(0, 1, 4))
-    fractions = inptk.frozen_fraction(source, temperature_method="window_max_count")
+    # These supplied states are observed at unequal temperature intervals.
+    fractions = inptk.FrozenFractionTable(source.counts.to_dataframe())
     observed = fractions.to_dataframe().sort_values("temperature_C", ascending=False)
     result = inptk.differential_spectrum(fractions, experiment=source).to_dataframe()
     np.testing.assert_allclose(result.temperature_bin_left_C, observed.temperature_C.iloc[1:])

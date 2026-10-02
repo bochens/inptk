@@ -17,8 +17,8 @@ The distribution, Python import, and command are named `inptk`. There is no
 Start with `examples/standard_workflow.py` for a small synthetic example.
 The [Icescopy-to-air-concentration notebook](notebook/icescopy_freeze_count_to_air_inp_demo.ipynb)
 shows the current API step by step on the M1 dataset, including explicit sample
-mapping, input checks, automatic stitching, MLE, air normalization, and an OLAF
-comparison. It requires Jupyter, the `plot` extra, and the local source data at the
+mapping, input checks, temperature ranges, concentration estimation, and air
+normalization. It requires Jupyter, the `plot` extra, and the local source data at the
 paths configured near the top. Its dataset-specific settings are documented there;
 external result export is off by default.
 
@@ -30,7 +30,7 @@ import inptk
 experiment = inptk.read_counts("counts.csv", metadata="measurements.csv")
 result = inptk.analyze_concentration(
     experiment,
-    dilution_method="stitch",
+    method="mle",
     output_basis="sampled_air",
     decrease_policy="stop_at_decrease",
 )
@@ -50,22 +50,43 @@ the same defaults and calculations:
 
 ```bash
 inptk analyze counts.csv --metadata measurements.csv \
-  --dilution-method stitch --output-basis sampled_air --out analysis.inptk
+  --output-basis sampled_air --out analysis.inptk
 inptk export-csv analysis.inptk --out final_concentrations.csv
 ```
+
+For the CSU CSV layout, the repository helper formats an already saved final
+sampled-air spectrum:
+
+```bash
+python scripts/csu_inp_processing.py analysis.inptk --out csu.csv \
+  --sample A --run 1 --cycle 1 --allow-missing-header
+```
+
+Selection flags can be omitted when only one sample/run/cycle remains. Use
+`--header KEY=VALUE` for CSU header fields; `--allow-missing-header` leaves
+unavailable descriptive fields blank. Recorded normalization metadata cannot be
+changed. The exporter preserves the saved final points and errors without
+recalculating concentrations. Its columns are `degC`, `dilution`, `INPS_L`,
+`lower_CI`, and `upper_CI`; the two CI columns contain **error widths**, not
+interval endpoints. Points combining several dilutions leave `dilution` blank.
+Outputs must be new paths outside the saved analysis folder.
 
 ## Work one step at a time
 
 The full workflow calls these same public functions. You can stop after any step:
 
 ```python
-fractions = inptk.frozen_fraction(experiment.counts)
-individual = inptk.cumulative_spectrum(fractions, experiment=experiment)
+ranges = {"A_neat": {"min_C": -15}}
+fractions = inptk.frozen_fraction(experiment)
+individual = inptk.cumulative_spectrum(
+    fractions, experiment=experiment, temperature_ranges_C=ranges
+)
 
 combined = inptk.combine_dilutions(
     fractions,
     experiment=experiment,
-    method=inptk.Stitch(min_unfrozen=3),
+    method="mle",
+    temperature_ranges_C=ranges,
 )
 converted = inptk.convert_concentration(combined, experiment.samples, basis="sampled_air")
 final = inptk.finalize_spectrum(converted, decrease_policy="stop_at_decrease")
@@ -73,15 +94,16 @@ final = inptk.finalize_spectrum(converted, decrease_policy="stop_at_decrease")
 
 Frozen fractions need only the labelled counts table. Concentration calculations
 also need `experiment`, which supplies each measurement's dilution and droplet
-volume. Combining receives the frozen-fraction table because methods such as
-maximum likelihood estimation (MLE) use the observed counts, not just the
-individual concentration curves. Each step returns one scientific table.
+volume. Combining receives the frozen-fraction table because it needs the frozen
+and total droplet counts stored there. Those counts supply both concentration
+estimates and their uncertainty. Each step returns one scientific table.
 `table.history` records its processing steps; `table.warnings` reports unavailable
 results or settings that could not apply.
 
-`inptk.differential_spectrum(fractions, experiment=experiment)` is an optional
-separate calculation. `inptk.subtract_blanks(combined, {"A": blank_spectrum})`
-applies explicit blank correction before unit conversion. `finalize_spectrum`
+For optional differential output, call `differential_spectrum` with the same
+fractions, experiment, and temperature ranges.
+`inptk.subtract_blanks(combined, {"A": blank_spectrum})` subtracts a calculated
+sample/filter blank spectrum before unit conversion. `finalize_spectrum`
 then selects the final nondecreasing concentration rows without changing the
 input table, concentrations, or error bounds. It returns one spectrum table.
 The complete workflow also retains every candidate final row in
@@ -90,130 +112,102 @@ all stages for saving with `result.save(...)`.
 
 Differential concentration is the increase in cumulative concentration between
 adjacent temperatures, divided by their actual temperature difference. Each
-endpoint uses its own frozen fraction, so changing blank-corrected totals are
-supported. Negative changes are retained with quality flag `2`; non-finite
-results carry flag `1` (flags can combine). Each row stores both interval edges;
+endpoint uses its own concentration estimate, so changing blank-corrected totals
+are supported. Missing or excluded endpoints produce a missing interval; the
+calculation does not bridge gaps. Negative changes carry quality flag `2`;
+non-finite results carry flag `1` (flags can combine). Each row stores both interval edges;
 there is no invented interval before the first supplied state. This calculation
 does not establish whether a change caused by lost droplets is unbiased.
 
-## Choose how to combine dilutions
+## Combine dilutions within explicit temperature ranges
 
-Each method has its own settings object. Pass it as `method=` to
-`combine_dilutions`, or as `dilution_method=` to `analyze_concentration`.
-The strings `"stitch"` and `"mle"` remain shortcuts for their default settings.
-Unsupported settings raise an error instead of being ignored.
+Use `method="mle"` (default) or `method="average"` with the same temperature ranges:
 
-### Automatic stitching
+- **MLE**, maximum likelihood estimation, finds the concentration most consistent
+  with the eligible measurements' frozen and total droplet counts together.
+- **Average** calculates each eligible measurement's concentration in the original
+  suspension, then takes their equal-weight arithmetic mean.
 
-```python
-method = inptk.Stitch(min_unfrozen=5)
-result = inptk.analyze_concentration(experiment, dilution_method=method)
-```
-
-- `min_unfrozen`: require at least this many unfrozen droplets at each eligible
-  point. Default `3` retains the original exclusion of two or fewer unfrozen
-  droplets. It must be a positive whole number. Missing and infinite
-  concentrations are always excluded.
-
-Automatic stitching orders curves from least to most diluted. It keeps the
-current curve through its coldest eligible temperature and uses the next dilution
-only at colder output temperatures. A missing point inside the current range does
-not trigger an early switch or get filled from another curve.
-
-Every retained temperature uses **one dilution's existing concentration and error
-bounds unchanged**. There is no overlap setting, averaging, or joint refit during
-stitching. `source_measurement_id` identifies the selected measurement; unavailable
-points have an empty source. Final handling of decreases is a separate step.
-
-A group with only one measurement uses its cumulative spectrum directly. There
-is no dilution join in that case; customized stitching settings produce a warning
-rather than being applied as a general concentration filter.
-
-### Manual stitching
+At each temperature, only measurements of the same original sample, run, and
+cycle are combined. With one eligible measurement, both choices return that
+measurement's concentration and uncertainty. With none, neither invents a value.
+There is no separate stitching operation.
 
 ```python
-method = inptk.ManualStitch(switch_temperatures_C=[-12, -18])
-result = inptk.analyze_concentration(experiment, dilution_method=method)
-```
-
-For dilution factors `1`, `10`, and `100`, this selects:
-
-| Temperature | Dilution used |
-|---|---:|
-| Warmer than -12 C | 1 |
-| -18 C < temperature <= -12 C | 10 |
-| Temperature <= -18 C | 100 |
-
-Dilutions are ordered from least to most diluted. Switching temperatures must
-be strictly ordered from warm to cold, with one fewer switch than dilutions.
-At a switching temperature, the next dilution is used. A switch between grid
-points takes effect at the first colder point; there is no interpolation.
-An empty switch list is valid for a single dilution.
-
-One configuration applies to all sample/run/cycle groups. They must have the same
-observed dilution factors, with exactly one measurement at each factor. Missing
-dilutions or duplicate measurements at a selected dilution raise an error; analyze
-groups needing different dilution sets or switching temperatures separately.
-
-Manual stitching applies no automatic unfrozen-droplet cutoff,
-or averaging. Missing temperatures or non-finite estimates in the selected curve
-remain missing, with warnings; another dilution is never substituted. Each output
-row records `dilution_fold`, `source_measurement_id`, and `selection_status`.
-`source_measurement_ids` lists all supplied measurements, not just the selected one.
-Requested blank correction and unit conversion act on the combined spectrum.
-The final `decrease_policy` can exclude rows from it; the combined curve remains
-available unchanged for inspection.
-
-### Joint count fitting (MLE)
-
-MLE means maximum likelihood estimation: fit a concentration to the frozen and
-total droplet counts from the different dilutions together.
-
-```python
-method = inptk.MLE(
-    temperature_eligibility_C={"Sample_2": -15},
-    mask_mode="drop_rows",
+result = inptk.analyze_concentration(
+    experiment,
+    method="mle",  # use "average" to average per-measurement concentrations
+    temperature_ranges_C={
+        "Sample_0": {"min_C": -15},
+        "Sample_1": {"min_C": -22, "max_C": -12},
+    },
 )
-result = inptk.analyze_concentration(experiment, dilution_method=method)
 ```
 
-This example keeps measurement `Sample_2` rows at -15 C and colder in the MLE fit.
-All MLE dictionaries use the exact `measurement_id` as their key. For Icescopy
-imports, this is the exported `sample_name`, such as `Sample_2`, rather than its
-dilution factor or the parent sample name assigned by `sample_map` (such as
-`CRG_M1`). Settings follow that measurement through all its cycles. Unknown
-measurement names are rejected. Measurements omitted from temperature limits are
-unrestricted; those omitted from weights have weight 1. Temperature limits require
-an explicit choice of `mask_mode`:
+Each key is an exact `measurement_id`. For Icescopy imports, this is the exported
+`sample_name`, such as `Sample_0`, rather than a dilution factor or the parent
+sample name assigned by `sample_map`.
 
-- `"drop_rows"`: omit warmer rows but keep the original cumulative counts at
-  retained temperatures.
-- `"rebase_counts"`: also subtract the warm-side frozen baseline and remove those
-  droplets from the total. This changes the scientific interpretation; select it
-  only when deliberately excluding those warm freezing events.
+- `min_C` is the cold limit; `max_C` is the warm limit. Both endpoints are included.
+  For example, `{"min_C": -22, "max_C": -12}` retains −22°C through −12°C.
+- Omit either bound, or set it to `None` in Python / `null` in JSON, for no limit
+  on that side. Omitted measurements use their full available temperature range.
+- Overlapping ranges use every eligible measurement, through the chosen method.
+  Disjoint ranges can restrict each output temperature to one measurement. A
+  temperature with no eligible measurement has no concentration estimate.
+- Limits apply to the selected output temperatures and follow a measurement
+  through its cycles. They do not delete source observations or subtract frozen
+  events from the remaining cumulative counts. Unknown IDs and reversed limits
+  raise errors.
 
-Other retained MLE controls are `likelihood_weights` (positive relative
-contributions to the fit), or `action_counts` with one of
-`action_weight_lambda` or `action_weight_half_life` (an exponential weighting rule
-based on action counts supplied by the caller). These two weighting approaches
-cannot be combined. The package does not infer action counts from cycle numbers.
-`confidence_drop` controls the decrease in log likelihood defining the uncertainty
-interval; its default resolves to `z**2/2`. The effective value is saved.
+No hidden minimum-unfrozen-droplet cutoff or automatic range selection is applied.
+Future tools may suggest ranges, but should return this same explicit mapping for
+review. To use different ranges for different cycles, analyze those cycles in
+separate jobs.
 
-Each temperature is fitted separately. The same droplets observed at different
-temperatures are not treated as additional independent observations. Final
-selection uses `decrease_policy`; it does not refit concentrations or narrow their
-uncertainty bounds. There is no public `enforce_monotone` option.
+The same `temperature_ranges_C` keyword is accepted by `cumulative_spectrum`,
+`combine_dilutions`, and `differential_spectrum`. Individual concentration rows
+outside a range retain their count columns but have missing concentration/error
+values and `selection_status="outside_temperature_range"`. The frozen-fraction
+table remains complete. Missing blank coverage outside a sample's selected range
+does not block analysis; eligible temperatures still require blank coverage.
 
-MLE assumes independent physical droplet sets across its dilution inputs.
-[Raw water-blank input](#raw-sample-and-water-blank-observations) fits the shared
-background directly and restricts the weighting and masking controls accordingly.
-Repeated cycles remain separate. With counts already corrected for a water blank, both the
-retained OLAF count-based intervals and MLE intervals change because they use the
-adjusted frozen and total counts. Neither separately propagates uncertainty in
-the measured water blank or correlations introduced by a shared blank. Relative
-weights also change the likelihood; weighted intervals should not be described
-as ordinary droplet-count intervals.
+The count model assumes independent physical droplet sets across measurements.
+Each temperature is estimated separately: seeing the same droplets at another
+temperature or in another freezing cycle does not create extra independent
+observations. Repeated cycles remain separate throughout the workflow.
+
+MLE uncertainty uses a profile-likelihood interval: keep concentrations that remain
+sufficiently consistent with the observed counts after allowing any fitted water
+background to vary. The log-likelihood threshold is `z**2 / 2`; the default
+`z=1.96` gives nominal 95% bounds. The rule is the same for one or many eligible
+measurements. The bounds describe count uncertainty under the model, not
+cycle-to-cycle variability or uncertainty in supplied volumes and dilutions.
+
+Average uses conservative bounds that allow shared blank uncertainty; MLE uses
+counts jointly. For `average`, the uncertainty label is **Bonferroni-adjusted
+marginal profile bounds**. Each measurement is estimated with its assigned raw
+blank observations, then its interval is widened before the endpoints are averaged:
+
+1. Convert `z` to the nominal probability of falling outside the interval, called
+   `alpha`. Divide it by the number of eligible measurements, `m`.
+2. Calculate each measurement's profile bounds using this smaller `alpha / m`.
+3. Average all lower endpoints, and separately average all upper endpoints.
+
+The [Bonferroni adjustment](https://www.itl.nist.gov/div898/handbook/prc/section4/prc463.htm)
+does not require independent intervals, so a shared blank is not mistaken for
+independent background information. The individual profile intervals remain
+approximate: this is not a promise of exact 95% coverage. Bounds may stay wide
+or widen when more measurements contribute; averaging does not guarantee smaller
+error bars. With one measurement, its ordinary MLE bounds are used unchanged.
+An infinite individual estimate makes the mean infinite; an unavailable individual estimate
+makes the mean unavailable. Neither is silently omitted from the average.
+
+Both methods include measured background uncertainty when raw blank
+correction is enabled. Raw sample and blank counts allow that background to be
+estimated, as described [below](#raw-sample-and-water-blank-observations).
+Counts that were corrected before import cannot recover the original blank's
+uncertainty. Their intervals are conditional on the supplied adjusted counts.
 
 ### Select the final concentration curve
 
@@ -222,14 +216,19 @@ After dilution combination, any requested blank subtraction, and unit conversion
 and cycle. It examines temperatures from warm to cold and compares each finite
 concentration with the last retained value:
 
-- `"stop_at_decrease"` (default): at the first strictly lower concentration,
-  exclude that point and every colder point, even if the curve later recovers.
-- `"skip_decreases"`: exclude a strictly lower point and continue checking colder
-  points. Retain them if they equal or exceed the last retained value.
+- `"stop_at_decrease"` (default): at the first lower concentration beyond the
+  numerical-equality margin below, exclude that point and every colder point,
+  even if the curve later recovers.
+- `"skip_decreases"`: exclude a lower point beyond that margin and continue
+  checking colder points. Retain them if they equal or exceed the last retained
+  value within numerical precision.
 
 For concentrations `10, 12, 11, 13` in cooling order, the default retains `10, 12`;
-`skip_decreases` retains `10, 12, 13`. Equal values are retained. Even a small
-strict decrease triggers the rule: there is no hidden tolerance or window.
+`skip_decreases` retains `10, 12, 13`. Equality allows a fixed relative numerical
+margin of `1e-9`, with zero absolute margin, to avoid treating solver roundoff as
+a decrease. Outside this tiny margin, a decrease triggers the rule. This is not
+a user setting or a smoothing window; values and error bounds stay unchanged.
+The numerical margin is recorded in selection history.
 Nonfinite values are excluded and do not establish a comparison value. Negative
 finite concentrations are not clipped; this selection rule alone does not
 establish that they are scientifically usable.
@@ -240,7 +239,7 @@ rows after blank correction and unit conversion, with `used_in_final` and
 `final_selection_status` to explain selection. Statuses are `kept`, `nonfinite`,
 `decrease`, or `colder_than_decrease`. Earlier tables remain available.
 This final selection is separate from selecting count observations by temperature
-and from choosing which measurement rows enter the MLE fit.
+and from choosing which measurement rows enter the combination.
 
 ```python
 result = inptk.analyze_concentration(experiment, decrease_policy="skip_decreases")
@@ -248,23 +247,26 @@ result = inptk.analyze_concentration(experiment, decrease_policy="skip_decreases
 
 ### Command-line settings
 
-The same settings are accepted as a JSON object or the path to a JSON file:
+Supply the temperature ranges as a JSON object or the path to a JSON file:
 
 ```bash
-inptk analyze counts.csv --metadata measurements.csv --dilution-method stitch \
-  --method-options '{"min_unfrozen":5}' --out automatic.inptk
-inptk analyze counts.csv --metadata measurements.csv --dilution-method manual \
-  --method-options '{"switch_temperatures_C":[-12,-18]}' --out manual.inptk
+inptk analyze counts.csv --metadata measurements.csv \
+  --temperature-ranges '{"Sample_0":{"min_C":-15},"Sample_1":{"max_C":-12}}' \
+  --out analysis.inptk
 ```
 
-Resolved settings are saved in `result.settings["method_options"]` and table
-history. Manual results also record the dilution order. Common temperature-grid,
-output-unit, error-bar, and final-decrease settings remain workflow arguments.
-Use `--decrease-policy stop_at_decrease` (default) or `--decrease-policy skip_decreases`.
+The equivalent Python keyword is `temperature_ranges_C`. Resolved ranges are
+saved in `result.settings["temperature_ranges_C"]` and table history;
+`result.settings["estimation_method"]` records `"mle"` or `"average"`. Use
+`--method average` to select the mean; omitting `--method` uses MLE.
+Temperature-grid, output-unit, uncertainty, and final-decrease settings remain
+workflow arguments. Use `--decrease-policy stop_at_decrease` (default) or
+`--decrease-policy skip_decreases`.
+
 Use `--sample A --cycle 01` to analyze only those exact labels; repeat either
 option to select several. Sample selection uses the original sample name, while
-MLE controls use measurement names. Unknown selections raise an error. Selection
-and the retained source metadata are recorded in the saved experiment.
+temperature ranges use measurement names. Unknown selections raise an error.
+Selection and retained source metadata are recorded in the saved experiment.
 
 ## Samples, measurements, cycles, dictionaries, and lists
 
@@ -350,7 +352,7 @@ experiment = inptk.read_counts(
         "A_diluted": ["Water_1", "Water_2"],
     },
 )
-result = inptk.analyze_concentration(experiment, dilution_method="mle")
+result = inptk.analyze_concentration(experiment)
 ```
 
 The map always uses lists, even for one blank. It must assign every nonblank
@@ -376,38 +378,52 @@ is required when converting suspension concentrations to air or soil units.
 
 ### The background model
 
-The assigned sample and blank sets are assumed to share **one water-background
-concentration per unit volume** at each temperature, from the same prepared-water
-protocol. A larger droplet has a larger expected background contribution. This
-is an explicit model assumption, not something the software can establish from
-a blank name or droplet volume.
+The assigned blanks measure the combined background from water, substrate,
+PCR well walls, and other assay sources. INP-toolkit represents all of these as
+**one shared background per unit liquid volume** at each temperature. It assumes
+the entire background contribution scales with liquid volume: a larger droplet
+has a proportionally larger expected contribution.
+
+This is a simplifying physical assumption. The model does not separate the
+individual background sources. Assigned blanks should represent the sample's
+assay preparation. Each sample and blank uses its own actual droplet volume;
+their volumes do not have to be equal. There is one model and no model selector.
+Saved settings record this fixed assumption as `water_blank_model="volume_scaled"`.
 
 The fitted frozen probabilities are:
 
 - Sample: `1 - exp[-V_sample * (C / dilution + B)]`.
 - Blank set: `1 - exp[-V_blank * B]`.
 
-Here `C` is concentration in the original sample suspension, `B` is the common
-water-background concentration, both per mL, and each `V` is that set's droplet
-volume in mL. The model describes randomly distributed ice-active contributions
-per volume. It does not represent an additional background caused by well surface
-area or differing preparation protocols.
+Here `C` is concentration in the original sample suspension, `B` is the combined
+background concentration, both per mL of liquid, and each `V` is that set's actual
+droplet volume in mL. The model describes randomly distributed ice-active
+contributions per liquid volume. Water, substrate, and wall contributions all
+enter through `B`; there is no separate surface-area term.
 
-When correction is enabled, individual dilution spectra fit the sample and its
-assigned blanks together. Stitching selects one of those spectra at each
-temperature, copying its concentration and uncertainty bounds unchanged. MLE fits
-all eligible dilution counts and their common blank group together. In that joint fit, each independent blank set contributes once at a
-temperature, regardless of how many dilutions reference it. Distinct volumes
-remain in the probability model; unequal-volume blank counts are not collapsed
-into one frozen fraction for calculation. Repeated cycles remain separate.
+MLE fits this common assay background explicitly. It cannot identify or remove
+contamination unique to one dilution and absent from its assigned blanks.
+Measurement-specific temperature ranges remain an explicit choice by the user.
 
-With raw water correction enabled, MLE supports temperature cutoffs with
-`mask_mode="drop_rows"`. `temperature_method="latest"` or `"max"` is required;
-`window_max_count` adds synthetic warm zero rows and cannot supply raw observations
-for this fit. The window method remains available when correction is disabled or
-no raw blank map is supplied.
-It rejects `rebase_counts`, direct likelihood weights, and action-based weights:
-those alter the raw-count interpretation used by this joint model. This route
+When correction is enabled, individual dilution spectra estimate sample
+concentration from that measurement and its assigned blanks. The combined
+spectrum uses all measurements allowed by `temperature_ranges_C`. MLE fits their
+counts with the common blank group; average uses their individually estimated
+concentrations. In an MLE fit, each independent blank set contributes once at a temperature,
+regardless of how many dilutions reference it. Distinct droplet volumes remain
+in the probability model; unequal-volume blank counts are not collapsed into
+one frozen fraction. Repeated cycles remain separate.
+
+A blank with 32 wells is not subtracted as 32 droplets from a sample with four
+wells. Each count is interpreted with its own observed total and droplet volume.
+At the same frozen fraction and volume, more blank wells imply the same background
+level, with greater statistical precision. The joint fit uses that stronger
+information; the number of wells is not a multiplier for the correction.
+
+All concentration calculations require `temperature_method="latest"` or `"max"`.
+`window_max_count` inserts synthetic warm zero rows and is available only for
+frozen-fraction previews. Temperature ranges select whole count observations;
+there are no count-rebasing or arbitrary contribution-weight settings. This model
 also differs from the optional Python `blank_by_sample` operation, which subtracts
 an already calculated sample/filter blank spectrum later in the workflow.
 
@@ -439,14 +455,14 @@ For CLI use, save the assignment as `water-blank-map.json`:
 ```bash
 inptk analyze raw_counts.csv --format native --metadata measurements.csv \
   --water-blank-map water-blank-map.json --sample A --cycle 1 \
-  --dilution-method mle --out analysis.inptk
+  --out analysis.inptk
 ```
 
 Sample/cycle selection retains the associated blank observations and metadata
 without producing blank samples as analysis results. Saved experiments preserve
 the assignment, so `--format saved` uses it directly and rejects an override.
-The current `--format icescopy` path accepts already corrected exports and rejects
-`--water-blank-map`; use raw native input for the joint model.
+The current `--format icescopy` adapter does not carry raw blank context and
+rejects `--water-blank-map`; use raw native input for the joint model.
 
 Numerical and regression checks cover the raw-blank calculations, optional
 correction, saved results, and CLI behavior. These checks verify the implemented
@@ -456,7 +472,7 @@ intervals contain the true concentration across all experimental conditions.
 ## Icescopy integration
 
 The following importer reads the existing count export, which may already contain
-water correction. Its retained count-based uncertainty is an approximation; it
+water correction. Its uncertainty is conditional on the supplied counts; it
 does not reconstruct raw sample/blank counts or infer blank uncertainty. For the
 new Icescopy analysis dialog, pass raw session counts through the native contract
 above and make the water-blank assignment in that dialog.
@@ -511,21 +527,26 @@ placement, plots, and remaining integration work.
 | `final` | `CumulativeSpectrumTable` | Rows retained under `decrease_policy`; concentrations and error bounds are unchanged |
 | `differential` | `DifferentialSpectrumTable` or `None` | Optional per-measurement activity per degree, with interval limits |
 
-`dilution_method="stitch"` selects one dilution per output temperature using the
-coldest eligible handoff described above.
-`"mle"` fits the count observations jointly using the retained binomial-Poisson
-method. Differential spectra are optional (`differential=True`); they are not an
+`combined` combines the eligible measurements at each temperature with the
+requested `method`.
+It records `contributing_measurement_ids`, `contributor_count`, and
+`selection_status` (`single`, `combined`, or `no_eligible_measurements`).
+`available_measurement_ids` lists measurements present before applying ranges;
+`source_measurement_ids` lists the whole group's candidates. ID lists are JSON
+strings. `source_measurement_id` is populated only when one measurement contributes.
+These fields explain the calculation without treating missing data as a zero.
+Differential spectra are optional (`differential=True`); they are not an
 intermediate step required for cumulative concentration.
 
 Temperature selection runs separately for each measurement and cycle, using
-observations through the first coldest temperature. Choose one rule with
-`temperature_method`:
+observations through the first coldest temperature. `latest` and `max` can supply
+concentration calculations; `window_max_count` is restricted to fraction previews:
 
 | Method | Which observation supplies the frozen and total counts? |
 | --- | --- |
 | `max` | Highest frozen **fraction** among observations at the target temperature or warmer, allowing the tolerance. This carries earlier peaks forward. |
 | `latest` | Latest qualifying observation in time; coldest qualifying observation when timestamps are absent. Decreases remain visible. |
-| `window_max_count` | Highest **frozen count** strictly inside the temperature tolerance window. If the window is empty, use the highest frozen count warmer than its upper edge. |
+| `window_max_count` (fraction preview only) | Highest **frozen count** strictly inside the temperature tolerance window. If the window is empty, use the highest frozen count warmer than its upper edge. |
 
 The selected frozen count and total count stay together. Ties for either maximum
 use the latest qualifying observation. `step_C` sets the output temperature
@@ -533,7 +554,8 @@ spacing; `temperature_tolerance_C` sets the allowance around each target.
 Defaults are `latest`, 0.5 degree C spacing, and zero tolerance: use the last
 observation at or warmer than the target. Explicit `max` defaults to 0.05 degree C
 tolerance; `window_max_count` defaults to 0.01 degree C tolerance. An explicit
-tolerance overrides the method default in both Python and the command line.
+tolerance overrides the method default. The concentration CLI offers `latest`
+and `max`.
 
 ```python
 fractions = inptk.frozen_fraction(
@@ -582,13 +604,14 @@ src/inptk/
   tables.py         the four scientific table types and their checks
   experiment.py     sample/measurement information, Experiment, AnalysisResult
   readers.py        native CSV/Python and Icescopy import
-  methods.py        automatic/manual stitching and MLE settings
+  methods.py        combination-choice and temperature-range validation
   processing.py     separately callable count-to-fraction and spectrum steps
   workflows.py      dilution combination, correction, units, and full workflow
   io.py             versioned saving/loading of complete analyses
   cli.py            command-line arguments calling the same workflow
   __main__.py       python -m inptk
-  _engine/          retained numerical methods and their internal working tables
+  water_blank.py    raw sample/blank model preparation and shared-background fits
+  _engine/          numerical models and their internal working tables
 ```
 
 The private engine contains the numerical implementations behind the public

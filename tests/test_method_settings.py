@@ -1,663 +1,118 @@
-"""Public method choices must change only the controls the caller selected."""
+"""Temperature ranges use exact measurement names and retain the original counts."""
 
 import json
+from types import MappingProxyType
 
 import numpy as np
-import pandas as pd
 import pytest
 
 import inptk
-from inptk.cli import main
+from inptk.methods import validate_combination_method, validate_temperature_ranges
 
 
-def experiment(counts=None, scopes=(("R1", "01", 0),)):
-    counts = counts or {1: [1, 8, 17, 19], 10: [0, 1, 3, 7]}
-    rows, metadata = [], []
-    for run in dict.fromkeys(run for run, _, _ in scopes):
-        for dilution in counts:
-            metadata.append(
-                {
-                    "measurement_id": f"{run}_{dilution}",
-                    "sample_id": "A",
-                    "run_id": run,
-                    "dilution": dilution,
-                    "droplet_volume_uL": 50,
-                }
-            )
-    for run, cycle, offset in scopes:
-        for dilution, frozen in counts.items():
-            for temperature, count in zip((-5, -6, -7, -8), frozen):
-                rows.append(
-                    {
-                        "measurement_id": f"{run}_{dilution}",
-                        "run_id": run,
-                        "cycle_id": cycle,
-                        "temperature_C": temperature,
-                        "n_total": 20,
-                        "n_frozen": min(20, count + offset),
-                    }
-                )
-    return inptk.read_counts(pd.DataFrame(rows), metadata=metadata)
-
-
-def temperature_selection_experiment():
-    # Count-level blank correction can decrease both frozen and available counts.
-    rows = pd.DataFrame(
-        {
-            "measurement_id": ["M"] * 6,
-            "run_id": ["R1"] * 6,
-            "cycle_id": ["01"] * 6,
-            "time_s": range(6),
-            "temperature_C": [0, -9, -9.994, -10, -10.006, -11.1],
-            "n_total": [32, 32, 31, 20, 19, 18],
-            "n_frozen": [0, 1, 11, 10, 9, 12],
-        }
+def test_ranges_normalize_open_boundaries_without_inventing_omitted_measurements():
+    actual = validate_temperature_ranges(
+        {"01": {"min_C": -20}, "A": {"max_C": -5}, "B": {}},
+        measurement_ids={"01", "A", "B", "omitted"},
     )
-    return inptk.read_counts(
-        rows,
-        metadata=[
-            {
-                "measurement_id": "M",
-                "sample_id": "A",
-                "run_id": "R1",
-                "dilution": 1,
-                "droplet_volume_uL": 50,
-            }
-        ],
-    )
-
-
-def analyze(source, method, **kwargs):
-    return inptk.analyze_concentration(
-        source, dilution_method=method, step_C=1, temperature_method="latest", **kwargs
-    )
-
-
-def spectrum(result):
-    return result.combined.to_dataframe().set_index("temperature_C").sort_index()
-
-
-@pytest.mark.parametrize("name", ["stitch", "mle"])
-def test_default_config_matches_string_method(name):
-    source = experiment()
-    config = inptk.Stitch() if name == "stitch" else inptk.MLE()
-    default, explicit = analyze(source, name), analyze(source, config)
-    for table in ("frozen_fraction", "per_dilution", "combined", "final"):
-        pd.testing.assert_frame_equal(
-            getattr(default, table).to_dataframe(), getattr(explicit, table).to_dataframe()
-        )
-    assert explicit.settings == default.settings
-    assert explicit.settings["dilution_method"] == name
-
-
-def test_minimum_unfrozen_count_moves_the_join_at_the_count_boundary():
-    source = experiment()
-    usual = spectrum(analyze(source, inptk.Stitch()))
-    stricter = spectrum(analyze(source, inptk.Stitch(min_unfrozen=4)))
-    assert usual.loc[-7, "dilution_fold"] == 1  # Exactly three unfrozen droplets.
-    assert stricter.loc[-7, "dilution_fold"] == 10
-    assert usual.loc[-8, "dilution_fold"] == stricter.loc[-8, "dilution_fold"] == 10
-    assert usual.loc[-6, "concentration"] == stricter.loc[-6, "concentration"]
-
-
-def test_automatic_stitch_copies_one_source_even_when_curves_overlap_or_decrease():
-    source = experiment({1: [1, 12, 1, 19], 10: [0, 1, 4, 7]})
-    result = analyze(source, inptk.Stitch())
-    joined = spectrum(result)
-    per = result.per_dilution.to_dataframe().set_index(["measurement_id", "temperature_C"])
-    assert joined.loc[[-5, -6, -7, -8], "dilution_fold"].tolist() == [1, 1, 1, 10]
-    for temperature, row in joined.iterrows():
-        measurement = f"R1_{int(row.dilution_fold)}"
-        np.testing.assert_allclose(
-            row[["concentration", "lower_error", "upper_error"]].to_numpy(dtype=float),
-            per.loc[
-                (measurement, temperature), ["concentration", "lower_error", "upper_error"]
-            ].to_numpy(dtype=float),
-        )
-    assert -7 not in set(result.final.to_dataframe().temperature_C)
-
-
-def test_single_dilution_bypasses_automatic_stitch_cutoff():
-    source = experiment({1: [1, 8, 17, 19]})
-    result = analyze(source, inptk.Stitch(min_unfrozen=20))
-    per = result.per_dilution.to_dataframe().set_index("temperature_C")
-    pd.testing.assert_frame_equal(
-        spectrum(result)[["concentration", "lower_error", "upper_error"]],
-        per[["concentration", "lower_error", "upper_error"]].sort_index(),
-    )
-
-
-def test_manual_switch_boundaries_copy_selected_values_and_uncertainty():
-    source = experiment({1: [19, 19, 19, 19], 10: [0, 1, 3, 7], 100: [0, 0, 1, 2]})
-    result = analyze(source, inptk.ManualStitch(switch_temperatures_C=[-6, -7]))
-    selected = spectrum(result)
-    assert selected.loc[[-5, -6, -7, -8], "dilution_fold"].tolist() == [1, 10, 100, 100]
-    assert np.isfinite(selected.loc[-5, "concentration"])  # One unfrozen remains usable.
-    per = result.per_dilution.to_dataframe().set_index(["measurement_id", "temperature_C"])
-    for temperature, row in selected.iterrows():
-        measurement = f"R1_{int(row.dilution_fold)}"
-        assert row.source_measurement_id == measurement
-        np.testing.assert_allclose(
-            row[["concentration", "lower_error", "upper_error"]].to_numpy(dtype=float),
-            per.loc[
-                (measurement, temperature), ["concentration", "lower_error", "upper_error"]
-            ].to_numpy(dtype=float),
-        )
-
-
-def test_manual_missing_selected_temperature_does_not_fall_back():
-    source = experiment()
-    rows = source.counts.to_dataframe()
-    rows = rows[~((rows.measurement_id == "R1_10") & (rows.temperature_C > -7))]
-    incomplete = inptk.read_counts(rows, metadata=list(source.measurements.values()))
-    result = analyze(incomplete, inptk.ManualStitch(switch_temperatures_C=[-6]))
-    assert set(spectrum(result).index) == {-5, -6, -7, -8}
-    assert np.isnan(spectrum(result).loc[-6, "concentration"])
-    assert np.isfinite(spectrum(result).loc[-7, "concentration"])
-    assert result.warnings
-
-
-def test_manual_nonfinite_selected_estimate_is_missing():
-    source = experiment({1: [1, 8, 17, 19], 10: [0, 1, 3, 20]})
-    result = analyze(source, inptk.ManualStitch(switch_temperatures_C=[-7]))
-    assert np.isnan(spectrum(result).loc[-8, "concentration"])
-    assert result.warnings
-
-
-def test_manual_keeps_runs_and_cycles_separate():
-    source = experiment(scopes=(("R1", "01", 0), ("R1", "02", 1), ("R2", "01", 2)))
-    result = analyze(source, inptk.ManualStitch(switch_temperatures_C=[-7]))
-    final = result.final.to_dataframe()
-    assert len(final.groupby(["run_id", "sample_id", "cycle_id"])) == 3
-    per = result.per_dilution.to_dataframe()
-    for identity, group in final.groupby(["run_id", "cycle_id"]):
-        run, cycle = identity
-        expected = per[
-            (per.run_id == run)
-            & (per.cycle_id == cycle)
-            & (per.measurement_id == f"{run}_10")
-            & (per.temperature_C == -7)
-        ]
-        actual = group.loc[group.temperature_C == -7, "concentration"].iloc[0]
-        assert actual == expected.concentration.iloc[0]
-
-
-def test_manual_rejects_absent_dilution_in_one_cycle_and_monotone_adjustment():
-    source = experiment(scopes=(("R1", "01", 0), ("R1", "02", 0)))
-    rows = source.counts.to_dataframe()
-    rows = rows[~((rows.cycle_id == "02") & (rows.measurement_id == "R1_10"))]
-    incomplete = inptk.read_counts(rows, metadata=list(source.measurements.values()))
-    with pytest.raises(ValueError):
-        analyze(incomplete, inptk.ManualStitch(switch_temperatures_C=[-7]))
-    with pytest.raises(TypeError, match="enforce_monotone"):
-        analyze(source, inptk.ManualStitch(switch_temperatures_C=[-7]), enforce_monotone=True)
-
-
-def test_manual_rejects_multiple_measurements_of_the_selected_dilution():
-    source = experiment()
-    rows = source.counts.to_dataframe()
-    duplicate = rows[rows.measurement_id == "R1_1"].assign(measurement_id="replicate")
-    metadata = [vars(value) for value in source.measurements.values()]
-    metadata.append(dict(metadata[0], measurement_id="replicate"))
-    repeated = inptk.read_counts(pd.concat([rows, duplicate]), metadata=metadata)
-    with pytest.raises(ValueError):
-        analyze(repeated, inptk.ManualStitch(switch_temperatures_C=[-7]))
-
-
-def test_manual_requires_the_same_dilution_factors_across_runs():
-    source = experiment(scopes=(("R1", "01", 0), ("R2", "01", 0)))
-    metadata = [dict(vars(value)) for value in source.measurements.values()]
-    for record in metadata:
-        if record["measurement_id"] == "R2_10":
-            record["dilution"] = 20
-    source = inptk.read_counts(source.counts.to_dataframe(), metadata=metadata)
-    with pytest.raises(ValueError):
-        analyze(source, inptk.ManualStitch(switch_temperatures_C=[-7]))
-
-
-def test_manual_zero_switches_support_one_dilution():
-    result = analyze(experiment({1: [1, 8, 17, 19]}), inptk.ManualStitch(switch_temperatures_C=[]))
-    assert spectrum(result).dilution_fold.eq(1).all()
-
-
-@pytest.mark.parametrize(
-    "weighting",
-    [
-        {"likelihood_weights": {"R1_10": 0.25}},
-        {"action_counts": {"R1_10": 2}, "action_weight_half_life": 1},
-    ],
-)
-def test_mle_controls_preserve_measurement_names_in_saved_settings(tmp_path, weighting):
-    source = experiment()
-    method = inptk.MLE(
-        temperature_eligibility_C={"R1_10": -6},
-        mask_mode="drop_rows",
-        confidence_drop=1.1,
-        **weighting,
-    )
-    result = analyze(source, method)
-    options = result.settings["method_options"]
-    assert options["confidence_drop"] == 1.1
-    assert options["temperature_eligibility_C"] == {"R1_10": -6}
-    for name, value in weighting.items():
-        assert options[name] == value
-    assert json.loads(json.dumps(options, allow_nan=False)) == options
-    result.save(tmp_path / "analysis")
-    restored = inptk.load(tmp_path / "analysis")
-    assert restored.settings == result.settings
-    rerun = analyze(source, inptk.MLE(**restored.settings["method_options"]))
-    pd.testing.assert_frame_equal(spectrum(rerun), spectrum(result))
-    unweighted = spectrum(analyze(source, inptk.MLE(confidence_drop=1.1)))
-    assert spectrum(result).loc[-6, "concentration"] < unweighted.loc[-6, "concentration"]
-
-
-def test_mle_action_weights_match_direct_weights_and_z_sets_default_confidence():
-    source = experiment()
-    direct = analyze(source, inptk.MLE(likelihood_weights={"R1_10": 0.25}), z=2.3)
-    actions = analyze(
-        source, inptk.MLE(action_counts={"R1_10": 2}, action_weight_half_life=1), z=2.3
-    )
-    pd.testing.assert_frame_equal(spectrum(direct), spectrum(actions))
-    assert direct.settings["method_options"]["confidence_drop"] == pytest.approx(2.3**2 / 2)
-
-
-def test_mle_targets_measurements_independently_at_the_same_dilution():
-    original = experiment()
-    metadata = [dict(vars(value), dilution=1) for value in original.measurements.values()]
-    source = inptk.read_counts(original.counts.to_dataframe(), metadata=metadata)
-    unrestricted = spectrum(analyze(source, inptk.MLE()))
-    masked = spectrum(
-        analyze(
-            source,
-            inptk.MLE(temperature_eligibility_C={"R1_10": -6}, mask_mode="drop_rows"),
-        )
-    )
-    # The unlisted measurement remains eligible, even at the same dilution factor.
-    assert masked.loc[-5, "concentration"] == pytest.approx(-np.log1p(-1 / 20) / 0.05)
-    pd.testing.assert_series_equal(masked.loc[-6], unrestricted.loc[-6])
-    direct = spectrum(analyze(source, inptk.MLE(likelihood_weights={"R1_10": 0.25})))
-    actions = spectrum(
-        analyze(source, inptk.MLE(action_counts={"R1_10": 2}, action_weight_half_life=1))
-    )
-    # Same volumes/factors give a weighted frozen fraction with a known exact fit.
-    expected = -np.log1p(-(8 + 0.25 * 1) / (20 + 0.25 * 20)) / 0.05
-    assert direct.loc[-6, "concentration"] == pytest.approx(expected)
-    pd.testing.assert_frame_equal(direct, actions)
-
-
-def test_mle_named_controls_do_not_leak_into_other_samples_runs_or_cycles():
-    original = experiment(
-        {1: [1, 8, 17, 19], 10: [0, 3, 6, 10]},
-        scopes=(("R1", "01", 0), ("R1", "02", 1), ("R2", "01", 2)),
-    )
-    rows = original.counts.to_dataframe()
-    rows = rows[~((rows.cycle_id == "02") & (rows.measurement_id == "R1_10"))].copy()
-    rows.loc[rows.run_id == "R2", "sample_id"] = "B"
-    metadata = [
-        dict(vars(value), sample_id="B" if value.run_id == "R2" else "A")
-        for value in original.measurements.values()
-    ]
-    source = inptk.read_counts(rows, metadata=metadata)
-    baseline = analyze(source, inptk.MLE()).combined
-    targeted = analyze(
-        source,
-        inptk.MLE(
-            temperature_eligibility_C={"R1_10": -6},
-            mask_mode="drop_rows",
-            likelihood_weights={"R1_10": 0.25},
-        ),
-    ).combined
-    for run, sample, cycle in (("R1", "A", "02"), ("R2", "B", "01")):
-        selected = {"run_id": run, "sample_id": sample, "cycle_id": cycle}
-        pd.testing.assert_frame_equal(
-            targeted.select(**selected).to_dataframe(), baseline.select(**selected).to_dataframe()
-        )
-    selected = {"run_id": "R1", "sample_id": "A", "cycle_id": "01", "temperature_C": -6}
-    assert (
-        targeted.select(**selected).to_dataframe().concentration.iloc[0]
-        < baseline.select(**selected).to_dataframe().concentration.iloc[0]
-    )
-
-
-@pytest.mark.parametrize(
-    "field, extra",
-    [
-        ("temperature_eligibility_C", {"mask_mode": "drop_rows"}),
-        ("likelihood_weights", {}),
-        ("action_counts", {"action_weight_half_life": 1}),
-    ],
-)
-def test_mle_requires_exact_nonempty_measurement_names(field, extra):
-    for key in (10, "", "   "):
-        with pytest.raises((TypeError, ValueError)):
-            inptk.MLE(**{field: {key: 1}, **extra})
-    for unknown in ("missing", "10"):
-        method = inptk.MLE(**{field: {unknown: 1}, **extra})
-        with pytest.raises(ValueError):
-            analyze(experiment(), method)
-
-
-def test_mle_numeric_string_key_is_valid_only_as_an_actual_measurement_name():
-    original = experiment()
-    rows = original.counts.to_dataframe().replace({"measurement_id": {"R1_10": "10"}})
-    metadata = [
-        dict(vars(value), measurement_id="10" if key == "R1_10" else key)
-        for key, value in original.measurements.items()
-    ]
-    renamed = inptk.read_counts(rows, metadata=metadata)
-    result = analyze(
-        renamed,
-        inptk.MLE(
-            temperature_eligibility_C={"10": -6},
-            mask_mode="drop_rows",
-            likelihood_weights={"10": 0.25},
-        ),
-    )
-    expected = analyze(
-        original,
-        inptk.MLE(
-            temperature_eligibility_C={"R1_10": -6},
-            mask_mode="drop_rows",
-            likelihood_weights={"R1_10": 0.25},
-        ),
-    )
-    columns = ["concentration", "lower_error", "upper_error"]
-    pd.testing.assert_frame_equal(spectrum(result)[columns], spectrum(expected)[columns])
-    assert result.settings["method_options"]["temperature_eligibility_C"] == {"10": -6}
-
-
-@pytest.mark.parametrize(
-    "name, options",
-    [
-        ("Stitch", {"min_unfrozen": -1}),
-        ("Stitch", {"min_unfrozen": 2.5}),
-        ("Stitch", {"min_unfrozen": True}),
-        ("Stitch", {"overlap_points": 4}),
-        ("MLE", {"mask_mode": "ignore"}),
-        ("MLE", {"temperature_eligibility_C": {"R1_10": -6}}),
-        ("MLE", {"mask_mode": "drop_rows"}),
-        ("MLE", {"likelihood_weights": {"R1_10": 0}}),
-        ("MLE", {"likelihood_weights": {"R1_10": np.inf}}),
-        ("MLE", {"likelihood_weights": {"unknown": 0.5}}),
-        ("MLE", {"action_counts": {"R1_10": -1}, "action_weight_half_life": 1}),
-        ("MLE", {"action_counts": {"R1_10": 2}}),
-        ("MLE", {"confidence_drop": 0}),
-        ("ManualStitch", {"switch_temperatures_C": [-7, -6]}),
-        ("ManualStitch", {"switch_temperatures_C": [-7, -7]}),
-        ("ManualStitch", {"switch_temperatures_C": [np.nan]}),
-        ("ManualStitch", {"switch_temperatures_C": [-6, -7]}),
-    ],
-)
-def test_invalid_method_options_are_rejected(name, options):
-    with pytest.raises((TypeError, ValueError)):
-        analyze(experiment(), getattr(inptk, name)(**options))
-
-
-@pytest.mark.parametrize("method", [42, {}, "unknown", "manual"])
-def test_invalid_method_choice_is_rejected(method):
-    with pytest.raises((TypeError, ValueError)):
-        analyze(experiment(), method)
-
-
-@pytest.mark.parametrize(
-    "name, options",
-    [
-        ("stitch", {"min_unfrozen": 4}),
-        ("mle", {"likelihood_weights": {"R1_10": 0.25}, "confidence_drop": 1.1}),
-        ("manual", {"switch_temperatures_C": [-7]}),
-    ],
-)
-@pytest.mark.parametrize("from_file", [False, True])
-def test_cli_method_options_match_python(tmp_path, name, options, from_file):
-    source = experiment()
-    source.save(tmp_path / "source")
-    payload = json.dumps(options)
-    if from_file:
-        option_path = tmp_path / "options.json"
-        option_path.write_text(payload)
-        payload = str(option_path)
-    assert (
-        main(
-            [
-                "analyze",
-                str(tmp_path / "source"),
-                "--format",
-                "saved",
-                "--out",
-                str(tmp_path / "result"),
-                "--dilution-method",
-                name,
-                "--method-options",
-                payload,
-                "--step-C",
-                "1",
-                "--temperature-method",
-                "latest",
-            ]
-        )
-        == 0
-    )
-    method_type = {"stitch": inptk.Stitch, "mle": inptk.MLE, "manual": inptk.ManualStitch}[name]
-    expected = analyze(source, method_type(**options))
-    actual = inptk.load(tmp_path / "result")
-    pd.testing.assert_frame_equal(actual.final.to_dataframe(), expected.final.to_dataframe())
-    assert actual.settings == expected.settings
-
-
-@pytest.mark.parametrize("options", [{"unknown": 1}, {"confidence_drop": 1.1}])
-def test_cli_rejects_unknown_or_mismatched_method_options(tmp_path, options):
-    experiment().save(tmp_path / "source")
-    with pytest.raises(SystemExit) as error:
-        main(
-            [
-                "analyze",
-                str(tmp_path / "source"),
-                "--format",
-                "saved",
-                "--out",
-                str(tmp_path / "result"),
-                "--dilution-method",
-                "stitch",
-                "--method-options",
-                json.dumps(options),
-            ]
-        )
-    assert error.value.code != 0
-    assert not (tmp_path / "result").exists()
-
-
-@pytest.mark.parametrize("name", ["stitch", "mle", "manual"])
-def test_stepwise_calculation_matches_full_workflow(name):
-    source = experiment()
-    metadata = [
-        dict(
-            vars(measurement),
-            sample_type="air",
-            air_volume_L=100,
-            suspension_volume_mL=5,
-            filter_fraction_used=1,
-        )
-        for measurement in source.measurements.values()
-    ]
-    source = inptk.read_counts(source.counts.to_dataframe(), metadata=metadata)
-    method = {
-        "stitch": inptk.Stitch(min_unfrozen=4),
-        "mle": inptk.MLE(likelihood_weights={"R1_10": 0.25}),
-        "manual": inptk.ManualStitch(switch_temperatures_C=[-7]),
-    }[name]
-    fractions = inptk.frozen_fraction(source, step_C=1, temperature_method="latest")
-    per_dilution = inptk.cumulative_spectrum(fractions, experiment=source, z=2.3)
-    combined = inptk.combine_dilutions(fractions, experiment=source, method=method, z=2.3)
-    differential = inptk.differential_spectrum(fractions, experiment=source)
-    blank = inptk.CumulativeSpectrumTable(
-        combined.to_dataframe().assign(
-            sample_id="blank", concentration=0.1, lower_error=0.01, upper_error=0.02
-        )
-    )
-    corrected = inptk.subtract_blanks(combined, {"A": blank})
-    converted = inptk.convert_concentration(corrected, source.samples, basis="sampled_air")
-    final = inptk.finalize_spectrum(converted)
-    full = analyze(
-        source,
-        method,
-        z=2.3,
-        differential=True,
-        blank_by_sample={"A": blank},
-        output_basis="sampled_air",
-    )
-    for step, expected in (
-        (fractions, full.frozen_fraction),
-        (per_dilution, full.per_dilution),
-        (combined, full.combined),
-        (differential, full.differential),
-        (final, full.final),
-    ):
-        pd.testing.assert_frame_equal(step.to_dataframe(), expected.to_dataframe())
-
-
-def test_temperature_methods_select_counts_fraction_or_latest_observation():
-    source = temperature_selection_experiment()
-    expected_counts = {
-        "window_max_count": (11, 31),
-        "max": (10, 20),
-        "latest": (9, 19),
+    assert actual == {
+        "01": {"min_C": -20.0, "max_C": None},
+        "A": {"min_C": None, "max_C": -5.0},
+        "B": {"min_C": None, "max_C": None},
     }
-    for method, (frozen, total) in expected_counts.items():
-        fractions = (
-            inptk.frozen_fraction(
-                source, step_C=1, temperature_method=method, temperature_tolerance_C=0.01
-            )
-            .to_dataframe()
-            .set_index("temperature_C")
-        )
-        row = fractions.loc[-10]
-        assert (row.n_frozen, row.n_total) == (frozen, total)
-        assert row.fraction_frozen == pytest.approx(frozen / total)
-        if method == "window_max_count":
-            # No observation is near -11 C: use the warmer maximum count,
-            # retaining its paired total rather than the last observed total.
-            fallback = fractions.loc[-11]
-            assert (fallback.n_frozen, fallback.n_total) == (11, 31)
-            assert fallback.fraction_frozen == pytest.approx(11 / 31)
+    assert json.loads(json.dumps(actual, allow_nan=False)) == actual
+    assert validate_temperature_ranges(None, measurement_ids={"A"}) == {}
+    assert validate_temperature_ranges({}, measurement_ids={"A"}) == {}
 
 
-def test_window_max_count_cli_roundtrip_matches_stepwise_and_workflow(tmp_path):
-    source = temperature_selection_experiment()
-    source.save(tmp_path / "source")
-    assert (
-        main(
-            [
-                "analyze",
-                str(tmp_path / "source"),
-                "--format",
-                "saved",
-                "--out",
-                str(tmp_path / "result"),
-                "--step-C",
-                "1",
-                "--temperature-method",
-                "window_max_count",
-            ]
-        )
-        == 0
-    )
-    expected = inptk.analyze_concentration(
-        source, step_C=1.0, temperature_method="window_max_count"
-    )
-    fractions = inptk.frozen_fraction(source, step_C=1.0, temperature_method="window_max_count")
-    actual = inptk.load(tmp_path / "result")
-    pd.testing.assert_frame_equal(actual.frozen_fraction.to_dataframe(), fractions.to_dataframe())
-    pd.testing.assert_frame_equal(actual.final.to_dataframe(), expected.final.to_dataframe())
-    assert actual.settings == expected.settings
-    assert actual.settings["temperature_method"] == "window_max_count"
-    assert actual.settings["temperature_tolerance_C"] == 0.01
+def test_range_copy_accepts_readonly_mappings_and_normalizes_numpy_numbers():
+    bounds = {"min_C": np.float64(-20), "max_C": np.int64(-5)}
+    source = MappingProxyType({"A": MappingProxyType(bounds)})
+    actual = validate_temperature_ranges(source, measurement_ids={"A"})
+    assert all(type(value) is float for value in actual["A"].values())
+    bounds["min_C"] = -30
+    assert actual["A"]["min_C"] == -20
+    actual["A"]["max_C"] = -1
+    assert bounds["max_C"] == -5
 
 
-def test_frozen_fraction_accepts_counts_without_metadata():
-    counts = experiment().counts
-    fractions = inptk.frozen_fraction(counts, step_C=1, temperature_method="latest")
-    actual = fractions.to_dataframe().set_index(["measurement_id", "temperature_C"])
-    observed = counts.to_dataframe().astype({"temperature_C": float})
-    observed = observed.set_index(["measurement_id", "temperature_C"])
-    pd.testing.assert_series_equal(
-        actual.fraction_frozen.sort_index(),
-        (observed.n_frozen / observed.n_total).sort_index(),
-        check_names=False,
-    )
+def test_equal_boundaries_and_explicit_unlimited_boundaries_are_valid():
+    assert validate_temperature_ranges(
+        {"A": {"min_C": -10, "max_C": -10}, "B": {"min_C": None, "max_C": None}},
+        measurement_ids={"A", "B"},
+    ) == {
+        "A": {"min_C": -10.0, "max_C": -10.0},
+        "B": {"min_C": None, "max_C": None},
+    }
 
 
-def test_stepwise_spectra_reject_wrong_sample_or_run_context():
-    source = experiment()
-    fractions = inptk.frozen_fraction(source, step_C=1)
-    for column in ("sample_id", "run_id"):
-        changed = inptk.FrozenFractionTable(
-            fractions.to_dataframe().assign(**{column: "different"})
-        )
-        for operation in (
-            inptk.cumulative_spectrum,
-            inptk.combine_dilutions,
-            inptk.differential_spectrum,
-        ):
-            with pytest.raises(ValueError, match="identities disagree"):
-                operation(changed, experiment=source)
+@pytest.mark.parametrize("value", [[], "A", 1, True])
+def test_ranges_require_a_mapping(value):
+    with pytest.raises(TypeError, match="map measurement names"):
+        validate_temperature_ranges(value, measurement_ids={"A"})
 
 
-def test_stepwise_table_exposes_combination_warnings():
-    source = experiment({1: [1, 8, 17, 19], 10: [0, 1, 3, 20]})
-    method = inptk.ManualStitch(switch_temperatures_C=[-7])
-    fractions = inptk.frozen_fraction(source, step_C=1, temperature_method="latest")
-    combined = inptk.combine_dilutions(fractions, experiment=source, method=method)
-    full = analyze(source, method)
-    assert combined.warnings
-    assert set(combined.warnings).issubset(full.warnings)
-    assert combined.select(temperature_C=-8).warnings == combined.warnings
+@pytest.mark.parametrize("name", [1, True, None, "", "  "])
+def test_range_names_must_be_nonempty_strings(name):
+    with pytest.raises(ValueError, match="non-empty measurement names"):
+        validate_temperature_ranges({name: {}}, measurement_ids={"A"})
 
 
-@pytest.mark.parametrize("entrypoint", ["stepwise", "workflow"])
-def test_public_mle_has_no_option_to_reuse_droplets_across_temperatures(entrypoint):
-    source = experiment()
-    with pytest.raises(TypeError, match="enforce_monotone"):
-        if entrypoint == "workflow":
-            inptk.analyze_concentration(source, dilution_method="mle", enforce_monotone=True)
-        else:
-            fractions = inptk.frozen_fraction(source)
-            inptk.combine_dilutions(
-                fractions, experiment=source, method=inptk.MLE(), enforce_monotone=True
-            )
+@pytest.mark.parametrize("name", ["A ", " a", "1", "blank", "parent"])
+def test_range_names_must_exactly_match_supplied_sample_measurement_ids(name):
+    with pytest.raises(ValueError, match="Unknown measurement"):
+        validate_temperature_ranges({name: {}}, measurement_ids={"A", "01"})
 
 
-def test_default_temperature_selection_preserves_the_latest_corrected_state():
-    source = temperature_selection_experiment()
-    fractions = inptk.frozen_fraction(source, step_C=1)
-    row = fractions.to_dataframe().set_index("temperature_C").loc[-10]
-    assert (row.n_frozen, row.n_total) == (10, 20)
-    result = inptk.analyze_concentration(source, step_C=1)
-    assert result.settings["temperature_method"] == "latest"
-    assert result.settings["temperature_tolerance_C"] == 0
-    pd.testing.assert_frame_equal(fractions.to_dataframe(), result.frozen_fraction.to_dataframe())
+@pytest.mark.parametrize("bounds", [None, -10, [], "-10", True])
+def test_each_range_requires_a_mapping(bounds):
+    with pytest.raises(TypeError, match="range object"):
+        validate_temperature_ranges({"A": bounds}, measurement_ids={"A"})
 
 
-def test_explicit_max_keeps_its_temperature_tolerance_default():
-    source = temperature_selection_experiment()
-    result = inptk.analyze_concentration(source, temperature_method="max")
-    assert result.settings["temperature_tolerance_C"] == 0.05
+@pytest.mark.parametrize("boundary", ["minimum", "max", "lower_C", 1, None])
+def test_unknown_boundaries_are_rejected(boundary):
+    with pytest.raises(ValueError, match="Unknown temperature range keys"):
+        validate_temperature_ranges({"A": {boundary: -10}}, measurement_ids={"A"})
 
 
-@pytest.mark.parametrize("method", ["latest", "max"])
-def test_temperature_range_without_a_regular_threshold_returns_empty(method):
-    counts = inptk.CountsTable(
-        pd.DataFrame(
-            {
-                "run_id": ["R"],
-                "sample_id": ["S"],
-                "cycle_id": ["1"],
-                "measurement_id": ["M"],
-                "temperature_C": [-10.2],
-                "n_total": [32],
-                "n_frozen": [1],
-            }
-        )
-    )
-    fractions = inptk.frozen_fraction(counts, step_C=0.5, temperature_method=method)
-    assert fractions.to_dataframe().empty
-    assert {"n_total", "n_frozen", "measurement_id", "cycle_id"}.issubset(fractions.columns)
+@pytest.mark.parametrize("boundary", ["min_C", "max_C"])
+@pytest.mark.parametrize("value", [True, False, np.bool_(True), "-10", [], {}])
+def test_boundaries_require_numbers_or_none(boundary, value):
+    with pytest.raises(TypeError, match="finite number or None"):
+        validate_temperature_ranges({"A": {boundary: value}}, measurement_ids={"A"})
+
+
+@pytest.mark.parametrize("boundary", ["min_C", "max_C"])
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_nonfinite_boundaries_are_rejected(boundary, value):
+    with pytest.raises(ValueError, match="must be finite"):
+        validate_temperature_ranges({"A": {boundary: value}}, measurement_ids={"A"})
+
+
+def test_reversed_boundaries_are_rejected_without_changing_input():
+    source = {"A": {"min_C": -5, "max_C": -20}}
+    with pytest.raises(ValueError, match="min_C <= max_C"):
+        validate_temperature_ranges(source, measurement_ids={"A"})
+    assert source == {"A": {"min_C": -5, "max_C": -20}}
+
+
+def test_method_selector_classes_are_not_public():
+    assert all(not hasattr(inptk, name) for name in ("MLE", "ManualStitch", "Stitch"))
+
+
+@pytest.mark.parametrize("method", ["mle", "average"])
+def test_supported_combination_methods_are_returned_unchanged(method):
+    assert validate_combination_method(method) == method
+
+
+@pytest.mark.parametrize("method", ["stitch", "manual", "single", "MLE", "average ", "", "mean"])
+def test_other_combination_method_names_are_rejected(method):
+    with pytest.raises(ValueError, match="method must be 'mle' or 'average'"):
+        validate_combination_method(method)
+
+
+@pytest.mark.parametrize("method", [None, True, 1, [], {}, np.array(["mle"])])
+def test_combination_method_must_be_a_string(method):
+    with pytest.raises(TypeError, match="method must be a string"):
+        validate_combination_method(method)

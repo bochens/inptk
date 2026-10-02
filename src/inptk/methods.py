@@ -1,188 +1,76 @@
-"""Validated settings for each way of combining dilution measurements."""
+"""Validate concentration combination choices and measured temperature ranges."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
-from itertools import pairwise
-from numbers import Integral
-from types import MappingProxyType
-from typing import Literal
+from numbers import Real
+from typing import Literal, cast
 
 
-def _finite(value, name: str) -> float:
-    if isinstance(value, bool):
-        raise TypeError(f"{name} must be a finite number")
+def validate_combination_method(value) -> Literal["mle", "average"]:
+    """Accept the two explicit ways to combine eligible dilution measurements."""
+    if not isinstance(value, str):
+        raise TypeError("method must be a string: 'mle' or 'average'")
+    if value not in ("mle", "average"):
+        raise ValueError("method must be 'mle' or 'average'")
+    return cast(Literal["mle", "average"], value)
+
+
+def _temperature_bound(value, *, measurement_id: str, boundary: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(
+            f"{boundary} for measurement {measurement_id!r} must be a finite number or None"
+        )
     try:
         number = float(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite number") from error
+    except (OverflowError, ValueError) as error:
+        raise ValueError(f"{boundary} for measurement {measurement_id!r} must be finite") from error
     if not math.isfinite(number):
-        raise ValueError(f"{name} must be a finite number")
+        raise ValueError(f"{boundary} for measurement {measurement_id!r} must be finite")
     return number
 
 
-def _measurement_values(values, name: str, *, minimum=None, strict=False):
-    if values is None:
-        return None
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must map measurement names to numbers")
-    result = {}
-    for measurement_id, value in values.items():
-        if not isinstance(measurement_id, str):
-            raise TypeError(f"{name} keys must be measurement names (strings)")
-        if not measurement_id.strip():
-            raise ValueError(f"{name} measurement names must not be empty")
-        number = _finite(value, name)
-        if minimum is not None and (number < minimum or (strict and number == minimum)):
-            relation = "greater than" if strict else "at least"
-            raise ValueError(f"{name} values must be {relation} {minimum}")
-        result[measurement_id] = number
-    return MappingProxyType(result)
+def validate_temperature_ranges(
+    value, *, measurement_ids: set[str]
+) -> dict[str, dict[str, float | None]]:
+    """Copy and normalize optional, inclusive ranges keyed by exact measurement names.
 
-
-@dataclass(frozen=True)
-class Stitch:
-    """Select one dilution at each temperature, proceeding from least to most diluted.
-
-    min_unfrozen is the minimum number of unfrozen droplets at an eligible point.
-    Retain the current dilution through its coldest eligible point, then select
-    the next dilution at colder temperatures. Missing and infinite concentrations
-    are excluded. Values and uncertainty bounds are copied, never averaged.
-    A group with only one measurement bypasses the automatic cutoff.
+    A missing or None boundary is unlimited. An omitted measurement uses its full
+    observed temperature support. Callers supply sample measurement IDs only, so
+    mapped water blanks cannot receive sample eligibility ranges. Returned values
+    are plain dictionaries containing Python floats or None, suitable for JSON.
     """
-
-    min_unfrozen: int = 3
-
-    def __post_init__(self):
-        value = self.min_unfrozen
-        if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
-            raise ValueError("min_unfrozen must be a whole number >= 1")
-        object.__setattr__(self, "min_unfrozen", int(value))
-
-
-@dataclass(frozen=True)
-class ManualStitch:
-    """Join dilutions at explicit switching temperatures, ordered warm to cold.
-
-    Dilutions are ordered from least to most diluted. At each switch temperature
-    and colder, the next dilution is selected. A group with N dilutions requires
-    N-1 switches. No automatic droplet cutoff is applied.
-    Missing selected observations remain missing; another dilution is never used
-    as a fallback. All sample/run/cycle groups must have the same dilution factors.
-    """
-
-    switch_temperatures_C: tuple[float, ...] | list[float]
-
-    def __post_init__(self):
-        values = self.switch_temperatures_C
-        if not isinstance(values, (list, tuple)):
-            raise TypeError("switch_temperatures_C must be a list of temperatures")
-        temperatures = tuple(_finite(value, "switch temperature") for value in values)
-        if any(warm <= cold for warm, cold in pairwise(temperatures)):
-            raise ValueError("Switch temperatures must be strictly ordered from warm to cold")
-        object.__setattr__(self, "switch_temperatures_C", temperatures)
-
-
-@dataclass(frozen=True)
-class MLE:
-    """Maximum likelihood estimation: jointly fit counts from different dilutions.
-
-    All mappings use exact measurement_id names, such as Icescopy Sample_2.
-    Each name identifies a physical droplet set across its repeated cycles.
-    Dilution factors remain measurement metadata, not setting keys.
-    Temperature limits require an explicit mask_mode: drop_rows omits warmer
-    rows; rebase_counts also removes the warm frozen baseline and those droplets.
-    confidence_drop=None uses the workflow's z**2/2, preserving the default.
-    """
-
-    temperature_eligibility_C: Mapping[str, float] | None = None
-    mask_mode: Literal["drop_rows", "rebase_counts"] | None = None
-    likelihood_weights: Mapping[str, float] | None = None
-    action_counts: Mapping[str, float] | None = None
-    action_weight_lambda: float | None = None
-    action_weight_half_life: float | None = None
-    confidence_drop: float | None = None
-
-    def __post_init__(self):
-        for name, minimum, strict in (
-            ("temperature_eligibility_C", None, False),
-            ("likelihood_weights", 0, True),
-            ("action_counts", 0, False),
-        ):
-            object.__setattr__(
-                self,
-                name,
-                _measurement_values(getattr(self, name), name, minimum=minimum, strict=strict),
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("temperature_ranges_C must map measurement names to range objects")
+    normalized = {}
+    for measurement_id, bounds in value.items():
+        if not isinstance(measurement_id, str) or not measurement_id.strip():
+            raise ValueError("temperature_ranges_C keys must be non-empty measurement names")
+        if measurement_id not in measurement_ids:
+            raise ValueError(
+                f"Unknown measurement in temperature_ranges_C: {measurement_id!r}; "
+                f"available measurement names: {sorted(measurement_ids)}"
             )
-        if self.temperature_eligibility_C is None:
-            if self.mask_mode is not None:
-                raise ValueError("mask_mode requires temperature_eligibility_C")
-        elif self.mask_mode not in ("drop_rows", "rebase_counts"):
-            raise ValueError("Temperature limits require mask_mode='drop_rows' or 'rebase_counts'")
-        if self.likelihood_weights is not None and self.action_counts is not None:
-            raise ValueError("Use likelihood_weights or action_counts, not both")
-        if self.action_weight_lambda is not None and self.action_weight_half_life is not None:
-            raise ValueError("Use action_weight_lambda or action_weight_half_life, not both")
-        for name in ("action_weight_lambda", "action_weight_half_life", "confidence_drop"):
-            value = getattr(self, name)
-            if value is not None:
-                value = _finite(value, name)
-                if value < 0 or (name != "action_weight_lambda" and value == 0):
-                    raise ValueError(f"Invalid {name}: {value}")
-                object.__setattr__(self, name, value)
-        has_decay = (
-            self.action_weight_lambda is not None or self.action_weight_half_life is not None
+        if not isinstance(bounds, Mapping):
+            raise TypeError(f"Temperature range for {measurement_id!r} must be a range object")
+        unknown = set(bounds) - {"min_C", "max_C"}
+        if unknown:
+            raise ValueError(
+                f"Unknown temperature range keys for {measurement_id!r}: "
+                f"{sorted(repr(key) for key in unknown)}; use min_C and max_C"
+            )
+        lower = _temperature_bound(
+            bounds.get("min_C"), measurement_id=measurement_id, boundary="min_C"
         )
-        if self.action_counts is not None and not has_decay:
-            raise ValueError("action_counts requires a decay rate or half-life")
-        if has_decay and self.action_counts is None:
-            raise ValueError("Action weighting settings require action_counts")
-
-
-DilutionMethod = Stitch | ManualStitch | MLE
-
-
-def resolve_method(value: str | DilutionMethod, options: dict | None = None) -> DilutionMethod:
-    """Resolve string shortcuts and CLI settings; unexpected keys are errors."""
-    if isinstance(value, (Stitch, ManualStitch, MLE)):
-        if options is not None:
-            raise ValueError("Method objects already contain their settings")
-        return value
-    if options is not None and not isinstance(options, dict):
-        raise TypeError("Method options must be a JSON object")
-    if value == "stitch":
-        return Stitch(**(options or {}))
-    if value == "mle":
-        return MLE(**(options or {}))
-    if value == "manual":
-        if not options or "switch_temperatures_C" not in options:
-            raise ValueError("Manual stitching requires switch_temperatures_C")
-        return ManualStitch(**options)
-    raise ValueError("dilution_method must be 'stitch', 'mle', or a method settings object")
-
-
-def method_name(method: DilutionMethod) -> str:
-    return (
-        "stitch"
-        if isinstance(method, Stitch)
-        else "manual"
-        if isinstance(method, ManualStitch)
-        else "mle"
-    )
-
-
-def method_options(method: DilutionMethod, *, z: float) -> dict:
-    """Return JSON-native effective settings for saving and CLI reuse."""
-    options = {}
-    for item in fields(method):
-        value = getattr(method, item.name)
-        if isinstance(value, Mapping):
-            value = {str(key): list(v) if isinstance(v, tuple) else v for key, v in value.items()}
-        if isinstance(value, tuple):
-            value = list(value)
-        options[item.name] = value
-    if isinstance(method, MLE) and method.confidence_drop is None:
-        options["confidence_drop"] = z**2 / 2
-    return options
+        upper = _temperature_bound(
+            bounds.get("max_C"), measurement_id=measurement_id, boundary="max_C"
+        )
+        if lower is not None and upper is not None and lower > upper:
+            raise ValueError(f"Temperature range for {measurement_id!r} requires min_C <= max_C")
+        normalized[measurement_id] = {"min_C": lower, "max_C": upper}
+    return normalized

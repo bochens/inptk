@@ -1,0 +1,187 @@
+"""Observation selection retains the counts belonging to each chosen state."""
+
+import pandas as pd
+import pytest
+
+import inptk
+from inptk.cli import main
+
+
+def experiment(counts=None, scopes=(("R1", "01", 0),)):
+    counts = counts or {1: [1, 8, 17, 19], 10: [0, 1, 3, 7]}
+    rows, metadata = [], []
+    for run in dict.fromkeys(run for run, _, _ in scopes):
+        for dilution in counts:
+            metadata.append(
+                {
+                    "measurement_id": f"{run}_{dilution}",
+                    "sample_id": "A",
+                    "run_id": run,
+                    "dilution": dilution,
+                    "droplet_volume_uL": 50,
+                }
+            )
+    for run, cycle, offset in scopes:
+        for dilution, frozen in counts.items():
+            for temperature, count in zip((-5, -6, -7, -8), frozen):
+                rows.append(
+                    {
+                        "measurement_id": f"{run}_{dilution}",
+                        "run_id": run,
+                        "cycle_id": cycle,
+                        "temperature_C": temperature,
+                        "n_total": 20,
+                        "n_frozen": min(20, count + offset),
+                    }
+                )
+    return inptk.read_counts(pd.DataFrame(rows), metadata=metadata)
+
+
+def temperature_selection_experiment():
+    # Count-level blank correction can decrease both frozen and available counts.
+    rows = pd.DataFrame(
+        {
+            "measurement_id": ["M"] * 6,
+            "run_id": ["R1"] * 6,
+            "cycle_id": ["01"] * 6,
+            "time_s": range(6),
+            "temperature_C": [0, -9, -9.994, -10, -10.006, -11.1],
+            "n_total": [32, 32, 31, 20, 19, 18],
+            "n_frozen": [0, 1, 11, 10, 9, 12],
+        }
+    )
+    return inptk.read_counts(
+        rows,
+        metadata=[
+            {
+                "measurement_id": "M",
+                "sample_id": "A",
+                "run_id": "R1",
+                "dilution": 1,
+                "droplet_volume_uL": 50,
+            }
+        ],
+    )
+
+
+def test_temperature_methods_select_counts_fraction_or_latest_observation():
+    source = temperature_selection_experiment()
+    expected_counts = {
+        "window_max_count": (11, 31),
+        "max": (10, 20),
+        "latest": (9, 19),
+    }
+    for method, (frozen, total) in expected_counts.items():
+        fractions = (
+            inptk.frozen_fraction(
+                source, step_C=1, temperature_method=method, temperature_tolerance_C=0.01
+            )
+            .to_dataframe()
+            .set_index("temperature_C")
+        )
+        row = fractions.loc[-10]
+        assert (row.n_frozen, row.n_total) == (frozen, total)
+        assert row.fraction_frozen == pytest.approx(frozen / total)
+        if method == "window_max_count":
+            # No observation is near -11 C: use the warmer maximum count,
+            # retaining its paired total rather than the last observed total.
+            fallback = fractions.loc[-11]
+            assert (fallback.n_frozen, fallback.n_total) == (11, 31)
+            assert fallback.fraction_frozen == pytest.approx(11 / 31)
+
+
+def test_window_preview_cannot_be_used_for_concentration_or_cli_analysis(tmp_path):
+    source = temperature_selection_experiment()
+    fractions = inptk.frozen_fraction(source, step_C=1, temperature_method="window_max_count")
+    assert len(fractions) > 0
+    with pytest.raises(ValueError, match="synthetic warm zero rows are not raw measurements"):
+        inptk.analyze_concentration(source, temperature_method="window_max_count")
+    for operation in (
+        inptk.cumulative_spectrum,
+        inptk.combine_dilutions,
+        inptk.differential_spectrum,
+    ):
+        with pytest.raises(ValueError, match="synthetic warm zero rows are not raw measurements"):
+            operation(fractions, experiment=source)
+    source.save(tmp_path / "source")
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "analyze",
+                str(tmp_path / "source"),
+                "--format",
+                "saved",
+                "--out",
+                str(tmp_path / "result"),
+                "--temperature-method",
+                "window_max_count",
+            ]
+        )
+    assert error.value.code == 2
+    assert not (tmp_path / "result").exists()
+
+
+def test_frozen_fraction_accepts_counts_without_metadata():
+    counts = experiment().counts
+    fractions = inptk.frozen_fraction(counts, step_C=1, temperature_method="latest")
+    actual = fractions.to_dataframe().set_index(["measurement_id", "temperature_C"])
+    observed = counts.to_dataframe().astype({"temperature_C": float})
+    observed = observed.set_index(["measurement_id", "temperature_C"])
+    pd.testing.assert_series_equal(
+        actual.fraction_frozen.sort_index(),
+        (observed.n_frozen / observed.n_total).sort_index(),
+        check_names=False,
+    )
+
+
+def test_stepwise_spectra_reject_wrong_sample_or_run_context():
+    source = experiment()
+    fractions = inptk.frozen_fraction(source, step_C=1)
+    for column in ("sample_id", "run_id"):
+        changed = inptk.FrozenFractionTable(
+            fractions.to_dataframe().assign(**{column: "different"})
+        )
+        for operation in (
+            inptk.cumulative_spectrum,
+            inptk.combine_dilutions,
+            inptk.differential_spectrum,
+        ):
+            with pytest.raises(ValueError, match="identities disagree"):
+                operation(changed, experiment=source)
+
+
+def test_default_temperature_selection_preserves_the_latest_corrected_state():
+    source = temperature_selection_experiment()
+    fractions = inptk.frozen_fraction(source, step_C=1)
+    row = fractions.to_dataframe().set_index("temperature_C").loc[-10]
+    assert (row.n_frozen, row.n_total) == (10, 20)
+    result = inptk.analyze_concentration(source, step_C=1)
+    assert result.settings["temperature_method"] == "latest"
+    assert result.settings["temperature_tolerance_C"] == 0
+    pd.testing.assert_frame_equal(fractions.to_dataframe(), result.frozen_fraction.to_dataframe())
+
+
+def test_explicit_max_keeps_its_temperature_tolerance_default():
+    source = temperature_selection_experiment()
+    result = inptk.analyze_concentration(source, temperature_method="max")
+    assert result.settings["temperature_tolerance_C"] == 0.05
+
+
+@pytest.mark.parametrize("method", ["latest", "max"])
+def test_temperature_range_without_a_regular_threshold_returns_empty(method):
+    counts = inptk.CountsTable(
+        pd.DataFrame(
+            {
+                "run_id": ["R"],
+                "sample_id": ["S"],
+                "cycle_id": ["1"],
+                "measurement_id": ["M"],
+                "temperature_C": [-10.2],
+                "n_total": [32],
+                "n_frozen": [1],
+            }
+        )
+    )
+    fractions = inptk.frozen_fraction(counts, step_C=0.5, temperature_method=method)
+    assert fractions.to_dataframe().empty
+    assert {"n_total", "n_frozen", "measurement_id", "cycle_id"}.issubset(fractions.columns)

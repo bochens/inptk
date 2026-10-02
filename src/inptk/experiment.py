@@ -86,10 +86,12 @@ class MeasurementMetadata:
 class Experiment:
     """Observations and explicit relationships between physical droplet sets.
 
-    A water_blank_map declares raw sample and blank observations under one common
-    water-background concentration per volume for each assigned group. This assumes
-    the same prepared-water protocol. Every set needs its own known droplet volume;
-    sample and blank volumes may differ. Repeated cycles remain separate.
+    A water_blank_map pairs raw sample observations with physical assay blanks.
+    Correction assumes the full assay-blank background scales with droplet volume.
+    Each set retains its own known volume and observed counts; unequal volumes
+    and droplet counts are supported. The caller supplies blanks with the intended
+    material, geometry, preparation and cooling conditions, which are not inferred
+    from measurement names. Repeated cycles remain separate.
     """
 
     counts: CountsTable

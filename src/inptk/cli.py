@@ -8,7 +8,6 @@ import pandas as pd
 
 from . import __version__, analyze_concentration, load, read_counts, read_icescopy
 from .experiment import Experiment
-from .methods import resolve_method
 from .tables import CountsTable
 
 
@@ -46,17 +45,21 @@ def build_parser():
         "--cycle", action="append", help="Exact cycle ID to analyze; repeat to select several"
     )
     analyze.add_argument("--out", required=True)
-    analyze.add_argument("--dilution-method", choices=("stitch", "manual", "mle"), default="stitch")
     analyze.add_argument(
-        "--method-options", help="Settings for the chosen dilution method: JSON object or JSON file"
+        "--method",
+        choices=("mle", "average"),
+        default="mle",
+        help="Fit eligible counts together (mle) or average their concentration estimates",
+    )
+    analyze.add_argument(
+        "--temperature-ranges",
+        help="JSON object or file mapping measurement IDs to inclusive min_C/max_C limits",
     )
     analyze.add_argument(
         "--output-basis", choices=("suspension", "sampled_air", "dry_soil"), default="suspension"
     )
     analyze.add_argument("--step-C", type=float, default=0.5)
-    analyze.add_argument(
-        "--temperature-method", choices=("max", "latest", "window_max_count"), default="latest"
-    )
+    analyze.add_argument("--temperature-method", choices=("max", "latest"), default="latest")
     analyze.add_argument("--temperature-tolerance-C", type=float)
     analyze.add_argument("--z", type=float, default=1.96)
     analyze.add_argument("--differential", action="store_true")
@@ -134,15 +137,14 @@ def main(argv=None):
         if args.command == "export-csv":
             load(args.input).export_csv(args.out)
             return 0
-        options = None
-        if args.method_options is not None:
-            payload = args.method_options
-            if not payload.lstrip().startswith("{"):
+        temperature_ranges = None
+        if args.temperature_ranges is not None:
+            payload = args.temperature_ranges
+            if not payload.lstrip().startswith(("{", "[")):
                 payload = Path(payload).read_text(encoding="utf-8")
-            options = json.loads(payload)
-            if not isinstance(options, dict):
-                raise ValueError("--method-options must contain a JSON object")
-        method = resolve_method(args.dilution_method, options)
+            temperature_ranges = json.loads(payload)
+            if not isinstance(temperature_ranges, dict):
+                raise ValueError("--temperature-ranges must contain a JSON object")
         if args.format == "native":
             if args.sample_map:
                 raise ValueError("--sample-map applies only to Icescopy input")
@@ -162,8 +164,8 @@ def main(argv=None):
         elif args.format == "icescopy":
             if args.water_blank_map:
                 raise ValueError(
-                    "Icescopy input contains corrected counts. --water-blank-map requires "
-                    "raw sample and blank counts in --format native."
+                    "The Icescopy CSV adapter does not include raw blank context. "
+                    "--water-blank-map requires raw sample and blank counts in --format native."
                 )
             mapping = json.loads(Path(args.sample_map).read_text()) if args.sample_map else None
             overrides = None
@@ -185,7 +187,8 @@ def main(argv=None):
         experiment = _select_experiment(experiment, args.sample, args.cycle)
         result = analyze_concentration(
             experiment,
-            dilution_method=method,
+            method=args.method,
+            temperature_ranges_C=temperature_ranges,
             output_basis=args.output_basis,
             step_C=args.step_C,
             temperature_method=args.temperature_method,

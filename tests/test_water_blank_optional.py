@@ -42,17 +42,21 @@ def incomplete_blank_source():
     return full, ordinary
 
 
-@pytest.mark.parametrize("method", ["stitch", "mle", inptk.ManualStitch([-6])])
+@pytest.mark.parametrize("ranges", [None, {"M": {"min_C": -6}, "D": {"max_C": -6}}])
 def test_disabling_correction_keeps_raw_context_and_matches_sample_only_analysis(
-    tmp_path, incomplete_blank_source, method
+    tmp_path, incomplete_blank_source, ranges
 ):
     source, ordinary = incomplete_blank_source
     original = source.counts.to_dataframe()
     expected = inptk.analyze_concentration(
-        ordinary, step_C=1.0, dilution_method=method, differential=True
+        ordinary, step_C=1.0, temperature_ranges_C=ranges, differential=True
     )
     actual = inptk.analyze_concentration(
-        source, step_C=1.0, dilution_method=method, differential=True, water_blank_correction=False
+        source,
+        step_C=1.0,
+        temperature_ranges_C=ranges,
+        differential=True,
+        water_blank_correction=False,
     )
     for name in (
         "frozen_fraction",
@@ -77,7 +81,7 @@ def test_disabling_correction_keeps_raw_context_and_matches_sample_only_analysis
     pd.testing.assert_frame_equal(restored.experiment.counts.to_dataframe(), original)
     assert restored.settings["water_blank_correction"] is False
     with pytest.raises(ValueError, match="lacks matching"):
-        inptk.analyze_concentration(source, step_C=1.0, dilution_method=method)
+        inptk.analyze_concentration(source, step_C=1.0, temperature_ranges_C=ranges)
 
 
 @pytest.mark.parametrize(
@@ -92,7 +96,9 @@ def test_stepwise_disable_does_not_require_blank_temperature_coverage(
     expected = function(sample_fractions, experiment=ordinary)
     actual = function(fractions, experiment=source, water_blank_correction=False)
     pd.testing.assert_frame_equal(actual.to_dataframe(), expected.to_dataframe())
-    assert actual.history[-1]["water_blank_correction"] is False
+    correction_steps = [step for step in actual.history if "water_blank_correction" in step]
+    assert correction_steps
+    assert all(step["water_blank_correction"] is False for step in correction_steps)
 
 
 @pytest.mark.parametrize("value", [0, 1, None, "false", np.bool_(False)])
@@ -160,22 +166,26 @@ def test_cli_can_disable_saved_raw_blank_correction_with_missing_blank_temperatu
     assert actual.settings["water_blank_correction"] is False
 
 
+@pytest.mark.parametrize("correction", [False, True])
 @pytest.mark.parametrize(
     "function", [inptk.cumulative_spectrum, inptk.combine_dilutions, inptk.differential_spectrum]
 )
-def test_raw_water_blank_fit_rejects_synthetic_window_zero_rows(incomplete_blank_source, function):
+def test_water_blank_analysis_rejects_synthetic_window_rows_even_when_disabled(
+    incomplete_blank_source, function, correction
+):
     source, _ = incomplete_blank_source
     fractions = inptk.frozen_fraction(source, temperature_method="window_max_count")
+    assert len(fractions) > 0
     with pytest.raises(ValueError, match="synthetic warm zero rows are not raw measurements"):
-        function(fractions, experiment=source)
-    assert len(function(fractions, experiment=source, water_blank_correction=False)) > 0
+        function(fractions, experiment=source, water_blank_correction=correction)
 
 
-def test_full_raw_window_guard_allows_explicitly_disabled_correction(incomplete_blank_source):
+@pytest.mark.parametrize("correction", [False, True])
+def test_full_analysis_rejects_window_rows_even_when_correction_disabled(
+    incomplete_blank_source, correction
+):
     source, _ = incomplete_blank_source
     with pytest.raises(ValueError, match="synthetic warm zero rows are not raw measurements"):
-        inptk.analyze_concentration(source, temperature_method="window_max_count")
-    result = inptk.analyze_concentration(
-        source, temperature_method="window_max_count", water_blank_correction=False
-    )
-    assert result.settings["water_blank_correction"] is False
+        inptk.analyze_concentration(
+            source, temperature_method="window_max_count", water_blank_correction=correction
+        )

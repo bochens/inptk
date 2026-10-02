@@ -43,11 +43,11 @@ def experiment():
     return inptk.read_counts(pd.DataFrame(rows), metadata=measurements)
 
 
-@pytest.mark.parametrize("method", ["stitch", "mle"])
-def test_workflow_matches_retained_methods_and_keeps_cycles_separate(method):
+def test_workflow_matches_existing_mle_and_keeps_cycles_separate():
+    method = "mle"
     source = experiment()
     original = source.counts.to_dataframe()
-    result = inptk.analyze_concentration(source, dilution_method=method, output_basis="sampled_air")
+    result = inptk.analyze_concentration(source, method=method, output_basis="sampled_air")
     assert len(result.final.to_dataframe().groupby(["sample_id", "cycle_id"])) == 4
     assert result.frozen_fraction.to_dataframe().n_total.eq(32).all()
     assert "cycle_policy" not in inspect.signature(inptk.analyze_concentration).parameters
@@ -63,9 +63,7 @@ def test_workflow_matches_retained_methods_and_keeps_cycles_separate(method):
             fractions.append(
                 engine.fraction_frozen(old_counts, method="latest", temperature_tolerance_C=0)
             )
-        combine = (
-            engine.cumulative_spec_stitch if method == "stitch" else engine.cumulative_spec_mle
-        )
+        combine = engine.cumulative_spec_mle
         options = {"confidence_drop": 1.96**2 / 2} if method == "mle" else {}
         expected = combine(
             fractions, sample_group_by={m: sample for m in rows.measurement_id.unique()}, **options
