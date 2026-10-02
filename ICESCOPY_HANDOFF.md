@@ -121,6 +121,17 @@ in the process dialog; Preferences may supply starting values. They are adjustab
 count cutoffs, not confidence thresholds. The action returns JSON and writes no
 files. Applying it fills the existing range handles; manual edits stay possible.
 
+Suggestions exhaust each dilution before switching to the next, from least to
+most diluted. The first dilution keeps its initial observations, including zero
+frozen wells; `min_frozen` applies only to later dilutions. `min_unfrozen` applies
+to all. Later dilutions start strictly colder than the preceding stage's cold
+limit. Equal-dilution inputs may overlap and be averaged; switch only after all
+inputs at that dilution end. Use the first eligible contiguous interval, without
+bridging failing temperatures. This is a selection rule for Average, not MLE.
+`previous_dilution_active` explains usable points held back until that switch.
+Requests sharing an input across different curve input sets must be made
+separately, because their switching limits can differ. Manual overlap is allowed.
+
 Use `inputs` to show each proposed interval, cycle, cutoff reasons and counts of
 retained/excluded observations. Use `table` to overlay eligibility and blank flags
 on the original observations. `not_distinguished_from_blank` means the individual

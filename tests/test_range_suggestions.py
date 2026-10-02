@@ -32,42 +32,42 @@ def test_count_limits_are_inclusive_editable_and_preserve_observations():
     data = source()
     before = data.counts.to_dataframe()
     proposal = inptk.suggest_temperature_ranges(data)
-    assert proposal.temperature_ranges_C == {"001": {"min_C": -9, "max_C": -7}}
-    assert proposal.inputs["001"]["warm_limit_reason"] == ["too_few_frozen"]
+    assert proposal.temperature_ranges_C == {"001": {"min_C": -9, "max_C": -5}}
+    assert proposal.inputs["001"]["warm_limit_reason"] == ["observed_temperature_limit"]
     assert proposal.inputs["001"]["cold_limit_reason"] == ["too_few_liquid"]
     report = proposal.observations.to_dataframe()
-    assert report.in_suggested_range.tolist() == [False, False, True, True, True, False, False]
+    assert report.in_suggested_range.tolist() == [True, True, True, True, True, False, False]
     assert report.loc[report.in_suggested_range, "blank_status"].eq("not_applied").all()
     pd.testing.assert_frame_equal(data.counts.to_dataframe(), before)
     limits = proposal.temperature_ranges_C
     limits["001"]["max_C"] = -6
-    assert proposal.temperature_ranges_C["001"]["max_C"] == -7
+    assert proposal.temperature_ranges_C["001"]["max_C"] == -5
     result = inptk.analyze_concentration(
         data, method="average", temperature_ranges_C=proposal.temperature_ranges_C
     )
-    assert result.to_dataframe().temperature_C.tolist() == [-7, -8, -9]
+    assert result.to_dataframe().temperature_C.tolist() == [-5, -6, -7, -8, -9]
 
 
 def test_repeated_temperature_is_usable_only_when_every_observation_passes():
-    data = source((2, 3, 10, 30), temperatures=[-5, -5, -6, -7])
+    data = source((29, 30, 10, 30), temperatures=[-5, -5, -6, -7])
     proposal = inptk.suggest_temperature_ranges(data)
     assert proposal.temperature_ranges_C == {"001": {"min_C": -6, "max_C": -6}}
     report = proposal.observations.to_dataframe()
-    assert not report.in_suggested_range.iloc[1]
+    assert not report.in_suggested_range.iloc[0]
     assert "another_observation_at_same_temperature_failed" in (
-        report.range_exclusion_reasons.iloc[1]
+        report.range_exclusion_reasons.iloc[0]
     )
 
 
-def test_disjoint_eligible_regions_choose_temperature_span_without_bridging():
-    data = source((3, 4, 5, 1, 8, 9), temperatures=[-5, -5.1, -5.2, -6, -7, -10])
+def test_initial_block_is_not_abandoned_for_a_longer_colder_block():
+    data = source((3, 4, 5, 30, 8, 9), temperatures=[-5, -5.1, -5.2, -6, -7, -10])
     proposal = inptk.suggest_temperature_ranges(data)
-    assert proposal.temperature_ranges_C["001"] == {"min_C": -10, "max_C": -7}
-    assert proposal.inputs["001"]["kept_observations"] == 2
+    assert proposal.temperature_ranges_C["001"] == {"min_C": -5.2, "max_C": -5}
+    assert proposal.inputs["001"]["kept_observations"] == 3
 
 
 def test_equal_spans_choose_warmer_block():
-    proposal = inptk.suggest_temperature_ranges(source((3, 4, 1, 8, 9)))
+    proposal = inptk.suggest_temperature_ranges(source((3, 4, 30, 8, 9)))
     assert proposal.temperature_ranges_C["001"] == {"min_C": -6, "max_C": -5}
 
 
@@ -80,7 +80,7 @@ def test_thresholds_are_positive_integer_well_counts(option, value):
 
 
 def test_no_usable_range_is_reported_and_cannot_be_applied_as_unrestricted():
-    proposal = inptk.suggest_temperature_ranges(source((0, 1, 2)))
+    proposal = inptk.suggest_temperature_ranges(source((30, 31, 32)))
     assert proposal.inputs["001"]["status"] == "no_usable_range"
     assert not proposal.observations.to_dataframe().in_suggested_range.any()
     with pytest.raises(ValueError, match="No usable temperature range"):
@@ -137,7 +137,7 @@ def test_missing_blank_coverage_limits_range_and_disabling_correction_restores_s
     assert set(uncorrected.inputs) == {"001"}
 
 
-@pytest.mark.parametrize("frozen,complete", [((0, 3, 16, 30), True), ((0, 1, 2), False)])
+@pytest.mark.parametrize("frozen,complete", [((0, 3, 16, 30), True), ((30, 31, 32), False)])
 def test_cli_suggestions_match_python_and_do_not_write_or_modify_input(tmp_path, capsys,
                                                                     frozen, complete):
     data = source(frozen)
@@ -168,3 +168,68 @@ def test_suggestions_do_not_optimize_away_a_decrease_in_corrected_concentration(
     report = inptk.suggest_temperature_ranges(data).observations.to_dataframe()
     assert report.in_suggested_range.all()
     assert np.all(np.diff(report.concentration) < 0)
+
+
+def dilution_series(*, second_dilution=10, second_counts=None):
+    rows, metadata = [], []
+    for name, dilution, counts in [
+        ("A", 1, [0, 2, 12, 29, 30, 31, 32, 32]),
+        ("B", second_dilution, second_counts or [0, 0, 3, 8, 12, 20, 29, 30]),
+        ("C", 100, [0, 0, 0, 3, 5, 7, 12, 18]),
+    ]:
+        metadata.append({"measurement_id": name, "sample_id": "sample", "dilution": dilution,
+                         "droplet_volume_uL": 50})
+        rows.extend({"measurement_id": name, "temperature_C": -5-i,
+                     "n_total": 32, "n_frozen": count} for i, count in enumerate(counts))
+    return inptk.read_counts(pd.DataFrame(rows), metadata=metadata)
+
+
+def test_exhaust_previous_dilution_before_switching_even_when_next_is_already_usable():
+    data = dilution_series()
+    # Input-list order does not determine the dilution sequence.
+    curves = {"combined": {"inputs": ["C", "A", "B"]}}
+    proposal = inptk.suggest_temperature_ranges(data, curves=curves)
+    assert proposal.temperature_ranges_C == {
+        "A": {"min_C": -8, "max_C": -5},
+        "B": {"min_C": -11, "max_C": -9},
+        "C": {"min_C": -12, "max_C": -12},
+    }
+    assert proposal.inputs["A"]["min_frozen_applied"] is False
+    assert proposal.inputs["B"]["warm_limit_reason"] == ["previous_dilution_active"]
+    result = inptk.estimate_concentration(
+        inptk.frozen_fraction(data), experiment=data, curves=curves, method="average",
+        temperature_ranges_C=proposal.temperature_ranges_C,
+    ).to_dataframe()
+    assert [json.loads(ids) for ids in result.contributing_measurement_ids] == (
+        [["A"]] * 4 + [["B"]] * 3 + [["C"]]
+    )
+
+
+def test_equal_dilution_inputs_can_average_before_switch_to_more_dilute_input():
+    proposal = inptk.suggest_temperature_ranges(dilution_series(second_dilution=1))
+    assert proposal.temperature_ranges_C["B"] == {"min_C": -11, "max_C": -5}
+    assert proposal.temperature_ranges_C["C"] == {"min_C": -12, "max_C": -12}
+
+
+def test_later_dilution_still_needs_minimum_frozen_count_and_gaps_remain_visible():
+    proposal = inptk.suggest_temperature_ranges(
+        dilution_series(second_counts=[0, 0, 0, 0, 1, 2, 3, 30])
+    )
+    assert proposal.temperature_ranges_C["B"] == {"min_C": -11, "max_C": -11}
+    assert proposal.inputs["B"]["warm_limit_reason"] == ["too_few_frozen"]
+
+
+def test_unused_later_dilution_is_reported_instead_of_restored_to_full_range():
+    proposal = inptk.suggest_temperature_ranges(
+        dilution_series(second_counts=[0, 3, 16, 29, 30, 31, 32, 32])
+    )
+    assert proposal.inputs["B"]["status"] == "no_usable_range"
+    with pytest.raises(ValueError, match="No usable temperature range"):
+        _ = proposal.temperature_ranges_C
+
+
+def test_shared_input_with_different_switching_context_requires_separate_suggestions():
+    with pytest.raises(ValueError, match="different curve input sets"):
+        inptk.suggest_temperature_ranges(dilution_series(), curves={
+            "combined": {"inputs": ["A", "B"]}, "alone": {"inputs": ["B"]},
+        })

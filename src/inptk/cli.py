@@ -141,7 +141,7 @@ def build_parser():
     _analysis_input_arguments(suggest)
     suggest.add_argument("--curves", help="JSON object or file selecting named curves and cycles")
     suggest.add_argument("--min-frozen", type=int, default=3,
-                         help="Minimum frozen sample wells (default: 3)")
+                         help="Minimum frozen sample wells after the first dilution (default: 3)")
     suggest.add_argument("--min-unfrozen", type=int, default=3,
                          help="Minimum liquid sample wells (default: 3)")
     suggest.add_argument("--z", type=float, default=1.96)

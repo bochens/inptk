@@ -230,22 +230,35 @@ result = inptk.analyze_concentration(
 )
 ```
 
-The two thresholds are positive integer well counts. Their defaults of three are
-editable starting values, not a validated confidence criterion. For 32 wells,
-these defaults allow 3–29 frozen wells, including both endpoints. Assigned blanks
-must cover the selected temperatures when correction is enabled. The thresholds
-apply to sample wells, not blank wells.
+Within each curve, suggestions use the least-diluted input first and exhaust its
+usable range before switching to the next dilution. A later dilution starts
+strictly colder than the previous dilution's cold limit, even if it already has
+enough frozen wells. Inputs at the same dilution may overlap and be averaged;
+the next dilution starts after all inputs at the preceding dilution have ended.
+
+The first dilution keeps its initial observations, including zero frozen wells.
+For every dilution, the default cold cutoff requires at least three liquid wells.
+Later dilutions also require at least three frozen wells. Thus, for 32 wells,
+the first dilution allows 0–29 frozen wells and later dilutions allow 3–29,
+subject to the switch temperature. These positive integer thresholds are editable
+starting values, not a validated confidence criterion. Assigned blanks must cover
+the selected temperatures when correction is enabled. The thresholds apply to
+sample wells, not blank wells.
 
 Suggestions contain one contiguous observed-temperature interval for each named
-input. If eligible observations form separate intervals, choose the largest
-temperature span; ties choose the warmer interval. Never bridge a failing
-temperature. Every observation at a repeated temperature must pass, because a
+input. Use the first eligible interval encountered during cooling and stop at its
+first failing temperature; never replace it with a longer, colder interval.
+Every observation at a repeated temperature must pass, because a
 temperature range cannot distinguish those images. Inputs with no usable interval
 remain in `suggestions.inputs` with `status="no_usable_range"`; accessing
 `suggestions.temperature_ranges_C` then raises an error instead of silently using
 the unrestricted input. Review thresholds or remove that input from `curves` and
-request suggestions again. Select one cycle per input; use the same curve/cycle
-selection when applying its ranges.
+request suggestions again. This includes an input whose entire usable range was
+already covered by an earlier dilution. Gaps remain if the next dilution is not
+yet usable; suggestions do not extend ranges to fill them. Select one cycle per
+input; use the same curve/cycle selection when applying its ranges. Request
+suggestions separately for curves that share an input but have different input
+sets, since their switch temperatures may differ. Manual ranges may still overlap.
 
 `suggestions.observations` keeps the selected inputs' original counts and frozen
 fractions, with eligibility, exclusion reasons and blank checks. Within each
