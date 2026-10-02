@@ -217,7 +217,7 @@ def _response(command, *, status="ok", warnings=None, **payload):
 
 
 def _print_json(payload):
-    print(json.dumps(_encode(payload), allow_nan=False, ensure_ascii=False))
+    print(json.dumps(_encode(payload), allow_nan=False))
 
 
 def _capabilities(parser):

@@ -322,3 +322,25 @@ def test_gui_accepts_same_inline_sample_mapping_for_preview_and_analysis(tmp_pat
     process, analyzed = call("analyze", *options, "--out", tmp_path / "result")
     assert process.returncode == 0
     assert set(inptk.load(analyzed["output"]).experiment.samples) == {"007"}
+
+
+def test_json_names_survive_ascii_process_output_encoding(inputs):
+    frame, path, _, _ = inputs
+    frame.assign(sample_id="雪").to_csv(path, index=False)
+    process = subprocess.run(
+        [sys.executable, "-m", "inptk", "preview", str(path), "--json"],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONIOENCODING": "ascii",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
+    reply = json.loads(process.stdout)
+    assert reply["status"] == "ok"
+    assert {row["sample_id"] for row in reply["table"]["rows"]} == {"雪"}
+    assert all(ord(character) < 128 for character in process.stdout)

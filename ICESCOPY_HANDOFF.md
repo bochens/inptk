@@ -399,7 +399,7 @@ the saved format. Integrate with the public CLI/data contract, not `_engine`.
 
 ## Verification before integration
 
-- All 603 tests passed. The deliberate invalid-timestamp case emits one pandas
+- All 604 tests passed. The deliberate invalid-timestamp case emits one pandas
   parsing warning. Ruff, mypy across 21 source files, Bandit and diff checks passed.
 - Wheel and source distributions built. The installed wheel was checked outside
   the checkout with MLE/Average, raw blanks on/off, unequal volumes, exact cycle
@@ -414,7 +414,8 @@ the saved format. Integrate with the public CLI/data contract, not `_engine`.
   and `analyze` through PySide6 6.9.3 `QProcess` on 2,400 synthetic observations.
   A timer continued firing during each command, verifying that the caller's Qt
   event loop remained responsive. Protocol tests also cover structured errors,
-  interrupts, unexpected failures, inline mappings and preservation of input files.
+  interrupts, unexpected failures, inline mappings, Unicode identifiers under
+  ASCII process output encoding and preservation of input files.
 - The synthetic standard-workflow example ran successfully. The notebook keeps
   external export disabled; existing source data and result folders were preserved.
 
