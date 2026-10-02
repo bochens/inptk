@@ -75,6 +75,7 @@ def input_spectra(result):
         experiment=result.experiment,
         temperature_ranges_C=result.settings["temperature_ranges_C"],
         z=result.settings["z"],
+        method=result.settings["estimation_method"],
         water_blank_correction=result.settings["water_blank_correction"],
     )
 

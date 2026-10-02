@@ -110,6 +110,80 @@ def cumulative_spectrum(
     experiment: Experiment,
     temperature_ranges_C=None,
     z: float = 1.96,
+    method: str = "mle",
+    water_blank_correction: bool = True,
+) -> CumulativeSpectrumTable:
+    """Estimate individual spectra using the same method as the named-curve workflow.
+
+    MLE fits each physical input's full freezing trajectory and its raw blanks.
+    Average retains separate temperature estimates. All original observation
+    rows remain in this table; fitted values are evaluated at their temperatures.
+    """
+    from urllib.parse import quote
+
+    from .methods import validate_combination_method
+    from .water_blank import sample_rows
+    from .workflows import estimate_concentration
+
+    method = validate_combination_method(method)
+    if method == "average":
+        return _pointwise_cumulative_spectrum(
+            fractions, experiment=experiment, temperature_ranges_C=temperature_ranges_C,
+            z=z, water_blank_correction=water_blank_correction,
+        )
+    fractions, view = prepare_fraction_analysis(
+        fractions, experiment, water_blank_correction=water_blank_correction,
+    )
+    frame = fractions.to_dataframe()
+    source = sample_rows(frame, view)
+    keys = ["measurement_id", "run_id", "cycle_id"]
+    groups = list(source.groupby(keys, sort=False))
+    names = {identity: "/".join(quote(str(part), safe="") for part in identity)
+             for identity, _ in groups}
+    choices = {names[identity]: {"inputs": [identity[0]], "cycle": identity[2]}
+               for identity, _ in groups}
+    estimated = estimate_concentration(
+        fractions, experiment=experiment, temperature_ranges_C=temperature_ranges_C,
+        curves=choices, z=z, method=method, water_blank_correction=water_blank_correction,
+    )
+    records = []
+    originals = frame.set_index([*keys, "observation_id"])
+    for identity, rows in groups:
+        fit_rows = (
+            estimated.select(curve_id=names[identity]).to_dataframe().set_index("temperature_C")
+        )
+        ordered = rows.sort_values("time_s", kind="stable") if "time_s" in rows else rows
+        for index, row in enumerate(ordered.to_dict("records")):
+            values = fit_rows.loc[row["temperature_C"]].to_dict()
+            values.pop("curve_id")
+            row.update(values, point_id=f"point:{index}", point_order=index)
+            row["selection_status"] = (
+                "selected" if row["contributor_count"] else "outside_temperature_range"
+            )
+            row["observed_temperature_C"] = row["temperature_C"]
+            if view.water_blank_map:
+                blanks = [item for item in json.loads(row["source_observations"])
+                          if item["role"] == "blank"]
+                row["water_blank_observations"] = json.dumps(blanks)
+                observed = [originals.loc[tuple(item[key] for key in (*keys, "observation_id"))]
+                            for item in blanks]
+                row["blank_n_frozen"] = (
+                    sum(item.n_frozen for item in observed) if observed else np.nan
+                )
+                row["blank_n_total"] = (
+                    sum(item.n_total for item in observed) if observed else np.nan
+                )
+            records.append(row)
+    settings = {**estimated.history[-1], "operation": "cumulative_spectrum"}
+    return CumulativeSpectrumTable(pd.DataFrame(records), history=fractions.history + [settings])
+
+
+def _pointwise_cumulative_spectrum(
+    fractions: FrozenFractionTable,
+    *,
+    experiment: Experiment,
+    temperature_ranges_C=None,
+    z: float = 1.96,
     water_blank_correction: bool = True,
 ) -> CumulativeSpectrumTable:
     """Estimate each measurement at its original observed temperatures.
@@ -216,7 +290,7 @@ def cumulative_spectrum(
         pd.DataFrame.from_records(records),
         history=fractions.history + [{
             "operation": "cumulative_spectrum",
-            "estimation_method": "mle",
+            "estimation_method": "average",
             "z": float(z),
             "temperature_source": "original_observations",
             "alignment_when_needed": "latest",
@@ -240,6 +314,8 @@ def differential_spectrum(
     *,
     experiment: Experiment,
     temperature_ranges_C=None,
+    method: str = "mle",
+    z: float = 1.96,
     water_blank_correction: bool = True,
 ) -> DifferentialSpectrumTable:
     """Calculate adjacent concentration changes in observation order.
@@ -254,6 +330,8 @@ def differential_spectrum(
         fractions,
         experiment=experiment,
         temperature_ranges_C=temperature_ranges_C,
+        method=method,
+        z=z,
         water_blank_correction=water_blank_correction,
     )
     records, omitted = [], []

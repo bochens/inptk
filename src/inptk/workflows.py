@@ -176,11 +176,13 @@ def estimate_concentration(
     z: float = 1.96,
     water_blank_correction: bool = True,
 ) -> CurveSpectrumTable:
-    """Estimate named curves, preserving native states and run backgrounds.
+    """Estimate named curves from original states with separate run backgrounds.
 
     With no curves supplied, each sample/run/cycle remains separate. Explicit
     curves can span runs but select only one cycle from each run. Observations
     align only where needed, using latest warmer states at observed targets.
+    MLE fits complete freezing histories with monotone sample and blank curves;
+    Average estimates each target separately. Original count rows stay unchanged.
     """
     method = validate_combination_method(method)
     if not np.isfinite(z) or z <= 0:
@@ -198,6 +200,7 @@ def estimate_concentration(
     )
     groups = resolve_curves(curves, experiment, frame)
     records, notices, group_alignment, cache = [], [], {}, {}
+    joint_fits = {}
     for curve_id, group in groups.items():
         members = group["members"]
         ids = sorted(member["measurement_id"] for member in members)
@@ -214,6 +217,19 @@ def estimate_concentration(
         points = align_observations(
             frame, members, water_blank_map=experiment.water_blank_map, temperature_ranges_C=ranges
         )
+        if method == "mle":
+            from dataclasses import replace
+
+            from .curve_fit import fit_curve
+
+            estimates, joint_fits[curve_id] = fit_curve(points, experiment, z=z)
+            # A fitted temperature curve has one state per native temperature.
+            # Original image order and every count row stay in the experiment.
+            by_temperature = {point.temperature_C: point for point in points}
+            points = [
+                replace(by_temperature[temperature], point_order=index, point_id=f"point:{index}")
+                for index, temperature in enumerate(sorted(by_temperature, reverse=True))
+            ]
         empty_count = 0
         group_alignment[curve_id] = sorted({point.alignment for point in points})
         for point in points:
@@ -251,7 +267,9 @@ def estimate_concentration(
                     sorted(point.blanks.measurement_id.astype(str).tolist())
                 ),
                 "source_observations": json.dumps(_sources(point)),
-                "uncertainty_method": "bonferroni_marginal_profile_bounds"
+                "uncertainty_method": "joint_curve_profile_likelihood"
+                if method == "mle"
+                else "bonferroni_marginal_profile_bounds"
                 if method == "average" and len(contributors) > 1
                 else "joint_sample_water_blank_profile_likelihood"
                 if experiment.water_blank_map
@@ -261,16 +279,21 @@ def estimate_concentration(
                 else "uncorrected",
             }
             if contributors:
-                key = _state_key(point)
-                if key not in cache:
-                    cache[key] = estimate_point(
-                        point.samples,
-                        point.blanks,
-                        experiment,
-                        confidence_drop=z**2 / 2,
-                        method=method,
-                    )
-                fit = cache[key]
+                if method == "mle":
+                    estimate, lower, upper = estimates[point.temperature_C]
+                    finite = bool(np.isfinite([estimate, lower, upper]).all())
+                    fit = (estimate, lower, upper, finite)
+                else:
+                    key = _state_key(point)
+                    if key not in cache:
+                        cache[key] = estimate_point(
+                            point.samples,
+                            point.blanks,
+                            experiment,
+                            confidence_drop=z**2 / 2,
+                            method=method,
+                        )
+                    fit = cache[key]
                 record.update(
                     concentration=fit[0],
                     lower_error=fit[1],
@@ -299,6 +322,7 @@ def estimate_concentration(
         "water_blank_model": "volume_scaled",
         "background_groups": "separate by run and selected cycle",
         "water_blank_map": dict(experiment.water_blank_map),
+        "joint_curve_fits": joint_fits,
         "uncertainty_assumption": (
             "Independent physical droplet sets, repeated observations never pooled; "
             "profile bounds and Bonferroni-adjusted average bounds have approximate coverage"
@@ -525,6 +549,8 @@ def analyze_concentration(
             analysis_fractions,
             experiment=experiment,
             temperature_ranges_C=temperature_ranges_C,
+            method=method,
+            z=z,
             water_blank_correction=water_blank_correction,
         )
         if differential

@@ -69,12 +69,13 @@ def test_original_observations_are_primary_and_identical_states_do_not_gain_prec
     )
     assert sampled(result) is None
     combined = fit_estimates(result).to_dataframe()
-    assert combined.temperature_C.tolist() == [-5, -6, -6, -5.8, -7]
+    expected = [-5, -5.8, -6, -7] if method == "mle" else [-5, -6, -6, -5.8, -7]
+    assert combined.temperature_C.tolist() == expected
     assert combined.point_id.is_unique
     assert "run_id" not in combined and "cycle_id" not in combined
     assert combined.alignment.eq("native").all()
     for column in ("concentration", "lower_error", "upper_error"):
-        assert combined[column].iloc[1] == combined[column].iloc[2]
+        assert combined[column].iloc[1] == pytest.approx(combined[column].iloc[2], rel=1e-7)
     sources = combined.source_observations.map(json.loads)
     assert all(len(items) == 2 for items in sources)
     assert sources.iloc[1][0]["observation_id"] != sources.iloc[2][0]["observation_id"]
@@ -82,6 +83,19 @@ def test_original_observations_are_primary_and_identical_states_do_not_gain_prec
         {k: item[k] for k in ("measurement_id", "run_id", "cycle_id")}
         for item in result.curves["S/R1/01"].sources
     ] == [{"measurement_id": "a", "run_id": "R1", "cycle_id": "01"}]
+
+
+def test_joint_workflow_keeps_cooling_intervals_ending_at_a_repeated_temperature():
+    source = experiment()
+    result = inptk.analyze_concentration(source, differential=True)
+    curve = result.curves["S/R1/01"]
+    direct = inptk.differential_spectrum(
+        inptk.frozen_fraction(source), experiment=source
+    ).to_dataframe()
+    actual = curve.differential.to_dataframe()
+    assert actual.temperature_bin_right_C.tolist() == [-5, -5.8]
+    assert actual.temperature_bin_left_C.tolist() == [-6, -7]
+    pd.testing.assert_frame_equal(actual, direct)
 
 
 @pytest.mark.parametrize("method", ["mle", "average"])

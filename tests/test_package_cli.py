@@ -251,7 +251,9 @@ def test_cli_final_decrease_policy_matches_python_and_keeps_candidates(tmp_path,
     )
     counts.to_csv(tmp_path / "counts.csv", index=False)
     metadata.to_csv(tmp_path / "metadata.csv", index=False)
-    extra = [] if policy is None else ["--decrease-policy", policy]
+    extra = ["--method", "average"]
+    if policy is not None:
+        extra.extend(["--decrease-policy", policy])
     output = tmp_path / "result.inptk"
     process = _run_cli(
         "analyze",
@@ -266,7 +268,8 @@ def test_cli_final_decrease_policy_matches_python_and_keeps_candidates(tmp_path,
     actual = inptk.load(output)
     effective_policy = policy or "stop_at_decrease"
     expected = inptk.analyze_concentration(
-        inptk.read_counts(counts, metadata=metadata), decrease_policy=effective_policy
+        inptk.read_counts(counts, metadata=metadata), decrease_policy=effective_policy,
+        method="average",
     )
     pd.testing.assert_frame_equal(
         retained(actual).to_dataframe(), retained(expected).to_dataframe()

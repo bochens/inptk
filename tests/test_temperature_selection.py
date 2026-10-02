@@ -115,12 +115,12 @@ def test_stepwise_spectra_reject_wrong_sample_or_run_context():
                 operation(changed, experiment=source)
 
 
-def test_default_workflow_keeps_native_corrected_states_without_a_grid():
+def test_average_workflow_keeps_native_corrected_states_without_a_grid():
     source = temperature_selection_experiment()
     fractions = inptk.frozen_fraction(source)
     row = fractions.to_dataframe().set_index("temperature_C").loc[-10]
     assert (row.n_frozen, row.n_total) == (10, 20)
-    result = inptk.analyze_concentration(source)
+    result = inptk.analyze_concentration(source, method="average")
     assert sampled(result) is None
     assert result.settings["observation_processing"].startswith("native")
     pd.testing.assert_frame_equal(fractions.to_dataframe(), result.frozen_fraction.to_dataframe())

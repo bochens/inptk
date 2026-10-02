@@ -102,7 +102,7 @@ def build_parser():
         "--method",
         choices=("mle", "average"),
         default="mle",
-        help="Fit eligible counts together (mle) or average their concentration estimates",
+        help="Fit one monotone freezing curve (mle) or average estimates at each temperature",
     )
     analyze.add_argument(
         "--temperature-ranges",
@@ -264,6 +264,18 @@ def _capabilities(parser):
         commands=commands,
         observation_tables=["counts", "frozen_fraction"],
         curve_tables=["cumulative", "excluded", "differential", "resampled"],
+        estimation_methods={
+            "mle": {
+                "fit": "joint_monotone_first_freezing_curve",
+                "input": "fixed well totals and cumulative first-freezing counts per cycle",
+                "uncertainty": "pointwise profile bounds from the complete curve likelihood",
+                "output_order": "unique original temperatures, warm to cold",
+            },
+            "average": {
+                "fit": "equal-weight concentration mean at each temperature",
+                "output_order": "native observation order, latest-warmer alignment when needed",
+            },
+        },
         curve_specification={
             "inputs": "Nonempty list of input names or measurement_id/cycle_id objects",
             "cycle": "Optional exact label for input names; required if several cycles exist",

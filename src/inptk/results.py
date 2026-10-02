@@ -47,15 +47,26 @@ def assemble_curves(
                 cycle_id=source["cycle_id"],
             )
             data = intervals.to_dataframe()
-            observed = {
-                item["observation_id"]
-                for value in cumulative.to_dataframe().source_observations
-                for item in json.loads(value)
-                if item["role"] == "sample"
-            }
-            data = data.loc[
-                data.observation_id.isin(observed) & data.next_observation_id.isin(observed)
-            ]
+            joint_fit = any(
+                entry.get("estimation_method") == "mle" for entry in cumulative.history
+            )
+            if joint_fit:
+                # A fitted temperature can represent several original images.
+                # Keep an original cooling interval whenever both fitted
+                # temperatures survived, not just its chosen representative ID.
+                temperatures = cumulative.to_dataframe().temperature_C
+                keep = data.temperature_bin_left_C.isin(temperatures) & (
+                    data.temperature_bin_right_C.isin(temperatures)
+                )
+            else:
+                observed = {
+                    item["observation_id"]
+                    for value in cumulative.to_dataframe().source_observations
+                    for item in json.loads(value)
+                    if item["role"] == "sample"
+                }
+                keep = data.observation_id.isin(observed) & data.next_observation_id.isin(observed)
+            data = data.loc[keep]
             intervals = DifferentialSpectrumTable(data, history=intervals.history)
         results[name] = CurveResult(
             curve_id=name,

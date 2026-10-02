@@ -6,7 +6,6 @@ import pytest
 from analysis_checks import all_points, fit_estimates, input_spectra, quantity_for_check, retained
 
 import inptk
-from inptk._engine.math import binomial_poisson_profile_ci_inp_per_ml
 from inptk.methods import resolve_curves
 
 
@@ -44,7 +43,7 @@ def experiment():
     return inptk.read_counts(pd.DataFrame(rows), metadata=measurements)
 
 
-def test_workflow_matches_pointwise_mle_and_keeps_cycles_separate():
+def test_joint_workflow_matches_stepwise_analysis_and_keeps_cycles_separate():
     source = experiment()
     original = source.counts.to_dataframe()
     result = inptk.analyze_concentration(source, method="mle", output_basis="sampled_air")
@@ -54,24 +53,14 @@ def test_workflow_matches_pointwise_mle_and_keeps_cycles_separate():
     for curve_id, group in result.settings["curves"].items():
         members = group["inputs"]
         assert len({member["cycle_id"] for member in members}) == 1
-        selected_rows = original[
-            original.measurement_id.isin([member["measurement_id"] for member in members])
-            & original.cycle_id.eq(members[0]["cycle_id"])
-        ]
-        expected = []
-        for _, rows in selected_rows.groupby("temperature_C", sort=False):
-            point, lower, upper = binomial_poisson_profile_ci_inp_per_ml(
-                rows.n_frozen.to_numpy(),
-                rows.n_total.to_numpy(),
-                50,
-                [source.measurements[mid].dilution for mid in rows.measurement_id],
-                confidence_drop=1.96**2 / 2,
-            )
-            expected.append([point, point - lower, upper - point])
+        stepwise = inptk.estimate_concentration(
+            inptk.frozen_fraction(source), experiment=source, curves={curve_id: group}
+        ).to_dataframe()
         candidate = all_points(result).select(curve_id=curve_id).to_dataframe()
+        assert candidate.concentration.diff().dropna().ge(0).all()
         np.testing.assert_allclose(
             candidate[["concentration", "lower_error", "upper_error"]],
-            np.array(expected) * 0.05,
+            stepwise[["concentration", "lower_error", "upper_error"]] * 0.05,
             rtol=1e-8,
             atol=1e-9,
         )
@@ -353,7 +342,9 @@ def test_roundtrip_retains_discarded_final_values_and_uncertainty(tmp_path, poli
             }
         ],
     )
-    result = inptk.analyze_concentration(source, output_basis="sampled_air", decrease_policy=policy)
+    result = inptk.analyze_concentration(
+        source, output_basis="sampled_air", decrease_policy=policy, method="average"
+    )
     result.save(tmp_path / "result.inptk")
     restored = inptk.load(tmp_path / "result.inptk")
     candidates = all_points(restored).to_dataframe()

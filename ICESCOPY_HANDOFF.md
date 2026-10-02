@@ -9,7 +9,7 @@ files have changed in this work.
 
 Preferences → INP toolkit should contain an executable chooser, Browse, Test
 connection, detected version and connection status. Test with `inptk capabilities`.
-This release uses CLI protocol **2** and saved format **3**. Other versions must
+INP-toolkit **0.4.0** uses CLI protocol **2** and saved format **3**. Other formats must
 be rejected explicitly. There are no compatibility flags or old-format loaders.
 
 Preferences supply starting values. The process dialog records the choices used
@@ -31,9 +31,17 @@ for each analysis; changing Preferences must not change a saved result.
 | `differential` | Optional intervals for individual suspension curves | Initial off |
 
 MLE means maximum likelihood estimation: fit eligible sample and blank counts
-jointly. Average takes an equal-weight mean of eligible concentration estimates.
+jointly across the full cooling curve, with concentration and each run's blank
+background constrained to increase or stay constant during cooling. Average takes
+an equal-weight mean of eligible concentration estimates at each temperature.
 Both retain blank uncertainty when raw sample and blank counts are supplied.
 Average uses conservative bounds that allow shared blank uncertainty.
+
+Export raw counts for actual images: fixed total wells and cumulative first-freezing
+counts within each cycle. Do not supply the old blank-adjusted, changing-total
+export or temperature-clock rows filled between images. Joint MLE rejects changing
+totals and falling frozen counts. Raw blanks remain separate physical well sets.
+The CLI `capabilities` response describes these method requirements.
 
 Grouping, runs, cycles, dilution, actual droplet volume, sample normalization and
 blank assignments belong to the analysis session. Do not infer them from similar
@@ -93,12 +101,15 @@ curves. Give each input a stable color and a readable name/dilution label.
 
 Temperature increases **left to right**, for example −30°C → −5°C. Display order
 must not change saved observation order. Show holds and temperature reversals;
-do not merge rows just because they have the same temperature.
+do not merge original count rows just because they have the same temperature.
+The MLE fitted curve has one value per distinct native temperature, ordered warm
+to cold. Show it separately from the original frozen-fraction observations.
 
 Provide inclusive cold (`min_C`) and warm (`max_C`) handles and numeric fields for
 each input. Omitted boundaries are unlimited. Ranges apply to targets and source
-observations, shared across selected cycles. Overlaps use MLE or Average; one
-contributor uses its own estimate; zero contributors leave a gap. There is no
+observations, shared across selected cycles. MLE fits all eligible histories
+together; Average combines eligible estimates at each temperature. Zero
+contributors leave a gap. There is no
 separate stitching control, temperature-selection mode or tolerance control.
 Any future automatic range suggestion should fill these same editable controls.
 
@@ -107,6 +118,9 @@ sequence. Alignment uses the latest observation at or warmer than the target
 only where matching is needed. Native order follows observation time or original
 row order. Independent streams use warm-to-cold target order. Sampling or
 interpolation happens afterward and is a separate view.
+For MLE, the complete curve is fitted before any sampling; changing the display
+grid cannot change the fit or its uncertainty. Bounds are nominal approximate
+pointwise profile intervals of the full curve likelihood, not simultaneous bands.
 
 Show retained `cumulative` points normally and `excluded` points faintly with
 reasons. `stop_at_decrease` excludes the first decrease and all later points;
@@ -114,6 +128,8 @@ reasons. `stop_at_decrease` excludes the first decrease and all later points;
 or changes uncertainty. A fixed relative margin of 1e-9 only allows numerical
 roundoff. Respect `segment_id` when joining points or drawing uncertainty bands.
 Resampling never bridges exclusions or adds fitted statistical information.
+The MLE curve is already monotone, so these decrease choices normally affect only
+Average or a curve after additional sample/filter-blank subtraction.
 
 Raw blanks may have different well totals and droplet volumes. The model assumes
 all matched-assay background scales with liquid volume, including water,

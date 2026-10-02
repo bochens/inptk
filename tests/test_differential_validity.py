@@ -38,7 +38,9 @@ def test_regular_differential_matches_original_fixed_total_count_formula():
 def test_changing_corrected_totals_use_each_states_fraction(totals, frozen):
     source = experiment(totals=totals, frozen=frozen)
     fractions = inptk.frozen_fraction(source)
-    result = inptk.differential_spectrum(fractions, experiment=source).to_dataframe()
+    result = inptk.differential_spectrum(
+        fractions, experiment=source, method="average"
+    ).to_dataframe()
     concentrations = -np.log1p(-np.array(frozen) / np.array(totals)) / 0.05
     np.testing.assert_allclose(result.concentration, np.diff(concentrations))
     np.testing.assert_array_equal(result.qc_flag & 2, np.where(np.diff(concentrations) < 0, 2, 0))

@@ -36,7 +36,7 @@ def saved_analysis(
     curves=None,
     output_step_C=None,
     temperatures=(-5, -6, -7, -8),
-    frozen_counts=(0, 8, 4, 12),
+    frozen_counts=(0, 4, 8, 12),
 ):
     counts, metadata = [], {}
     for sample, run, cycle in groups:
@@ -90,7 +90,12 @@ def read_export(path):
 def test_export_preserves_saved_final_rows_values_and_error_widths(
     tmp_path, csu, policy, temperatures, method
 ):
-    path, result = saved_analysis(tmp_path, policy=policy, method=method)
+    path, result = saved_analysis(
+        tmp_path, policy=policy, method=method,
+        frozen_counts=(0, 4, 8, 12) if method == "mle" else (0, 8, 4, 12),
+    )
+    if method == "mle":
+        temperatures = [-5, -6, -7, -8]
     original = (path / "analysis.json").read_bytes()
     output = tmp_path / "export.csv"
     assert csu.main([str(path), "--out", str(output), "--allow-missing-header"]) == 0
@@ -230,7 +235,9 @@ def test_command_line_reports_actionable_export_error_without_traceback(tmp_path
 
 def test_export_keeps_native_observation_order_and_repeated_temperatures(tmp_path, csu):
     temperatures = (-5.1, -5.1, -4.9, -6.2)
-    path, result = saved_analysis(tmp_path, temperatures=temperatures, frozen_counts=(0, 4, 8, 12))
+    path, result = saved_analysis(
+        tmp_path, temperatures=temperatures, frozen_counts=(0, 4, 8, 12), method="average"
+    )
     output = tmp_path / "native.csv"
     csu.main([str(path), "--out", str(output), "--allow-missing-header"])
     _, actual = read_export(output)

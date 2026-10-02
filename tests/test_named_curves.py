@@ -110,7 +110,7 @@ def test_cumulative_contains_retained_points_and_excluded_explains_the_rest(poli
         ],
     )
     result = inptk.analyze_concentration(
-        data, curves={"chosen": {"inputs": ["first"]}}, decrease_policy=policy
+        data, curves={"chosen": {"inputs": ["first"]}}, decrease_policy=policy, method="average"
     )
     curve = result.curves["chosen"]
     assert curve.cumulative.to_dataframe().temperature_C.tolist() == expected

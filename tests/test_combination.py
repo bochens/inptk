@@ -49,8 +49,12 @@ def test_one_workflow_handles_single_overlap_and_gaps_with_explicit_sources(meth
     assert combined.contributing_measurement_ids.map(json.loads).tolist() == [["A"], ["A", "B"], []]
     assert np.isnan(combined.concentration.iloc[-1])
     per = input_spectra(result).to_dataframe().set_index(["measurement_id", "temperature_C"])
-    for column in ("concentration", "lower_error", "upper_error"):
-        assert combined.iloc[0][column] == per.loc[("A", -5), column]
+    if method == "average":
+        for column in ("concentration", "lower_error", "upper_error"):
+            assert combined.iloc[0][column] == per.loc[("A", -5), column]
+    else:
+        # Later measurements also constrain the earlier part of a joint curve.
+        assert combined.concentration.dropna().diff().dropna().ge(0).all()
     excluded = (
         input_spectra(result)
         .to_dataframe()

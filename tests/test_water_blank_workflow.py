@@ -211,7 +211,8 @@ def test_raw_blank_ranges_record_zero_one_and_two_contributors(method):
     ]
     assert selected.iloc[-1][["concentration", "lower_error", "upper_error"]].isna().all()
     individual = input_spectra(result).to_dataframe().set_index(["measurement_id", "temperature_C"])
-    for row in selected.loc[selected.contributor_count.eq(1)].itertuples():
+    single = selected.loc[selected.contributor_count.eq(1)] if method == "average" else selected[:0]
+    for row in single.itertuples():
         expected = individual.loc[(row.source_measurement_id, row.temperature_C)]
         np.testing.assert_allclose(
             [row.concentration, row.lower_error, row.upper_error],

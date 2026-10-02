@@ -141,9 +141,9 @@ estimates and their uncertainty. Each step returns one scientific table.
 results or settings that could not apply.
 
 To calculate separate spectra for all physical inputs, use `cumulative_spectrum`
-with the same fractions, experiment, and temperature ranges.
+with the same fractions, experiment, method, and temperature ranges.
 For optional differential output, call `differential_spectrum` with the same
-fractions, experiment, and temperature ranges.
+fractions, experiment, method, and temperature ranges.
 `inptk.subtract_blanks(estimated, {"A": blank_spectrum})` subtracts a calculated
 sample/filter blank spectrum before unit conversion. `finalize_spectrum`
 then selects the final nondecreasing concentration rows without changing the
@@ -156,8 +156,9 @@ Differential concentration is the increase between adjacent cooling observations
 divided by their actual temperature difference. Repeated-temperature and warming
 transitions have no cooling interval; their source identities are recorded in
 history, and the calculation never skips across them. Each
-endpoint uses its own concentration estimate, so changing blank-corrected totals
-are supported. Missing or excluded endpoints produce a missing interval; the
+endpoint uses its fitted concentration. With `method="average"`, the separate
+count-state estimates also support changing blank-corrected totals; joint MLE
+requires fixed raw totals. Missing or excluded endpoints produce a missing interval; the
 calculation does not bridge gaps. Negative changes carry quality flag `2`;
 non-finite results carry flag `1` (flags can combine). Each row stores both interval edges;
 there is no invented interval before the first supplied state. This calculation
@@ -167,16 +168,19 @@ does not establish whether a change caused by lost droplets is unbiased.
 
 Use `method="mle"` (default) or `method="average"` with the same temperature ranges:
 
-- **MLE**, maximum likelihood estimation, finds the concentration most consistent
-  with the eligible measurements' frozen and total droplet counts together.
+- **MLE**, maximum likelihood estimation, fits one complete freezing curve to
+  the eligible raw counts. Concentration and each run's blank background can
+  only increase or stay constant as temperature falls.
 - **Average** calculates each eligible measurement's concentration in the original
   suspension, then takes their equal-weight arithmetic mean.
 
 By default, measurements of the same original sample, run, and cycle form one
 output curve. Explicit curves can combine independent sets from different runs;
-each run keeps its own blank background. With one eligible measurement, both
-methods use that measurement's concentration and uncertainty. With none, neither
-invents a value. There is no separate stitching operation.
+each run keeps its own blank background. MLE shares information across the curve,
+so observations at other temperatures can affect an estimate even where only one
+measurement contributes. Average uses only the eligible states at that temperature.
+Neither reports a value where no measurement is eligible. There is no separate
+stitching operation.
 
 ```python
 result = inptk.analyze_concentration(
@@ -218,16 +222,28 @@ table remains complete. Missing blank coverage outside a sample's selected range
 does not block analysis; eligible temperatures still require blank coverage.
 
 The count model assumes independent physical droplet sets across measurements.
-Each temperature is estimated separately: seeing the same droplets at another
-temperature or in another freezing cycle does not create extra independent
-observations. A curve cannot contain different cycles of the same run.
+MLE requires a fixed total and nondecreasing first-freezing counts within each
+selected cycle. Each well contributes its freezing interval or its unfrozen state
+at the last observation. Additional images do not become additional independent
+wells. Changing totals or falling frozen counts raise an error; there is no
+automatic switch to another method. Supply raw counts or review the selected range.
+A curve cannot contain different cycles of the same run.
 
-MLE uncertainty uses a profile-likelihood interval: keep concentrations that remain
-sufficiently consistent with the observed counts after allowing any fitted water
-background to vary. The log-likelihood threshold is `z**2 / 2`; the default
-`z=1.96` gives nominal 95% bounds. The rule is the same for one or many eligible
-measurements. The bounds describe count uncertainty under the model, not
-cycle-to-cycle variability or uncertainty in supplied volumes and dilutions.
+MLE fits concentration as a sum of nonnegative increases during cooling. This
+guarantees monotonicity within the fit, without deleting dips afterward. It uses
+the observed temperatures, without imposing a smooth functional shape. Where the
+data cannot locate an increase within an interval, the reported step is placed at
+the cold edge; uncertainty still allows other locations. If complete freezing
+leaves the cold tail without a finite estimate, those values are marked unavailable.
+
+MLE uncertainty uses a profile-likelihood interval: at each temperature, vary that
+concentration and refit the rest of the curve and every blank background. Keep
+values whose log likelihood is within `z**2 / 2` of the best fit. The default
+`z=1.96` gives nominal, approximate 95% **pointwise** bounds, not a 95% guarantee
+for the whole plotted band simultaneously. The bounds describe count uncertainty
+under the model, not cycle-to-cycle variability or uncertainty in supplied volumes
+and dilutions. With a single uncorrected droplet set they agree with the ordinary
+binomial count profile bounds at the observed temperatures.
 
 Average uses conservative bounds that allow shared blank uncertainty; MLE uses
 counts jointly. For `average`, the uncertainty label is **Bonferroni-adjusted
@@ -287,8 +303,10 @@ excluded rows after blank correction and unit conversion, with `used_in_final` a
 `decrease`, or `after_decrease`. `segment_id` marks uninterrupted retained portions
 so later resampling cannot bridge exclusions. Original observations remain available.
 This final selection is separate from alignment and measurement temperature ranges.
-It does not sort native observations by temperature or trim the record at its
-first coldest observation.
+Average follows observation order. MLE already supplies a monotone fitted curve
+in warm-to-cold order, so it normally retains the full finite fit. An additional
+sample/filter-blank subtraction can still create decreases. Original observations
+are never reordered or trimmed.
 
 ```python
 result = inptk.analyze_concentration(experiment, decrease_policy="skip_decreases")
@@ -494,7 +512,8 @@ concentration from that measurement and its assigned blanks. The combined
 spectrum uses all measurements allowed by `temperature_ranges_C`. MLE fits their
 counts with each run's own blank group; average uses their individually estimated
 concentrations. Cross-run MLE estimates one original-sample concentration while
-allowing a separate background for each run. In an MLE fit, each independent blank set contributes once at a temperature,
+allowing a separate background curve for each run. In an MLE fit, each independent
+blank set contributes its freezing history once,
 regardless of how many dilutions reference it. Distinct droplet volumes remain
 in the probability model; unequal-volume blank counts are not collapsed into
 one frozen fraction. Repeated cycles remain separate.
@@ -669,7 +688,7 @@ use `differential_spectrum`. Combined differential spectra are not implemented.
 ### Original temperatures, alignment, and optional output grids
 
 `frozen_fraction(experiment)` preserves every source count row and temperature.
-One sample measurement keeps its native observation sequence. Measurements from
+For Average, one sample measurement keeps its native observation sequence. Measurements from
 the same run with matching time/temperature sequences also stay at those native
 states, including repeated temperatures and holds. Without time, a matching
 sequence of unique temperatures is enough to establish this correspondence;
@@ -685,6 +704,16 @@ sample is missing rows. If members request different acquisitions of one shared
 blank, use that blank's latest-warmer state at the target once and record alignment.
 Otherwise the blank uses the same latest-warmer rule. A missing eligible blank is an error.
 A native sample keeps its own temperatures even when its blank needs alignment.
+
+MLE uses these selected original observations to fit one temperature curve. It
+resolves holds and reversals with the same latest-warmer rule and returns one
+fitted value per distinct original sample temperature, ordered warm to cold.
+Blank transitions retain their own observed temperatures in the likelihood.
+Counts and observed frozen fractions keep all original rows. The individual
+`cumulative_spectrum` step evaluates its fitted curve back onto those original
+rows; duplicate temperatures therefore have the same fitted concentration.
+History records the physical well count, selected observation identities, and
+the joint model for each named curve.
 
 The workflow does not round temperatures, add warm zero counts, select maxima,
 or cut observations off at the first temperature minimum. There are no public
@@ -751,6 +780,7 @@ src/inptk/
   methods.py        method, named-curve inputs, and temperature-range validation
   processing.py     native count-to-fraction and per-measurement spectrum steps
   alignment.py      match original sample/blank observations only where needed
+  curve_fit.py      prepare selected physical well histories for the joint curve fit
   resampling.py     optional grid views after final concentration selection
   workflows.py      concentration estimation, correction, units, and full workflow
   results.py        assemble named curves with their sources and exclusions
