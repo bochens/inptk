@@ -2,24 +2,68 @@
 
 import argparse
 import json
+import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
 
-from . import __version__, analyze_concentration, load, read_counts, read_icescopy
+from . import (
+    __version__,
+    analyze_concentration,
+    frozen_fraction,
+    load,
+    read_counts,
+    read_icescopy,
+    read_observations,
+)
 from .experiment import AnalysisResult, Experiment
+from .io import FORMAT_VERSION, _encode, _table_payload
 from .tables import CountsTable
+
+CLI_PROTOCOL_VERSION = 1
+
+
+class _UsageError(Exception):
+    """An argparse failure that main can also report as JSON."""
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _UsageError(message)
+
+
+def _json_flag(parser):
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Return one versioned JSON response on stdout, including failures",
+    )
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(
-        prog="inptk", description="INP-toolkit droplet-freezing analysis"
-    )
+    parser = _Parser(prog="inptk", description="INP-toolkit droplet-freezing analysis")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    _json_flag(parser)
     commands = parser.add_subparsers(dest="command", required=True)
+    capabilities = commands.add_parser("capabilities", help="Describe the installed CLI as JSON")
+    _json_flag(capabilities)
+    preview = commands.add_parser(
+        "preview", help="Read original counts and fractions without fitting concentrations"
+    )
+    preview.add_argument("input")
+    preview.add_argument("--format", choices=("native", "icescopy", "saved"), default="native")
+    preview.add_argument("--metadata", help="Optional or incomplete measurement metadata")
+    preview.add_argument(
+        "--sample-map", help="JSON object or file mapping Icescopy measurement names to samples"
+    )
+    preview.add_argument("--run-id", default="1")
+    _json_flag(preview)
     analyze = commands.add_parser(
         "analyze", help="Combine original observations into explicit sample groups"
     )
+    _json_flag(analyze)
     analyze.add_argument("input")
     analyze.add_argument("--metadata", help="Native metadata or Icescopy metadata overrides")
     analyze.add_argument(
@@ -32,11 +76,12 @@ def build_parser():
         ),
     )
     analyze.add_argument(
-        "--sample-map", help="JSON file mapping Icescopy measurement names to parent samples"
+        "--sample-map",
+        help="JSON object or file mapping Icescopy measurement names to parent samples",
     )
     analyze.add_argument(
         "--water-blank-map",
-        help="JSON file mapping native sample measurements to lists of water-blank measurements",
+        help="JSON object or file mapping native measurements to lists of blank measurements",
     )
     analyze.add_argument(
         "--no-water-blank-correction",
@@ -87,6 +132,7 @@ def build_parser():
     export = commands.add_parser(
         "export-csv", help="Export final concentration rows from a saved analysis"
     )
+    _json_flag(export)
     export.add_argument("input")
     export.add_argument("--out", required=True)
     export.add_argument("--table", choices=("final", "resampled"), default="final")
@@ -158,15 +204,200 @@ def _json_object(value, option):
     return result
 
 
+def _response(command, *, status="ok", warnings=None, **payload):
+    return {
+        "protocol_version": CLI_PROTOCOL_VERSION,
+        "toolkit_version": __version__,
+        "saved_format_version": FORMAT_VERSION,
+        "command": command,
+        "status": status,
+        "warnings": [] if warnings is None else warnings,
+        **payload,
+    }
+
+
+def _print_json(payload):
+    print(json.dumps(_encode(payload), allow_nan=False, ensure_ascii=False))
+
+
+def _capabilities(parser):
+    # Derive flags, defaults and choices from the parser used by this executable.
+    # The GUI need not scrape --help or duplicate changing scientific defaults.
+    commands = {}
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for name, command in action.choices.items():
+            options = []
+            for option in command._actions:
+                if option.dest in ("help", "json"):
+                    continue
+                options.append(
+                    {
+                        "name": option.dest,
+                        "flags": option.option_strings,
+                        "required": option.required,
+                        "default": None if option.default == argparse.SUPPRESS else option.default,
+                        "choices": None if option.choices is None else list(option.choices),
+                        "type": option.type.__name__
+                        if option.type
+                        else "boolean"
+                        if isinstance(option, argparse._StoreTrueAction)
+                        else "string",
+                        "repeatable": isinstance(option, argparse._AppendAction),
+                        "help": option.help,
+                    }
+                )
+            commands[name] = {"options": options}
+    return _response(
+        "capabilities",
+        commands=commands,
+        result_tables=[
+            "frozen_fraction",
+            "per_dilution",
+            "combined",
+            "final_candidates",
+            "final",
+            "differential",
+            "resampled",
+        ],
+        json_number_encoding={"nonfinite_key": "$nonfinite", "values": ["nan", "inf", "-inf"]},
+        exit_codes={"success": 0, "processing_error": 1, "usage_error": 2, "cancelled": 130},
+    )
+
+
+def _preview(args):
+    blank_map = {}
+    if args.format == "saved":
+        if args.metadata or args.sample_map:
+            raise ValueError("Saved input already contains its metadata and sample mapping")
+        source = load(args.input)
+        experiment = source.experiment if isinstance(source, AnalysisResult) else source
+        counts = experiment.counts
+        metadata = [
+            {**asdict(experiment.samples[item.sample_id]), **asdict(item)}
+            for item in experiment.measurements.values()
+        ]
+        provisional = []
+        blank_map = experiment.water_blank_map
+    else:
+        mapping = _json_object(args.sample_map, "--sample-map")
+        counts = read_observations(
+            args.input,
+            format=args.format,
+            metadata=args.metadata,
+            sample_map=mapping,
+            run_id=args.run_id,
+        )
+        imported = counts.history[-1]
+        metadata = imported["measurement_metadata"]
+        provisional = imported["provisional_sample_assignments"]
+    # Check concentration metadata with the same importer, without any fitting.
+    # Blank coverage, selected groups/ranges and output normalization are checked
+    # only by analyze, after the user has made those decisions.
+    missing = {
+        item["measurement_id"]: [
+            name for name in ("dilution", "droplet_volume_uL") if item.get(name) is None
+        ]
+        for item in metadata
+    }
+    missing = {key: value for key, value in missing.items() if value}
+    metadata_error = None
+    if missing:
+        metadata_error = "Missing concentration metadata: " + "; ".join(
+            f"{key}: {', '.join(value)}" for key, value in missing.items()
+        )
+    else:
+        try:
+            read_counts(counts.to_dataframe(), metadata=metadata, water_blank_map=blank_map)
+        except (ValueError, TypeError, KeyError) as error:
+            metadata_error = str(error)
+    frame = counts.to_dataframe()
+    measurements = []
+    for (measurement, run, sample), rows in frame.groupby(
+        ["measurement_id", "run_id", "sample_id"], sort=False
+    ):
+        measurements.append(
+            {
+                "measurement_id": measurement,
+                "run_id": run,
+                "sample_id": sample,
+                "cycle_ids": rows.cycle_id.unique().tolist(),
+                "observation_count": len(rows),
+                "temperature_min_C": float(rows.temperature_C.min()),
+                "temperature_max_C": float(rows.temperature_C.max()),
+            }
+        )
+    return _response(
+        "preview",
+        table=_table_payload(frozen_fraction(counts)),
+        measurements=measurements,
+        measurement_metadata=metadata,
+        provisional_sample_assignments=provisional,
+        water_blank_map=blank_map,
+        suspension_metadata={
+            "valid": metadata_error is None,
+            "error": metadata_error,
+            "missing_fields": {key: value for key, value in missing.items() if value},
+        },
+        analysis_performed=False,
+    )
+
+
+def _error_code(error):
+    if isinstance(error, FileExistsError):
+        return "output_exists"
+    if isinstance(error, FileNotFoundError):
+        return "file_not_found"
+    if isinstance(error, PermissionError):
+        return "permission_denied"
+    if isinstance(error, OSError):
+        return "io_error"
+    return "invalid_input"
+
+
 def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    # An invalid invocation still needs a machine-readable response. Honor the
+    # flag only before a '--' separator, where it is an option rather than data.
+    option_arguments = arguments[: arguments.index("--")] if "--" in arguments else arguments
+    json_mode = "--json" in option_arguments
+    command = None
     try:
-        if args.command == "export-csv":
+        args = parser.parse_args(arguments)
+        command = args.command
+        json_mode = bool(getattr(args, "json", json_mode))
+        if command == "capabilities":
+            _print_json(_capabilities(parser))
+            return 0
+        if command == "preview":
+            preview = _preview(args)
+            if json_mode:
+                _print_json(preview)
+            else:
+                print(
+                    f"Read {len(preview['table']['rows'])} original observations "
+                    f"from {len(preview['measurements'])} measurements"
+                )
+                if not preview["suspension_metadata"]["valid"]:
+                    print(
+                        f"Concentration metadata incomplete or invalid: "
+                        f"{preview['suspension_metadata']['error']}"
+                    )
+                print("No concentrations calculated. Use --json for plot data and metadata.")
+            return 0
+        if Path(args.out).exists():
+            raise FileExistsError(f"Output already exists: {args.out}")
+        if command == "export-csv":
             result = load(args.input)
             if not isinstance(result, AnalysisResult):
                 raise TypeError("CSV export requires a saved AnalysisResult")
             result.export_csv(args.out, table=args.table)
+            if json_mode:
+                _print_json(
+                    _response(command, output=str(Path(args.out).resolve()), table=args.table)
+                )
             return 0
         temperature_ranges = _json_object(args.temperature_ranges, "--temperature-ranges")
         combination_groups = _json_object(args.combination_groups, "--combination-groups")
@@ -175,11 +406,7 @@ def main(argv=None):
                 raise ValueError("--sample-map applies only to Icescopy input")
             if not args.metadata:
                 raise ValueError("Native input requires --metadata")
-            water_blank_map = (
-                json.loads(Path(args.water_blank_map).read_text(encoding="utf-8"))
-                if args.water_blank_map
-                else None
-            )
+            water_blank_map = _json_object(args.water_blank_map, "--water-blank-map")
             experiment = read_counts(
                 args.input,
                 metadata=args.metadata,
@@ -192,7 +419,7 @@ def main(argv=None):
                     "The Icescopy CSV adapter does not include raw blank context. "
                     "--water-blank-map requires raw sample and blank counts in --format native."
                 )
-            mapping = json.loads(Path(args.sample_map).read_text()) if args.sample_map else None
+            mapping = _json_object(args.sample_map, "--sample-map")
             overrides = None
             if args.metadata:
                 from .readers import _frame
@@ -224,9 +451,80 @@ def main(argv=None):
             decrease_policy=args.decrease_policy,
         )
         result.save(args.out)
-        for warning in result.warnings:
-            print(f"Warning: {warning}")
-        print(f"Saved {len(result.final)} concentration rows to {args.out}")
+        if json_mode:
+            _print_json(
+                _response(
+                    command,
+                    output=str(Path(args.out).resolve()),
+                    warnings=result.warnings,
+                    settings=result.settings,
+                    tables={
+                        name: {"type": type(table).__name__, "row_count": len(table)}
+                        for name in (
+                            "frozen_fraction",
+                            "per_dilution",
+                            "combined",
+                            "final_candidates",
+                            "final",
+                            "differential",
+                            "resampled",
+                        )
+                        if (table := getattr(result, name)) is not None
+                    },
+                )
+            )
+        else:
+            for warning in result.warnings:
+                print(f"Warning: {warning}")
+            print(f"Saved {len(result.final)} concentration rows to {args.out}")
+    except _UsageError as error:
+        if json_mode:
+            _print_json(
+                _response(
+                    command, status="error", error={"code": "usage_error", "message": str(error)}
+                )
+            )
+        else:
+            parser.print_usage(sys.stderr)
+            parser.exit(2, f"inptk: error: {error}\n")
+        return 2
     except (ValueError, TypeError, KeyError, OSError, AttributeError) as error:
+        if json_mode:
+            _print_json(
+                _response(
+                    command,
+                    status="error",
+                    error={"code": _error_code(error), "message": str(error)},
+                )
+            )
+            return 1
         parser.exit(1, f"inptk: {error}\n")
+    except KeyboardInterrupt:
+        if json_mode:
+            _print_json(
+                _response(
+                    command,
+                    status="error",
+                    error={"code": "cancelled", "message": "Analysis interrupted"},
+                )
+            )
+        else:
+            print("inptk: interrupted", file=sys.stderr)
+        return 130
+    except Exception as error:
+        # Preserve diagnostic details for maintainers without making the GUI
+        # parse a traceback as its response. Human CLI keeps normal tracebacks.
+        if not json_mode:
+            raise
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
+        _print_json(
+            _response(
+                command,
+                status="error",
+                error={"code": "internal_error", "message": str(error)},
+            )
+        )
+        return 1
     return 0

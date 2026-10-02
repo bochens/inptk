@@ -22,6 +22,23 @@ normalization. It requires Jupyter, the `plot` extra, and the local source data 
 paths configured near the top. Its dataset-specific settings are documented there;
 external result export is off by default.
 
+## Preview observations before calculating concentrations
+
+Counts and frozen fractions do not need dilution, droplet volume or air volume:
+
+```python
+import inptk
+
+counts = inptk.read_observations("counts.csv")
+fractions = inptk.frozen_fraction(counts)
+```
+
+For an Icescopy CSV use `format="icescopy"`. Optional `metadata=` can be incomplete
+at this stage. Available metadata are retained in the count table's history.
+Missing parent-sample assignments keep measurements separate; they are not
+inferred from names. The concentration readers below still require complete
+physical metadata and reject invalid inputs.
+
 ## A standard analysis
 
 ```python
@@ -558,6 +575,44 @@ CSV. No Icescopy GUI plugin is installed by this package. Connecting the
 Icescopy interface is a separate integration task. The
 [Icescopy handoff](ICESCOPY_HANDOFF.md) defines the executable contract, settings
 placement, plots, and remaining integration work.
+
+### Calling the CLI from an interactive application
+
+Use an argument list with a separate process. These commands support GUI setup,
+plot previews and calculation without importing INP-toolkit into the GUI:
+
+```sh
+inptk capabilities
+inptk preview counts.csv --format native --json
+inptk analyze counts.csv --metadata measurements.csv --out preview.inptk --json
+inptk export-csv preview.inptk --table final --out final.csv --json
+```
+
+`capabilities` returns the installed version, saved-format version and actual CLI
+flags, defaults and choices as JSON. Other commands accept `--json` before or
+after the command name. They return one JSON object on standard output, including
+argument and input errors. Human-readable `--help` and `--version` remain unchanged.
+
+Responses contain `protocol_version: 1`, `toolkit_version`, `saved_format_version`,
+`command`, `status` (`ok` or `error`) and `warnings`. On success, `analyze` reports
+the absolute saved-result path, resolved settings and table row counts. `preview`
+returns a frozen-fraction table with original counts, temperatures and identities,
+measurement summaries, available metadata and missing suspension metadata. It
+performs no fitting, correction or temperature selection and writes no result
+files. Its `suspension_metadata.valid` checks metadata only; it does not validate
+chosen blank coverage, groups, ranges or air/soil normalization.
+
+Failures contain `error.code` and `error.message`. Exit codes are 0 for success,
+1 for input/processing failure, 2 for invalid arguments and 130 for an interrupt.
+Unexpected errors retain a diagnostic traceback on standard error. A terminated
+or crashed process may have no complete JSON response; use its exit status and
+keep the previous successful result. Always use a new path for each calculation.
+Nonfinite numbers use the same `{"$nonfinite":"inf"}` encoding as saved files.
+
+`--sample-map`, `--water-blank-map`, `--temperature-ranges` and
+`--combination-groups` accept a JSON object directly or a JSON file. Pass them as
+individual arguments; do not construct a shell command from GUI text. See
+[ICESCOPY_HANDOFF.md](ICESCOPY_HANDOFF.md) for the process and plotting contract.
 
 ## Results and scientific methods
 

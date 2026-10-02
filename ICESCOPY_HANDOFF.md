@@ -8,7 +8,8 @@ No Icescopy GUI files have changed in this work.
 ## Preferences and analysis settings
 
 Add **Preferences → INP toolkit** with an executable chooser, **Browse**, **Test
-connection**, detected version, and connection status. Test with `inptk --version`.
+connection**, detected version, and connection status. Test with `inptk capabilities`
+and check the returned protocol and saved-format versions.
 Use Icescopy's existing preference location and atomic save mechanism.
 
 Preferences provide starting values. The process dialog shows and saves the
@@ -107,10 +108,50 @@ values are not clipped. Neither choice changes concentrations or error bounds.
 
 Use Qt's separate-process support with an executable path and argument list,
 not a shell command. Read results only after successful completion. Capture
-standard output, standard error, and exit status: 0 success, 1 handled input or
-processing failure, 2 argument-parsing error. Do not parse progress prose as data.
+standard output, standard error, and exit status: 0 success, 1 input/processing
+failure, 2 argument-parsing error, 130 interrupt. Use `--json` and parse one complete
+JSON response from standard output. Keep standard error for diagnostics.
 Every output path must be new. Preserve prior successful results after failed
 jobs and remove disposable previews when no longer needed.
+
+The CLI provides a versioned interface for interactive use:
+
+1. Run `inptk capabilities`. Read `protocol_version`, `toolkit_version`,
+   `saved_format_version` and `commands`. Each command lists its actual flags,
+   defaults, choices and repeatable arguments. Protocol 1 and saved format 2 are
+   implemented here; do not scrape help text or silently accept unknown versions.
+2. Run `inptk preview raw-counts.csv --json`. Add `--metadata measurements.csv`
+   when available, even if physical fields are incomplete. `--format icescopy`
+   reads old exports; `--format saved` previews the original saved experiment.
+   The returned `table` contains frozen fractions and their original counts,
+   temperatures and identities, ready for plots. Preview writes no files and
+   performs no fitting, blank correction, alignment or aggregation.
+3. Use `measurement_metadata`, `measurements`, `provisional_sample_assignments`
+   and `suspension_metadata.missing_fields` to populate the process dialog.
+   Unassigned measurements remain separate. `suspension_metadata.valid` checks
+   metadata only: selected blank coverage, groups, ranges and air/soil conversion
+   still need validation during calculation.
+4. Run `analyze ... --out new-preview.inptk --json` after the user chooses settings.
+   A successful reply contains `output` (absolute path), resolved `settings`,
+   table row counts and warnings. Read the saved tables only after exit code 0
+   and `status == "ok"`. Retain the last successful plot if recalculation fails.
+
+Except for human `--help` and `--version`, `--json` produces one response object
+with `protocol_version: 1`, `toolkit_version`, `saved_format_version`, `command`,
+`status` and `warnings`. Errors add `error.code` and `error.message`. Codes include
+`usage_error`, `invalid_input`, `output_exists`, `file_not_found`,
+`permission_denied`, `io_error`, `cancelled` and `internal_error`. Unexpected
+failures also put a traceback on standard error. Signals or a crashed executable
+can prevent a response; treat missing/truncated JSON as failure, not an empty
+successful result. Nonfinite-number encoding matches the saved-file contract.
+
+Icescopy uses PySide6. Use `QProcess.start(executable, argument_list)` and its
+`finished`/`errorOccurred` signals; do not call `waitForFinished()` on the GUI
+thread. Read stdout and stderr separately. Associate each process with the
+settings that launched it, discard stale replies, and cancel its process when a
+request is superseded. Cancellation must leave previously saved results intact.
+Use a temporary directory per preview job and a new result subdirectory; save the
+selected successful result only when the user chooses Save.
 
 Export **raw sample and blank counts** to native long CSV for new analyses. The
 existing `freeze_count_timeseries.csv` may already be corrected and does not
@@ -194,7 +235,8 @@ inptk analyze raw-counts.csv --format native --metadata measurements.csv \
 ```
 
 Add `--combination-groups combination-groups.json` for explicit groups. Both this
-argument and `--temperature-ranges` accept a JSON object directly or a file path.
+argument, `--temperature-ranges`, `--sample-map` and `--water-blank-map` accept
+a JSON object directly or a file path.
 For an optional final grid add `--output-step-C 0.5 --output-method sample` or
 `interpolate`. There are no pre-fit `--step-C`, `--temperature-method`,
 `--temperature-tolerance-C`, `--dilution-method`, or `--method-options` arguments.
@@ -277,9 +319,9 @@ for interval endpoints.
   have no cooling interval and are recorded in history, without bridging them.
 
 Save the input identities, executable/version, requested options and returned
-settings with the Icescopy analysis. The CLI has no structured capability command
-or stage-only count/fraction preview. Concentration requires dilution and droplet
-volume; air/soil output requires its additional metadata.
+settings with the Icescopy analysis. Concentration requires dilution and droplet
+volume; air/soil output requires its additional metadata. The preview command
+below needs neither dilution nor volume and does not estimate concentrations.
 
 ```sh
 inptk export-csv analysis.inptk --table final --out final.csv
@@ -357,7 +399,7 @@ the saved format. Integrate with the public CLI/data contract, not `_engine`.
 
 ## Verification before integration
 
-- All 584 tests passed. The deliberate invalid-timestamp case emits one pandas
+- All 603 tests passed. The deliberate invalid-timestamp case emits one pandas
   parsing warning. Ruff, mypy across 21 source files, Bandit and diff checks passed.
 - Wheel and source distributions built. The installed wheel was checked outside
   the checkout with MLE/Average, raw blanks on/off, unequal volumes, exact cycle
@@ -368,6 +410,11 @@ the saved format. Integrate with the public CLI/data contract, not `_engine`.
   With its configured ranges, the first decrease occurs at −10°C and the default
   policy retains 5,278 of 8,705 native calculation points. All candidates remain
   available. This legacy corrected-count file cannot recover raw blank uncertainty.
+- The installed executable completed `capabilities`, metadata-free `preview`
+  and `analyze` through PySide6 6.9.3 `QProcess` on 2,400 synthetic observations.
+  A timer continued firing during each command, verifying that the caller's Qt
+  event loop remained responsive. Protocol tests also cover structured errors,
+  interrupts, unexpected failures, inline mappings and preservation of input files.
 - The synthetic standard-workflow example ran successfully. The notebook keeps
   external export disabled; existing source data and result folders were preserved.
 

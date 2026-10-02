@@ -3,7 +3,7 @@
 from .experiment import AnalysisResult, Experiment, MeasurementMetadata, SampleMetadata
 from .io import load, save
 from .processing import cumulative_spectrum, differential_spectrum, frozen_fraction
-from .readers import read_counts, read_icescopy
+from .readers import read_counts, read_icescopy, read_observations
 from .resampling import resample_spectrum
 from .tables import (
     CombinedSpectrumTable,
@@ -41,6 +41,7 @@ __all__ = [
     "load",
     "read_counts",
     "read_icescopy",
+    "read_observations",
     "resample_spectrum",
     "save",
     "subtract_blanks",

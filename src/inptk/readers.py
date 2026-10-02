@@ -70,7 +70,7 @@ def _metadata(records: pd.DataFrame, run_id: str):
         measurements[measurement_id] = MeasurementMetadata(
             measurement_id=measurement_id,
             sample_id=sample_id,
-            run_id=str(_clean(record.get("run_id")) or run_id),
+            run_id=str(run_id if _clean(record.get("run_id")) is None else record["run_id"]),
             dilution=float(record["dilution"]),
             droplet_volume_uL=float(record["droplet_volume_uL"]),
         )
@@ -200,9 +200,9 @@ def _icescopy_overrides(metadata, measurement_ids: set[str]) -> dict[str, dict]:
     return overrides
 
 
-def read_icescopy(
-    source, *, sample_map: dict[str, str] | None = None, metadata=None, run_id: str = "1"
-) -> Experiment:
+def _icescopy_observations(
+    source, *, sample_map=None, metadata=None, run_id="1", require_metadata: bool
+) -> tuple[pd.DataFrame, list[dict]]:
     """Read an Icescopy export; map measurement labels to original sample IDs.
 
     Without sample_map, every Icescopy measurement is a separate sample. Names
@@ -258,7 +258,8 @@ def read_icescopy(
                 if original is None:
                     raise ValueError(f"Missing Icescopy metadata for {measurement_id!r}")
                 original = replace(original, **overrides.get(measurement_id, {}))
-                original.validate_for_count_to_suspension()
+                if require_metadata:
+                    original.validate_for_count_to_suspension()
                 records[measurement_id] = {
                     "measurement_id": measurement_id,
                     "sample_id": sample_id,
@@ -296,7 +297,22 @@ def read_icescopy(
         raise ValueError("No count observations found")
     if sample_map is not None and set(sample_map) - known:
         raise ValueError(f"Unknown measurements in sample_map: {sorted(set(sample_map) - known)}")
-    experiment = read_counts(pd.concat(frames, ignore_index=True), metadata=list(records.values()))
+    return pd.concat(frames, ignore_index=True), list(records.values())
+
+
+def read_icescopy(
+    source, *, sample_map: dict[str, str] | None = None, metadata=None, run_id: str = "1"
+) -> Experiment:
+    """Read Icescopy counts with the physical metadata required for concentration.
+
+    Map exact measurement names to parent samples explicitly. Supplied metadata
+    overrides only the named fields; missing values retain export-header values.
+    Use read_observations for counts/fractions before physical metadata is ready.
+    """
+    data, records = _icescopy_observations(
+        source, sample_map=sample_map, metadata=metadata, run_id=run_id, require_metadata=True
+    )
+    experiment = read_counts(data, metadata=records)
     return Experiment(
         experiment.counts,
         experiment.samples,
@@ -305,4 +321,110 @@ def read_icescopy(
             "format": "icescopy",
             "path": str(source) if isinstance(source, (str, Path)) else None,
         },
+    )
+
+
+def read_observations(
+    source, *, format: str = "native", metadata=None, sample_map=None, run_id: str = "1"
+) -> CountsTable:
+    """Read counts for inspection without requiring dilution or volume metadata.
+
+    No fitting, temperature alignment, blank correction or cycle combination is
+    performed. Missing parent sample assignments keep each measurement separate.
+    Native metadata may supply identities before its physical fields are complete.
+    Available metadata and provisional sample assignments are recorded in history.
+    Concentration calculation still requires a fully validated Experiment.
+    """
+    provisional = []
+    if format == "icescopy":
+        data, records = _icescopy_observations(
+            source,
+            sample_map=sample_map,
+            metadata=metadata,
+            run_id=run_id,
+            require_metadata=False,
+        )
+        if sample_map is None:
+            provisional = [record["measurement_id"] for record in records]
+    elif format == "native":
+        if sample_map is not None:
+            raise ValueError(
+                "sample_map applies only to Icescopy input; native metadata uses sample_id"
+            )
+        data = _frame(source)
+        if "measurement_id" not in data:
+            if "sample_id" not in data:
+                raise ValueError("Counts require measurement_id or sample_id")
+            data["measurement_id"] = data.sample_id
+        if (
+            data.measurement_id.isna().any()
+            or data.measurement_id.astype(str).str.strip().eq("").any()
+        ):
+            raise ValueError("Counts measurement_id must be non-empty")
+        data["measurement_id"] = data.measurement_id.astype(str)
+        supplied: dict[str, dict] = {}
+        metadata_fields = {
+            item.name for model in (SampleMetadata, MeasurementMetadata) for item in fields(model)
+        }
+        if metadata is not None:
+            for item in _frame(metadata).to_dict("records"):
+                name = _clean(item.get("measurement_id", item.get("sample_id")))
+                if name is None or not str(name).strip():
+                    raise ValueError("Metadata requires a non-empty measurement_id or sample_id")
+                name = str(name)
+                if name in supplied:
+                    raise ValueError(f"Duplicate measurement metadata: {name!r}")
+                supplied[name] = {
+                    str(key): _clean(value) for key, value in item.items() if key in metadata_fields
+                }
+        if "sample_id" not in data:
+            provisional = [
+                name
+                for name in data.measurement_id.unique()
+                if supplied.get(name, {}).get("sample_id") is None
+            ]
+            data["sample_id"] = data.measurement_id.map(
+                lambda name: (
+                    supplied.get(name, {}).get("sample_id")
+                    if supplied.get(name, {}).get("sample_id") is not None
+                    else name
+                )
+            )
+        if "run_id" not in data:
+            data["run_id"] = data.measurement_id.map(
+                lambda name: (
+                    supplied.get(name, {}).get("run_id")
+                    if supplied.get(name, {}).get("run_id") is not None
+                    else str(run_id)
+                )
+            )
+        if "cycle_id" not in data:
+            data["cycle_id"] = data.pop("cycle") if "cycle" in data else "1"
+        records = []
+        for measurement, rows in data.groupby("measurement_id", sort=False):
+            name = str(measurement)
+            record: dict = dict(supplied.get(name, {}), measurement_id=name)
+            for column in ("sample_id", "run_id"):
+                values = rows[column].dropna().astype(str).unique()
+                if len(values) != 1:
+                    raise ValueError(f"Measurement {name!r} must have one {column}")
+                if _clean(record.get(column)) is not None and str(record[column]) != values[0]:
+                    raise ValueError(f"Count identities disagree with metadata for {name!r}")
+                record[column] = str(values[0])
+            records.append(record)
+    else:
+        raise ValueError("Observation format must be 'native' or 'icescopy'")
+    if data.empty:
+        raise ValueError("No count observations found")
+    return CountsTable(
+        data,
+        history=[
+            {
+                "operation": "read_observations",
+                "format": format,
+                "path": str(source) if isinstance(source, (str, Path)) else None,
+                "measurement_metadata": records,
+                "provisional_sample_assignments": provisional,
+            }
+        ],
     )
