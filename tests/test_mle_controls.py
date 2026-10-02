@@ -70,7 +70,7 @@ def test_mle_temperature_eligibility_excludes_warm_high_dilution_event() -> None
     masked = _mle_value(
         low,
         high,
-        temperature_eligibility_C={1000: -10.0},
+        temperature_eligibility_C={"high": -10.0},
         mask_mode="drop_rows",
     )
 
@@ -82,7 +82,7 @@ def test_mle_temperature_eligibility_requires_mask_mode() -> None:
     high = _fraction_table("high", sample_name="filterA_1000", dilution=1000, n_frozen=1)
 
     with pytest.raises(ValueError, match="mask_mode is required"):
-        ufolaf.cumulative_spec_mle([high], temperature_eligibility_C={1000: -10.0})
+        ufolaf.cumulative_spec_mle([high], temperature_eligibility_C={"high": -10.0})
 
 
 def test_mle_mask_mode_requires_temperature_eligibility() -> None:
@@ -103,12 +103,12 @@ def test_mle_rebase_counts_removes_warm_masked_frozen_baseline() -> None:
 
     drop_rows = _mle_value(
         high,
-        temperature_eligibility_C={1000: -10.0},
+        temperature_eligibility_C={"high": -10.0},
         mask_mode="drop_rows",
     )
     rebased = _mle_value(
         high,
-        temperature_eligibility_C={1000: -10.0},
+        temperature_eligibility_C={"high": -10.0},
         mask_mode="rebase_counts",
     )
 
@@ -126,7 +126,7 @@ def test_mle_rebase_counts_drops_dilution_when_no_wells_remain() -> None:
 
     result = ufolaf.cumulative_spec_mle(
         [high],
-        temperature_eligibility_C={1000: -10.0},
+        temperature_eligibility_C={"high": -10.0},
         mask_mode="rebase_counts",
     )
 
@@ -144,7 +144,7 @@ def test_mle_rebase_counts_uses_coldest_masked_baseline() -> None:
 
     rebased = _mle_value(
         high,
-        temperature_eligibility_C={1000: -10.0},
+        temperature_eligibility_C={"high": -10.0},
         mask_mode="rebase_counts",
     )
 
@@ -163,7 +163,7 @@ def test_mle_rebase_counts_drops_rows_without_remaining_risk_set() -> None:
 
     result = ufolaf.cumulative_spec_mle(
         [high],
-        temperature_eligibility_C={1000: -10.0},
+        temperature_eligibility_C={"high": -10.0},
         mask_mode="rebase_counts",
     ).to_dataframe()
 
@@ -175,7 +175,7 @@ def test_mle_direct_likelihood_weight_reduces_high_dilution_influence() -> None:
     high = _fraction_table("high", sample_name="filterA_1000", dilution=1000, n_frozen=1)
 
     unweighted = _mle_value(low, high)
-    weighted = _mle_value(low, high, dilution_likelihood_weights={1000: 0.05})
+    weighted = _mle_value(low, high, likelihood_weights={"high": 0.05})
 
     assert 0 < weighted < unweighted
 
@@ -184,11 +184,11 @@ def test_mle_action_count_weights_match_exponential_direct_weights() -> None:
     low = _fraction_table("low", sample_name="filterA_1", dilution=1, n_frozen=0)
     high = _fraction_table("high", sample_name="filterA_1000", dilution=1000, n_frozen=1)
 
-    direct = _mle_value(low, high, dilution_likelihood_weights={1000: 0.25})
+    direct = _mle_value(low, high, likelihood_weights={"high": 0.25})
     from_actions = _mle_value(
         low,
         high,
-        dilution_action_counts={1: 0, 1000: 2},
+        action_counts={"low": 0, "high": 2},
         action_weight_half_life=1,
     )
 
@@ -199,4 +199,4 @@ def test_mle_action_counts_require_decay_parameter() -> None:
     low = _fraction_table("low", sample_name="filterA_1", dilution=1, n_frozen=0)
 
     with pytest.raises(ValueError, match="requires action_weight"):
-        ufolaf.cumulative_spec_mle([low], dilution_action_counts={1: 0})
+        ufolaf.cumulative_spec_mle([low], action_counts={"low": 0})

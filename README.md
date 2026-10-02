@@ -150,16 +150,20 @@ total droplet counts from the different dilutions together.
 
 ```python
 method = inptk.MLE(
-    temperature_eligibility_C={100: -15},
+    temperature_eligibility_C={"Sample_2": -15},
     mask_mode="drop_rows",
 )
 result = inptk.analyze_concentration(experiment, dilution_method=method)
 ```
 
-This example allows dilution `100` to contribute only at -15 C and colder.
-All mapping keys are dilution factors, and settings apply across samples/runs/cycles.
-Unknown dilution factors are rejected. Temperature limits require an explicit
-choice of `mask_mode`:
+This example keeps measurement `Sample_2` rows at -15 C and colder in the MLE fit.
+All MLE dictionaries use the exact `measurement_id` as their key. For Icescopy
+imports, this is the exported `sample_name`, such as `Sample_2`, rather than its
+dilution factor or the parent sample name assigned by `sample_map` (such as
+`CRG_M1`). Settings follow that measurement through all its cycles. Unknown
+measurement names are rejected. Measurements omitted from temperature limits are
+unrestricted; those omitted from weights have weight 1. Temperature limits require
+an explicit choice of `mask_mode`:
 
 - `"drop_rows"`: omit warmer rows but keep the original cumulative counts at
   retained temperatures.
@@ -167,8 +171,8 @@ choice of `mask_mode`:
   droplets from the total. This changes the scientific interpretation; select it
   only when deliberately excluding those warm freezing events.
 
-Other retained MLE controls are `dilution_likelihood_weights` (positive relative
-contributions to the fit), or `dilution_action_counts` with one of
+Other retained MLE controls are `likelihood_weights` (positive relative
+contributions to the fit), or `action_counts` with one of
 `action_weight_lambda` or `action_weight_half_life` (an exponential weighting rule
 based on action counts supplied by the caller). These two weighting approaches
 cannot be combined. The package does not infer action counts from cycle numbers.

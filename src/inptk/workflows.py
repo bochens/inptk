@@ -119,25 +119,25 @@ def subtract_blanks(
 
 
 def _validate_method_inputs(method, experiment, source) -> list[float]:
-    """Reject unknown dilution settings and ambiguous manual selections up front."""
+    """Reject unknown measurement settings and ambiguous manual selections up front."""
     dilutions = sorted(
         {float(experiment.measurements[key].dilution) for key in source.measurement_id.unique()}
     )
     if isinstance(method, MLE):
         for name in (
             "temperature_eligibility_C",
-            "dilution_likelihood_weights",
-            "dilution_action_counts",
+            "likelihood_weights",
+            "action_counts",
         ):
             mapping = getattr(method, name)
             if mapping is not None:
-                unknown = [
-                    key
-                    for key in mapping
-                    if not np.isclose(dilutions, key, rtol=0, atol=1e-12).any()
-                ]
+                available = set(source.measurement_id)
+                unknown = set(mapping) - available
                 if unknown:
-                    raise ValueError(f"{name} names unknown dilution factors: {unknown}")
+                    raise ValueError(
+                        f"{name} names unknown measurements: {sorted(unknown)}; "
+                        f"available measurement names: {sorted(available)}"
+                    )
     if isinstance(method, ManualStitch):
         if len(method.switch_temperatures_C) != len(dilutions) - 1:
             raise ValueError(

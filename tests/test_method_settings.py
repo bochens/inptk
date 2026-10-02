@@ -189,19 +189,27 @@ def test_manual_zero_switches_support_one_dilution():
     assert spectrum(result).dilution_fold.eq(1).all()
 
 
-def test_mle_controls_are_effective_and_save_with_json_safe_keys(tmp_path):
+@pytest.mark.parametrize(
+    "weighting",
+    [
+        {"likelihood_weights": {"R1_10": 0.25}},
+        {"action_counts": {"R1_10": 2}, "action_weight_half_life": 1},
+    ],
+)
+def test_mle_controls_preserve_measurement_names_in_saved_settings(tmp_path, weighting):
     source = experiment()
     method = inptk.MLE(
-        temperature_eligibility_C={10: -6},
+        temperature_eligibility_C={"R1_10": -6},
         mask_mode="drop_rows",
-        dilution_likelihood_weights={10: 0.25},
         confidence_drop=1.1,
+        **weighting,
     )
     result = analyze(source, method)
     options = result.settings["method_options"]
     assert options["confidence_drop"] == 1.1
-    assert all(isinstance(key, str) for key in options["temperature_eligibility_C"])
-    assert all(isinstance(key, str) for key in options["dilution_likelihood_weights"])
+    assert options["temperature_eligibility_C"] == {"R1_10": -6}
+    for name, value in weighting.items():
+        assert options[name] == value
     assert json.loads(json.dumps(options, allow_nan=False)) == options
     result.save(tmp_path / "analysis")
     restored = inptk.load(tmp_path / "analysis")
@@ -214,12 +222,115 @@ def test_mle_controls_are_effective_and_save_with_json_safe_keys(tmp_path):
 
 def test_mle_action_weights_match_direct_weights_and_z_sets_default_confidence():
     source = experiment()
-    direct = analyze(source, inptk.MLE(dilution_likelihood_weights={10: 0.25}), z=2.3)
+    direct = analyze(source, inptk.MLE(likelihood_weights={"R1_10": 0.25}), z=2.3)
     actions = analyze(
-        source, inptk.MLE(dilution_action_counts={10: 2}, action_weight_half_life=1), z=2.3
+        source, inptk.MLE(action_counts={"R1_10": 2}, action_weight_half_life=1), z=2.3
     )
     pd.testing.assert_frame_equal(spectrum(direct), spectrum(actions))
     assert direct.settings["method_options"]["confidence_drop"] == pytest.approx(2.3**2 / 2)
+
+
+def test_mle_targets_measurements_independently_at_the_same_dilution():
+    original = experiment()
+    metadata = [dict(vars(value), dilution=1) for value in original.measurements.values()]
+    source = inptk.read_counts(original.counts.to_dataframe(), metadata=metadata)
+    unrestricted = spectrum(analyze(source, inptk.MLE()))
+    masked = spectrum(
+        analyze(
+            source,
+            inptk.MLE(temperature_eligibility_C={"R1_10": -6}, mask_mode="drop_rows"),
+        )
+    )
+    # The unlisted measurement remains eligible, even at the same dilution factor.
+    assert masked.loc[-5, "concentration"] == pytest.approx(-np.log1p(-1 / 20) / 0.05)
+    pd.testing.assert_series_equal(masked.loc[-6], unrestricted.loc[-6])
+    direct = spectrum(analyze(source, inptk.MLE(likelihood_weights={"R1_10": 0.25})))
+    actions = spectrum(
+        analyze(source, inptk.MLE(action_counts={"R1_10": 2}, action_weight_half_life=1))
+    )
+    # Same volumes/factors give a weighted frozen fraction with a known exact fit.
+    expected = -np.log1p(-(8 + 0.25 * 1) / (20 + 0.25 * 20)) / 0.05
+    assert direct.loc[-6, "concentration"] == pytest.approx(expected)
+    pd.testing.assert_frame_equal(direct, actions)
+
+
+def test_mle_named_controls_do_not_leak_into_other_samples_runs_or_cycles():
+    original = experiment(
+        {1: [1, 8, 17, 19], 10: [0, 3, 6, 10]},
+        scopes=(("R1", "01", 0), ("R1", "02", 1), ("R2", "01", 2)),
+    )
+    rows = original.counts.to_dataframe()
+    rows = rows[~((rows.cycle_id == "02") & (rows.measurement_id == "R1_10"))].copy()
+    rows.loc[rows.run_id == "R2", "sample_id"] = "B"
+    metadata = [
+        dict(vars(value), sample_id="B" if value.run_id == "R2" else "A")
+        for value in original.measurements.values()
+    ]
+    source = inptk.read_counts(rows, metadata=metadata)
+    baseline = analyze(source, inptk.MLE()).combined
+    targeted = analyze(
+        source,
+        inptk.MLE(
+            temperature_eligibility_C={"R1_10": -6},
+            mask_mode="drop_rows",
+            likelihood_weights={"R1_10": 0.25},
+        ),
+    ).combined
+    for run, sample, cycle in (("R1", "A", "02"), ("R2", "B", "01")):
+        selected = {"run_id": run, "sample_id": sample, "cycle_id": cycle}
+        pd.testing.assert_frame_equal(
+            targeted.select(**selected).to_dataframe(), baseline.select(**selected).to_dataframe()
+        )
+    selected = {"run_id": "R1", "sample_id": "A", "cycle_id": "01", "temperature_C": -6}
+    assert (
+        targeted.select(**selected).to_dataframe().concentration.iloc[0]
+        < baseline.select(**selected).to_dataframe().concentration.iloc[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "field, extra",
+    [
+        ("temperature_eligibility_C", {"mask_mode": "drop_rows"}),
+        ("likelihood_weights", {}),
+        ("action_counts", {"action_weight_half_life": 1}),
+    ],
+)
+def test_mle_requires_exact_nonempty_measurement_names(field, extra):
+    for key in (10, "", "   "):
+        with pytest.raises((TypeError, ValueError)):
+            inptk.MLE(**{field: {key: 1}, **extra})
+    for unknown in ("missing", "10"):
+        method = inptk.MLE(**{field: {unknown: 1}, **extra})
+        with pytest.raises(ValueError):
+            analyze(experiment(), method)
+
+
+def test_mle_numeric_string_key_is_valid_only_as_an_actual_measurement_name():
+    original = experiment()
+    rows = original.counts.to_dataframe().replace({"measurement_id": {"R1_10": "10"}})
+    metadata = [
+        dict(vars(value), measurement_id="10" if key == "R1_10" else key)
+        for key, value in original.measurements.items()
+    ]
+    renamed = inptk.read_counts(rows, metadata=metadata)
+    result = analyze(
+        renamed,
+        inptk.MLE(
+            temperature_eligibility_C={"10": -6}, mask_mode="drop_rows",
+            likelihood_weights={"10": 0.25},
+        ),
+    )
+    expected = analyze(
+        original,
+        inptk.MLE(
+            temperature_eligibility_C={"R1_10": -6}, mask_mode="drop_rows",
+            likelihood_weights={"R1_10": 0.25},
+        ),
+    )
+    columns = ["concentration", "lower_error", "upper_error"]
+    pd.testing.assert_frame_equal(spectrum(result)[columns], spectrum(expected)[columns])
+    assert result.settings["method_options"]["temperature_eligibility_C"] == {"10": -6}
 
 
 @pytest.mark.parametrize(
@@ -230,13 +341,13 @@ def test_mle_action_weights_match_direct_weights_and_z_sets_default_confidence()
         ("Stitch", {"overlap_points": -1}),
         ("Stitch", {"overlap_points": True}),
         ("MLE", {"mask_mode": "ignore"}),
-        ("MLE", {"temperature_eligibility_C": {10: -6}}),
+        ("MLE", {"temperature_eligibility_C": {"R1_10": -6}}),
         ("MLE", {"mask_mode": "drop_rows"}),
-        ("MLE", {"dilution_likelihood_weights": {10: 0}}),
-        ("MLE", {"dilution_likelihood_weights": {10: np.inf}}),
-        ("MLE", {"dilution_likelihood_weights": {"unknown": 0.5}}),
-        ("MLE", {"dilution_action_counts": {10: -1}, "action_weight_half_life": 1}),
-        ("MLE", {"dilution_action_counts": {10: 2}}),
+        ("MLE", {"likelihood_weights": {"R1_10": 0}}),
+        ("MLE", {"likelihood_weights": {"R1_10": np.inf}}),
+        ("MLE", {"likelihood_weights": {"unknown": 0.5}}),
+        ("MLE", {"action_counts": {"R1_10": -1}, "action_weight_half_life": 1}),
+        ("MLE", {"action_counts": {"R1_10": 2}}),
         ("MLE", {"confidence_drop": 0}),
         ("ManualStitch", {"switch_temperatures_C": [-7, -6]}),
         ("ManualStitch", {"switch_temperatures_C": [-7, -7]}),
@@ -259,7 +370,7 @@ def test_invalid_method_choice_is_rejected(method):
     "name, options",
     [
         ("stitch", {"min_unfrozen": 4, "overlap_points": 0}),
-        ("mle", {"dilution_likelihood_weights": {"10": 0.25}, "confidence_drop": 1.1}),
+        ("mle", {"likelihood_weights": {"R1_10": 0.25}, "confidence_drop": 1.1}),
         ("manual", {"switch_temperatures_C": [-7]}),
     ],
 )
@@ -338,7 +449,7 @@ def test_stepwise_calculation_matches_full_workflow(name):
     source = inptk.read_counts(source.counts.to_dataframe(), metadata=metadata)
     method = {
         "stitch": inptk.Stitch(min_unfrozen=4, overlap_points=0),
-        "mle": inptk.MLE(dilution_likelihood_weights={10: 0.25}),
+        "mle": inptk.MLE(likelihood_weights={"R1_10": 0.25}),
         "manual": inptk.ManualStitch(switch_temperatures_C=[-7]),
     }[name]
     fractions = inptk.frozen_fraction(source, step_C=1, temperature_method="latest")

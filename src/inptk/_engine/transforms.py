@@ -1109,10 +1109,10 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
     | None = None,
     enforce_monotone: bool = False,
     confidence_drop: float = PROFILE_LIKELIHOOD_DROP_95,
-    temperature_eligibility_C: Mapping[Any, float] | None = None,
+    temperature_eligibility_C: Mapping[str, float] | None = None,
     mask_mode: MleMaskMode | None = None,
-    dilution_likelihood_weights: Mapping[Any, float] | None = None,
-    dilution_action_counts: Mapping[Any, float] | None = None,
+    likelihood_weights: Mapping[str, float] | None = None,
+    action_counts: Mapping[str, float] | None = None,
     action_weight_lambda: float | None = None,
     action_weight_half_life: float | None = None,
 ) -> CumulativeNucleusSpectrumTable | dict[str, Any]:
@@ -1135,18 +1135,18 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
     temperatures. ``lower_ci`` and ``upper_ci`` remain OLAF-compatible error
     widths, not absolute limits.
 
-    ``temperature_eligibility_C`` maps dilution fold to the warmest temperature
-    that dilution is allowed to contribute. For example ``{169: -20.0}`` applies
-    the selected ``mask_mode`` to dilution 169 above ``-20 C``. ``mask_mode`` is
+    ``temperature_eligibility_C`` maps measurement IDs to the warmest retained
+    temperature. For example ``{"Sample_2": -20.0}`` applies the selected
+    ``mask_mode`` to Sample_2 above ``-20 C``. ``mask_mode`` is
     required when ``temperature_eligibility_C`` is passed. ``"drop_rows"`` keeps
     the previous behavior: warmer rows are omitted, but retained colder rows keep
     their original cumulative frozen counts. ``"rebase_counts"`` also omits the
     warmer rows, then subtracts the warm-side cumulative frozen baseline from
     retained rows and removes those wells from ``n_total``. Use ``"rebase_counts"``
     when the warm-side events are treated as contamination rather than true
-    original-sample INPs. ``dilution_likelihood_weights`` maps dilution fold to
+    original-sample INPs. ``likelihood_weights`` maps measurement IDs to
     direct likelihood weights. Alternatively,
-    ``dilution_action_counts`` can be combined with ``action_weight_lambda`` or
+    ``action_counts`` can be combined with ``action_weight_lambda`` or
     ``action_weight_half_life`` to compute exponential action-decay weights.
     """
 
@@ -1156,8 +1156,8 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
         confidence_drop=confidence_drop,
         temperature_eligibility_C=temperature_eligibility_C,
         mask_mode=mask_mode,
-        dilution_likelihood_weights=dilution_likelihood_weights,
-        dilution_action_counts=dilution_action_counts,
+        likelihood_weights=likelihood_weights,
+        action_counts=action_counts,
         action_weight_lambda=action_weight_lambda,
         action_weight_half_life=action_weight_half_life,
     )
@@ -1173,8 +1173,8 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
                 confidence_drop=confidence_drop,
                 temperature_eligibility_C=temperature_eligibility_C,
                 mask_mode=mask_mode,
-                dilution_likelihood_weights=dilution_likelihood_weights,
-                dilution_action_counts=dilution_action_counts,
+                likelihood_weights=likelihood_weights,
+                action_counts=action_counts,
                 action_weight_lambda=action_weight_lambda,
                 action_weight_half_life=action_weight_half_life,
             ),
@@ -1208,15 +1208,13 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
     ]
     source_df = _apply_mle_temperature_eligibility(
         source_df,
-        metadata_by_sample_id,
         temperature_eligibility_C,
         mask_mode,
     )
     source_df["mle_likelihood_weight"] = _mle_likelihood_weights(
         source_df,
-        metadata_by_sample_id,
-        dilution_likelihood_weights=dilution_likelihood_weights,
-        dilution_action_counts=dilution_action_counts,
+        likelihood_weights=likelihood_weights,
+        action_counts=action_counts,
         action_weight_lambda=action_weight_lambda,
         action_weight_half_life=action_weight_half_life,
     )
@@ -1633,29 +1631,29 @@ def _mle_processing_parameters(
     | None,
     enforce_monotone: bool,
     confidence_drop: float,
-    temperature_eligibility_C: Mapping[Any, float] | None,
+    temperature_eligibility_C: Mapping[str, float] | None,
     mask_mode: MleMaskMode | None,
-    dilution_likelihood_weights: Mapping[Any, float] | None,
-    dilution_action_counts: Mapping[Any, float] | None,
+    likelihood_weights: Mapping[str, float] | None,
+    action_counts: Mapping[str, float] | None,
     action_weight_lambda: float | None,
     action_weight_half_life: float | None,
 ) -> dict[str, Any]:
-    if dilution_likelihood_weights is not None and dilution_action_counts is not None:
+    if likelihood_weights is not None and action_counts is not None:
         raise ValueError(
-            "Pass either dilution_likelihood_weights or dilution_action_counts, not both"
+            "Pass either likelihood_weights or action_counts, not both"
         )
-    if dilution_action_counts is None and (
+    if action_counts is None and (
         action_weight_lambda is not None or action_weight_half_life is not None
     ):
         raise ValueError(
-            "action_weight_lambda/action_weight_half_life require dilution_action_counts"
+            "action_weight_lambda/action_weight_half_life require action_counts"
         )
     resolved_lambda = _resolve_action_weight_lambda(
         action_weight_lambda,
         action_weight_half_life,
-        require=dilution_action_counts is not None,
+        require=action_counts is not None,
     )
-    temperature_eligibility = _normalize_numeric_mapping(
+    temperature_eligibility = _normalize_measurement_mapping(
         temperature_eligibility_C,
         name="temperature_eligibility_C",
     )
@@ -1669,17 +1667,17 @@ def _mle_processing_parameters(
         "confidence_drop": confidence_drop,
         "temperature_eligibility_C": _plain_processing_value(temperature_eligibility),
         "mask_mode": resolved_mask_mode,
-        "dilution_likelihood_weights": _plain_processing_value(
-            _normalize_numeric_mapping(
-                dilution_likelihood_weights,
-                name="dilution_likelihood_weights",
+        "likelihood_weights": _plain_processing_value(
+            _normalize_measurement_mapping(
+                likelihood_weights,
+                name="likelihood_weights",
                 require_positive_values=True,
             )
         ),
-        "dilution_action_counts": _plain_processing_value(
-            _normalize_numeric_mapping(
-                dilution_action_counts,
-                name="dilution_action_counts",
+        "action_counts": _plain_processing_value(
+            _normalize_measurement_mapping(
+                action_counts,
+                name="action_counts",
                 require_nonnegative_values=True,
             )
         ),
@@ -1690,11 +1688,10 @@ def _mle_processing_parameters(
 
 def _apply_mle_temperature_eligibility(
     source_df: pd.DataFrame,
-    metadata_by_sample_id: dict[str, SampleMetadata],
-    temperature_eligibility_C: Mapping[Any, float] | None,
+    temperature_eligibility_C: Mapping[str, float] | None,
     mask_mode: MleMaskMode | None,
 ) -> pd.DataFrame:
-    eligibility = _normalize_numeric_mapping(
+    eligibility = _normalize_measurement_mapping(
         temperature_eligibility_C,
         name="temperature_eligibility_C",
     )
@@ -1708,17 +1705,7 @@ def _apply_mle_temperature_eligibility(
     frames: list[pd.DataFrame] = []
     for sample_id, sample_df in source_df.groupby("source_sample_id", sort=False):
         source_sample_id = str(sample_id)
-        dilution = _metadata_dilution(
-            metadata_by_sample_id[source_sample_id],
-            source_sample_id,
-            context="temperature_eligibility_C",
-        )
-        warmest_allowed = _mapped_dilution_value(
-            eligibility,
-            dilution,
-            default=None,
-            name="temperature_eligibility_C",
-        )
+        warmest_allowed = eligibility.get(source_sample_id)
         if warmest_allowed is None:
             frames.append(sample_df.copy())
             continue
@@ -1747,7 +1734,7 @@ def _apply_mle_temperature_eligibility(
 def _resolve_mle_mask_mode(
     mask_mode: MleMaskMode | None,
     *,
-    temperature_eligibility_C: Mapping[Any, float] | None,
+    temperature_eligibility_C: Mapping[str, float] | None,
 ) -> MleMaskMode | None:
     if temperature_eligibility_C is None:
         if mask_mode is not None:
@@ -1845,73 +1832,42 @@ def _rebase_mle_masked_counts(
 
 def _mle_likelihood_weights(
     source_df: pd.DataFrame,
-    metadata_by_sample_id: dict[str, SampleMetadata],
     *,
-    dilution_likelihood_weights: Mapping[Any, float] | None,
-    dilution_action_counts: Mapping[Any, float] | None,
+    likelihood_weights: Mapping[str, float] | None,
+    action_counts: Mapping[str, float] | None,
     action_weight_lambda: float | None,
     action_weight_half_life: float | None,
 ) -> np.ndarray:
     if source_df.empty:
         return np.array([], dtype=float)
-    if dilution_likelihood_weights is not None and dilution_action_counts is not None:
-        raise ValueError(
-            "Pass either dilution_likelihood_weights or dilution_action_counts, not both"
-        )
+    if likelihood_weights is not None and action_counts is not None:
+        raise ValueError("Pass either likelihood_weights or action_counts, not both")
 
-    direct_weights = _normalize_numeric_mapping(
-        dilution_likelihood_weights,
-        name="dilution_likelihood_weights",
+    direct_weights = _normalize_measurement_mapping(
+        likelihood_weights,
+        name="likelihood_weights",
         require_positive_values=True,
     )
-    action_counts = _normalize_numeric_mapping(
-        dilution_action_counts,
-        name="dilution_action_counts",
+    actions = _normalize_measurement_mapping(
+        action_counts,
+        name="action_counts",
         require_nonnegative_values=True,
     )
     action_lambda = _resolve_action_weight_lambda(
         action_weight_lambda,
         action_weight_half_life,
-        require=action_counts is not None,
+        require=actions is not None,
     )
 
     weights: list[float] = []
-    for sample_id in source_df["source_sample_id"].astype(str):
-        dilution = _metadata_dilution(
-            metadata_by_sample_id[sample_id],
-            sample_id,
-            context="likelihood weighting",
-        )
+    for measurement_id in source_df["source_sample_id"].astype(str):
         if direct_weights is not None:
-            weights.append(
-                float(
-                    cast(
-                        float,
-                        _mapped_dilution_value(
-                            direct_weights,
-                            dilution,
-                            default=1.0,
-                            name="dilution_likelihood_weights",
-                        ),
-                    )
-                )
-            )
-            continue
-        if action_counts is not None:
-            action_count = float(
-                cast(
-                    float,
-                    _mapped_dilution_value(
-                        action_counts,
-                        dilution,
-                        default=0.0,
-                        name="dilution_action_counts",
-                    ),
-                )
-            )
+            weights.append(direct_weights.get(measurement_id, 1.0))
+        elif actions is not None:
+            action_count = actions.get(measurement_id, 0.0)
             weights.append(float(np.exp(-float(cast(float, action_lambda)) * action_count)))
-            continue
-        weights.append(1.0)
+        else:
+            weights.append(1.0)
     return np.array(weights, dtype=float)
 
 
@@ -1933,60 +1889,39 @@ def _resolve_action_weight_lambda(
         return float(action_weight_lambda)
     if require:
         raise ValueError(
-            "dilution_action_counts requires action_weight_lambda or action_weight_half_life"
+            "action_counts requires action_weight_lambda or action_weight_half_life"
         )
     return None
 
 
-def _metadata_dilution(metadata: SampleMetadata, sample_id: str, *, context: str) -> float:
-    if metadata.dilution is None:
-        raise ValueError(f"Sample {sample_id!r} is missing dilution for {context}")
-    dilution = float(metadata.dilution)
-    if not np.isfinite(dilution) or dilution <= 0:
-        raise ValueError(f"Sample {sample_id!r} has invalid dilution for {context}")
-    return dilution
-
-
-def _normalize_numeric_mapping(
-    values: Mapping[Any, float] | None,
+def _normalize_measurement_mapping(
+    values: Mapping[str, float] | None,
     *,
     name: str,
     require_positive_values: bool = False,
     require_nonnegative_values: bool = False,
-) -> dict[float, float] | None:
+) -> dict[str, float] | None:
     if values is None:
         return None
-    normalized: dict[float, float] = {}
-    for key, value in values.items():
-        key_float = float(key)
-        value_float = float(value)
-        if not np.isfinite(key_float):
-            raise ValueError(f"{name} contains a non-finite dilution key")
-        if not np.isfinite(value_float):
-            raise ValueError(f"{name} contains a non-finite value for dilution {key!r}")
-        if require_positive_values and value_float <= 0:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must map measurement names to numbers")
+    normalized: dict[str, float] = {}
+    for measurement_id, value in values.items():
+        if not isinstance(measurement_id, str):
+            raise TypeError(f"{name} keys must be measurement names (strings)")
+        if not measurement_id.strip():
+            raise ValueError(f"{name} measurement names must not be empty")
+        if isinstance(value, bool):
+            raise TypeError(f"{name} values must be finite numbers")
+        number = float(value)
+        if not np.isfinite(number):
+            raise ValueError(f"{name} contains a non-finite value for {measurement_id!r}")
+        if require_positive_values and number <= 0:
             raise ValueError(f"{name} values must be positive")
-        if require_nonnegative_values and value_float < 0:
+        if require_nonnegative_values and number < 0:
             raise ValueError(f"{name} values cannot be negative")
-        if key_float in normalized:
-            raise ValueError(f"{name} contains duplicate dilution key {key_float:g}")
-        normalized[key_float] = value_float
+        normalized[measurement_id] = number
     return normalized
-
-
-def _mapped_dilution_value(
-    values: dict[float, float],
-    dilution: float,
-    *,
-    default: float | None,
-    name: str,
-) -> float | None:
-    if dilution in values:
-        return values[dilution]
-    for key, value in values.items():
-        if np.isclose(key, dilution, rtol=0.0, atol=1e-12):
-            return value
-    return default
 
 
 def _normalize_metadata_mapping(metadata: MetadataLike) -> dict[str, SampleMetadata]:

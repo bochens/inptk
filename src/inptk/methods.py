@@ -23,28 +23,22 @@ def _finite(value, name: str) -> float:
     return number
 
 
-def _dilution_key(key, name: str) -> float:
-    dilution = _finite(key, f"{name} dilution")
-    if dilution <= 0:
-        raise ValueError(f"{name} dilution keys must be positive")
-    return dilution
-
-
-def _number_mapping(values, name: str, *, minimum=None, strict=False):
+def _measurement_values(values, name: str, *, minimum=None, strict=False):
     if values is None:
         return None
     if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must map dilution factors to numbers")
+        raise TypeError(f"{name} must map measurement names to numbers")
     result = {}
-    for key, value in values.items():
-        dilution = _dilution_key(key, name)
-        if dilution in result:
-            raise ValueError(f"{name} repeats dilution {dilution:g}")
+    for measurement_id, value in values.items():
+        if not isinstance(measurement_id, str):
+            raise TypeError(f"{name} keys must be measurement names (strings)")
+        if not measurement_id.strip():
+            raise ValueError(f"{name} measurement names must not be empty")
         number = _finite(value, name)
         if minimum is not None and (number < minimum or (strict and number == minimum)):
             relation = "greater than" if strict else "at least"
             raise ValueError(f"{name} values must be {relation} {minimum}")
-        result[dilution] = number
+        result[measurement_id] = number
     return MappingProxyType(result)
 
 
@@ -96,16 +90,18 @@ class ManualStitch:
 class MLE:
     """Maximum likelihood estimation: jointly fit counts from different dilutions.
 
-    All mappings use dilution factors as keys and apply across samples/runs/cycles.
+    All mappings use exact measurement_id names, such as Icescopy Sample_2.
+    Each name identifies a physical droplet set across its repeated cycles.
+    Dilution factors remain measurement metadata, not setting keys.
     Temperature limits require an explicit mask_mode: drop_rows omits warmer
     rows; rebase_counts also removes the warm frozen baseline and those droplets.
     confidence_drop=None uses the workflow's z**2/2, preserving the default.
     """
 
-    temperature_eligibility_C: Mapping[float, float] | None = None
+    temperature_eligibility_C: Mapping[str, float] | None = None
     mask_mode: Literal["drop_rows", "rebase_counts"] | None = None
-    dilution_likelihood_weights: Mapping[float, float] | None = None
-    dilution_action_counts: Mapping[float, float] | None = None
+    likelihood_weights: Mapping[str, float] | None = None
+    action_counts: Mapping[str, float] | None = None
     action_weight_lambda: float | None = None
     action_weight_half_life: float | None = None
     confidence_drop: float | None = None
@@ -113,21 +109,21 @@ class MLE:
     def __post_init__(self):
         for name, minimum, strict in (
             ("temperature_eligibility_C", None, False),
-            ("dilution_likelihood_weights", 0, True),
-            ("dilution_action_counts", 0, False),
+            ("likelihood_weights", 0, True),
+            ("action_counts", 0, False),
         ):
             object.__setattr__(
                 self,
                 name,
-                _number_mapping(getattr(self, name), name, minimum=minimum, strict=strict),
+                _measurement_values(getattr(self, name), name, minimum=minimum, strict=strict),
             )
         if self.temperature_eligibility_C is None:
             if self.mask_mode is not None:
                 raise ValueError("mask_mode requires temperature_eligibility_C")
         elif self.mask_mode not in ("drop_rows", "rebase_counts"):
             raise ValueError("Temperature limits require mask_mode='drop_rows' or 'rebase_counts'")
-        if self.dilution_likelihood_weights is not None and self.dilution_action_counts is not None:
-            raise ValueError("Use dilution_likelihood_weights or dilution_action_counts, not both")
+        if self.likelihood_weights is not None and self.action_counts is not None:
+            raise ValueError("Use likelihood_weights or action_counts, not both")
         if self.action_weight_lambda is not None and self.action_weight_half_life is not None:
             raise ValueError("Use action_weight_lambda or action_weight_half_life, not both")
         for name in ("action_weight_lambda", "action_weight_half_life", "confidence_drop"):
@@ -140,10 +136,10 @@ class MLE:
         has_decay = (
             self.action_weight_lambda is not None or self.action_weight_half_life is not None
         )
-        if self.dilution_action_counts is not None and not has_decay:
-            raise ValueError("dilution_action_counts requires a decay rate or half-life")
-        if has_decay and self.dilution_action_counts is None:
-            raise ValueError("Action weighting settings require dilution_action_counts")
+        if self.action_counts is not None and not has_decay:
+            raise ValueError("action_counts requires a decay rate or half-life")
+        if has_decay and self.action_counts is None:
+            raise ValueError("Action weighting settings require action_counts")
 
 
 DilutionMethod = Stitch | ManualStitch | MLE
