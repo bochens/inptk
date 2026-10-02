@@ -104,7 +104,9 @@ def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
         }
     else:
         raise TypeError("save expects an Experiment or AnalysisResult")
-    payload.update(format="inptk", format_version=FORMAT_VERSION)
+    from . import __version__
+
+    payload.update(format="inptk", format_version=FORMAT_VERSION, toolkit_version=__version__)
     text = json.dumps(_encode(payload), indent=2, allow_nan=False)
     target = Path(path)
     target.mkdir(parents=True, exist_ok=False)

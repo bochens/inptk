@@ -496,13 +496,14 @@ def _subtract_filter_blank_cumulative_table(
         dtype=float
     )
     if _has_complete_confidence_columns(sample_df):
+        # Independent-error approximation: a larger blank lowers the result.
         corrected["lower_ci"] = propagate_uncertainty_rss(
             sample_df["lower_ci"].to_numpy(dtype=float),
-            matched_blank["lower_ci"].to_numpy(dtype=float),
+            matched_blank["upper_ci"].to_numpy(dtype=float),
         )
         corrected["upper_ci"] = propagate_uncertainty_rss(
             sample_df["upper_ci"].to_numpy(dtype=float),
-            matched_blank["upper_ci"].to_numpy(dtype=float),
+            matched_blank["lower_ci"].to_numpy(dtype=float),
         )
 
     if "is_extrapolated" in sample_df or "is_extrapolated" in matched_blank:
@@ -586,13 +587,14 @@ def _subtract_filter_blank_table(
         dtype=float
     )
     if _has_complete_confidence_columns(sample_df):
+        # Independent-error approximation: a larger blank lowers the result.
         corrected["lower_ci"] = propagate_uncertainty_rss(
             sample_df["lower_ci"].to_numpy(dtype=float),
-            matched_blank["lower_ci"].to_numpy(dtype=float),
+            matched_blank["upper_ci"].to_numpy(dtype=float),
         )
         corrected["upper_ci"] = propagate_uncertainty_rss(
             sample_df["upper_ci"].to_numpy(dtype=float),
-            matched_blank["upper_ci"].to_numpy(dtype=float),
+            matched_blank["lower_ci"].to_numpy(dtype=float),
         )
 
     if "is_extrapolated" in sample_df or "is_extrapolated" in matched_blank:

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import fields
+from collections.abc import Mapping
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 
 import pandas as pd
@@ -114,6 +115,66 @@ def read_counts(source, *, metadata, run_id: str = "1") -> Experiment:
     )
 
 
+def _icescopy_overrides(metadata, measurement_ids: set[str]) -> dict[str, dict]:
+    """Keep only explicitly supplied fields when overriding export metadata."""
+    from ._engine.adapters import SAMPLE_METADATA_FIELDS, _is_missing_metadata_value
+    from ._engine.models import SampleMetadata as ExportMetadata
+
+    if metadata is None:
+        return {}
+    if isinstance(metadata, ExportMetadata):
+        metadata = asdict(metadata)
+        if not metadata["sample_id"]:
+            metadata.pop("sample_id")
+    if isinstance(metadata, (str, Path)):
+        metadata = _frame(metadata)
+    if isinstance(metadata, pd.DataFrame):
+        if "sample_id" not in metadata and len(measurement_ids) == 1:
+            metadata = metadata.assign(sample_id=next(iter(measurement_ids)))
+        records = metadata.to_dict("records")
+    elif isinstance(metadata, (list, tuple)):
+        records = list(metadata)
+    elif isinstance(metadata, Mapping):
+        if any(key in SAMPLE_METADATA_FIELDS for key in metadata):
+            if not _is_missing_metadata_value(metadata.get("sample_id")):
+                records = [dict(metadata)]
+            else:
+                records = [dict(metadata, sample_id=name) for name in measurement_ids]
+        else:
+            records = []
+            for name, values in metadata.items():
+                if isinstance(values, ExportMetadata):
+                    values = asdict(values)
+                if not isinstance(values, Mapping):
+                    raise TypeError("Icescopy metadata must map measurement names to metadata")
+                if values.get("sample_id") not in (None, "", name):
+                    raise ValueError(f"Metadata sample_id disagrees with measurement {name!r}")
+                records.append(dict(values, sample_id=name))
+    else:
+        raise TypeError("Icescopy metadata must contain metadata records or a mapping")
+
+    overrides = {}
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise TypeError("Icescopy metadata records must be mappings")
+        name = record.get("sample_id")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Icescopy metadata sample_id must be a non-empty measurement name")
+        if name not in measurement_ids:
+            raise ValueError(f"Unknown measurement in Icescopy metadata: {name!r}")
+        if name in overrides:
+            raise ValueError(f"Duplicate metadata row for sample_id {name!r}")
+        overrides[name] = {
+            key: value
+            for key, value in record.items()
+            if key in SAMPLE_METADATA_FIELDS
+            and key != "sample_id"
+            and not _is_missing_metadata_value(value)
+            and not (isinstance(value, str) and not value.strip())
+        }
+    return overrides
+
+
 def read_icescopy(
     source, *, sample_map: dict[str, str] | None = None, metadata=None, run_id: str = "1"
 ) -> Experiment:
@@ -121,19 +182,43 @@ def read_icescopy(
 
     Without sample_map, every Icescopy measurement is a separate sample. Names
     are never shortened or interpreted as dilution groups automatically.
+    Supplied metadata fields override header metadata for the exact measurement
+    name; omitted or missing fields retain their values from the export.
     """
     from ._engine.adapters import read_counts as read_export
+    from ._engine.adapters import read_metadata, read_sync, split_metadata_rows
+    from ._engine.models import SampleMetadata as ExportMetadata
 
-    source_columns = (
-        source.columns
-        if isinstance(source, pd.DataFrame)
-        else pd.read_csv(source, comment="#", nrows=0).columns
-    )
-    has_time = "time_s" in source_columns or "timestamp" in source_columns
-    grouped = read_export(source, format="icescopy", metadata=metadata)
+    if sample_map is not None and (
+        not isinstance(sample_map, Mapping)
+        or any(
+            not isinstance(value, str) or not value.strip()
+            for pair in sample_map.items()
+            for value in pair
+        )
+    ):
+        raise TypeError("sample_map must map non-empty measurement names to sample names")
+    header_metadata: dict[str, ExportMetadata]
+    if isinstance(source, pd.DataFrame):
+        data, header_metadata = source.copy(deep=True), {}
+    else:
+        data, _ = read_sync(source)
+        _, header_metadata = read_metadata(source)
+    data, _ = split_metadata_rows(data)
+    if "cycle" in data:
+        missing_cycle = data.cycle.isna() | data.cycle.astype(str).str.strip().eq("")
+        if missing_cycle.any() and not missing_cycle.all():
+            raise ValueError("Some Icescopy cycle labels are missing")
+        if missing_cycle.all():
+            data = data.drop(columns="cycle")
+    has_time = "time_s" in data or "timestamp" in data
+    grouped = read_export(data, format="icescopy", metadata=header_metadata)
+    known = {
+        str(name) for tables in grouped.values() for table in tables for name in table.sample_id
+    }
+    overrides = _icescopy_overrides(metadata, known)
     frames = []
     records = {}
-    known = set()
     for tables in grouped.values():
         for table in tables:
             frame = table.to_dataframe()
@@ -146,6 +231,7 @@ def read_icescopy(
                 original = table.metadata_for_sample(measurement_id)
                 if original is None:
                     raise ValueError(f"Missing Icescopy metadata for {measurement_id!r}")
+                original = replace(original, **overrides.get(measurement_id, {}))
                 original.validate_for_count_to_suspension()
                 records[measurement_id] = {
                     "measurement_id": measurement_id,

@@ -243,8 +243,8 @@ def counts_to_temperature_frozen_fraction(
     counts: CountsTable | TableSequence | TableMapping,
     *,
     step_C: float = 0.5,
-    method: TemperatureReductionMethod = "max",
-    temperature_tolerance_C: float = 0.05,
+    method: TemperatureReductionMethod = "latest",
+    temperature_tolerance_C: float | None = None,
     cooling_only: bool = True,
     **unexpected_kwargs: Any,
 ) -> TemperatureFrozenFractionTable | list[Any] | dict[str, Any]:
@@ -255,6 +255,8 @@ def counts_to_temperature_frozen_fraction(
     ``-7.5 C``, with ``temperature_tolerance_C`` slack for probe jitter.
     ``method="max"`` uses the highest frozen fraction observed up to each
     threshold while preserving paired n_total/n_frozen counts.
+    The default is ``method="latest"`` with zero temperature tolerance.
+    Explicit ``max`` and ``window_max_count`` default to 0.05 and 0.01 C.
     ``method="latest"`` uses the last qualifying observation in time order
     (coldest qualifying observation when time is absent) and allows decreases.
     ``method="window_max_count"`` chooses the highest frozen count strictly
@@ -275,6 +277,11 @@ def counts_to_temperature_frozen_fraction(
         names = ", ".join(sorted(unexpected_kwargs))
         raise TypeError(
             f"Unexpected keyword argument(s): {names}. Cycles are always preserved by read_counts."
+        )
+
+    if temperature_tolerance_C is None:
+        temperature_tolerance_C = {"latest": 0.0, "max": 0.05, "window_max_count": 0.01}.get(
+            method, 0.0
         )
 
     return _map_table_shape(
@@ -447,11 +454,8 @@ def _counts_dataframe_to_temperature_frozen_fraction(
         )
         for sample_id, sample_df in df.groupby("sample_id", sort=False)
     ]
-    result = (
-        pd.concat([frame for frame in reduced_frames if not frame.empty], ignore_index=True)
-        if reduced_frames
-        else pd.DataFrame()
-    )
+    nonempty_frames = [frame for frame in reduced_frames if not frame.empty]
+    result = pd.concat(nonempty_frames, ignore_index=True) if nonempty_frames else pd.DataFrame()
     if result.empty:
         return _empty_temperature_frozen_fraction(
             step_C=step_C,
@@ -763,13 +767,15 @@ def temperature_frozen_fraction_to_differential_spectrum(
     table: TemperatureFrozenFractionTable | TableSequence | TableMapping,
     metadata_by_sample_id: dict[str, SampleMetadata] | None = None,
 ) -> DifferentialNucleusSpectrumTable | list[Any] | dict[str, Any]:
-    """Convert a threshold frozen-fraction table to Vali differential k(T).
+    """Calculate changes in cumulative concentration over adjacent temperatures.
 
-    Input rows are interpreted as cold threshold states. Each value is calculated
-    from the newly frozen wells in that finite interval. Following Vali's
-    notation, output ``temperature_C`` is the warm side of the interval, while
-    ``temperature_bin_left_C`` and ``temperature_bin_right_C`` retain the cold
-    and warm interval limits.
+    Output temperature labels are the warm side of each interval; explicit cold
+    and warm edges retain its actual width. No interval is invented before the
+    first input state. Corrected counts may have changing totals or decreasing
+    fractions: negative differences remain visible and carry QC bit 2, while
+    nonfinite results carry QC bit 1. Irregular temperature spacing is supported.
+    This computes changes in the supplied corrected concentration; it does not
+    establish that arbitrary droplet loss is a valid background correction.
     """
 
     if isinstance(table, (dict, list, tuple)):
@@ -782,9 +788,6 @@ def temperature_frozen_fraction_to_differential_spectrum(
         )
 
     metadata_by_sample_id = resolve_metadata_by_sample_id(table, metadata_by_sample_id)
-    if table.temperature_bin_width_C is None:
-        raise ValueError("temperature_bin_width_C is required for k(T)")
-
     frames: list[pd.DataFrame] = []
     for sample_id, sample_df in table.to_dataframe().groupby("sample_id", sort=False):
         sample_key = str(sample_id)
@@ -793,32 +796,33 @@ def temperature_frozen_fraction_to_differential_spectrum(
         metadata = metadata_by_sample_id[sample_key]
         metadata.validate_for_count_to_suspension()
         sample_df = sample_df.sort_values("temperature_C", ascending=False).copy()
+        temperatures = sample_df["temperature_C"].to_numpy(dtype=float)
+        widths = -np.diff(temperatures)
         k_value = differential_inp_per_ml_per_c_from_counts(
             sample_df["n_frozen"].to_numpy(dtype=float, copy=True),
             sample_df["n_total"].to_numpy(dtype=float, copy=True),
             metadata.well_volume_uL or 0.0,
-            table.temperature_bin_width_C,
+            widths,
             metadata.dilution or 0.0,
         )
-        out = pd.DataFrame(
-            {
-                "sample_id": sample_df["sample_id"].to_numpy(dtype=object, copy=True),
-                "temperature_C": _differential_temperature_label(sample_df),
-                "value": k_value,
-                "value_unit": "INP_per_mL_suspension_per_C",
-                "basis": "suspension",
-                "qc_flag": np.where(np.isfinite(k_value), 0, 1),
-            }
-        )
-        copy_temperature_metadata(sample_df, out)
-        frames.append(out)
+        frames.append(pd.DataFrame({
+            "sample_id": sample_df["sample_id"].to_numpy(dtype=object, copy=True)[1:],
+            "temperature_C": temperatures[:-1],
+            "temperature_bin_left_C": temperatures[1:],
+            "temperature_bin_right_C": temperatures[:-1],
+            "value": k_value,
+            "value_unit": "INP_per_mL_suspension_per_C",
+            "basis": "suspension",
+            "qc_flag": np.where(np.isfinite(k_value), 0, 1) | np.where(k_value < 0, 2, 0),
+        }))
 
     result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if result.empty:
         return DifferentialNucleusSpectrumTable(
             sample_id=np.array([], dtype=object),
             temperature_C=np.array([], dtype=float),
-            temperature_bin_width_C=table.temperature_bin_width_C,
+            temperature_bin_left_C=np.array([], dtype=float),
+            temperature_bin_right_C=np.array([], dtype=float),
             temperature_bin_method=table.temperature_bin_method,
             value=np.array([], dtype=float),
             value_unit="INP_per_mL_suspension_per_C",
@@ -830,13 +834,15 @@ def temperature_frozen_fraction_to_differential_spectrum(
                 source_sample_ids=tuple(metadata_by_sample_id),
             ),
         )
+    widths = (result["temperature_bin_right_C"] - result["temperature_bin_left_C"]).to_numpy()
+    common_width = float(widths[0]) if np.allclose(widths, widths[0], rtol=0, atol=1e-9) else None
     return DifferentialNucleusSpectrumTable(
         sample_id=result["sample_id"].to_numpy(dtype=object, copy=True),
         temperature_C=result["temperature_C"].to_numpy(dtype=float, copy=True),
-        temperature_bin_width_C=_scalar_or_none(result, "temperature_bin_width_C"),
-        temperature_bin_method=_scalar_string_or_empty(result, "temperature_bin_method"),
-        temperature_bin_left_C=_array_or_none(result, "temperature_bin_left_C"),
-        temperature_bin_right_C=_array_or_none(result, "temperature_bin_right_C"),
+        temperature_bin_width_C=common_width,
+        temperature_bin_method=table.temperature_bin_method,
+        temperature_bin_left_C=result["temperature_bin_left_C"].to_numpy(dtype=float),
+        temperature_bin_right_C=result["temperature_bin_right_C"].to_numpy(dtype=float),
         value=result["value"].to_numpy(dtype=float, copy=True),
         value_unit="INP_per_mL_suspension_per_C",
         basis="suspension",
@@ -848,14 +854,6 @@ def temperature_frozen_fraction_to_differential_spectrum(
             source_sample_ids=_table_sample_ids_from_dataframe(result),
         ),
     )
-
-
-def _differential_temperature_label(sample_df: pd.DataFrame) -> np.ndarray:
-    """Return Vali-style warm-side temperature labels for finite intervals."""
-
-    if "temperature_bin_right_C" in sample_df:
-        return sample_df["temperature_bin_right_C"].to_numpy(dtype=float, copy=True)
-    return sample_df["temperature_C"].to_numpy(dtype=float, copy=True)
 
 
 def temperature_frozen_fraction_to_cumulative_spectrum(
@@ -1134,10 +1132,10 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
     or one of the metadata fields listed in the type annotation, when explicit
     grouping is needed.
 
-    When ``enforce_monotone`` is true, a monotone constrained MLE is fit by
-    pooling adjacent temperature blocks until K(T) is nondecreasing toward colder
-    temperatures. ``lower_ci`` and ``upper_ci`` remain OLAF-compatible error
-    widths, not absolute limits.
+    Each temperature is fitted separately. ``enforce_monotone=True`` is rejected
+    because pooling cumulative counts across temperatures would treat repeated
+    states of the same droplets as independent observations. ``lower_ci`` and
+    ``upper_ci`` are profile-likelihood error widths, not absolute limits.
 
     ``temperature_eligibility_C`` maps measurement IDs to the warmest retained
     temperature. For example ``{"Sample_2": -20.0}`` applies the selected
@@ -1153,6 +1151,12 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
     ``action_counts`` can be combined with ``action_weight_lambda`` or
     ``action_weight_half_life`` to compute exponential action-decay weights.
     """
+
+    if enforce_monotone:
+        raise ValueError(
+            "MLE requires enforce_monotone=False: cumulative counts at adjacent "
+            "temperatures describe the same droplets, not independent observations"
+        )
 
     mle_parameters = _mle_processing_parameters(
         sample_group_by=sample_group_by,
@@ -1233,20 +1237,12 @@ def temperature_frozen_fraction_to_binomial_mle_cumulative_spectrum(
             str(group_id),
             _combined_source_metadata(str(group_id), metadata_sample_ids, metadata_rows, "mle"),
         )
-        if enforce_monotone:
-            group_result = _constrained_mle_cumulative_group(
-                mle_group_df,
-                str(group_id),
-                metadata_by_sample_id,
-                confidence_drop=confidence_drop,
-            )
-        else:
-            group_result = _independent_mle_cumulative_group(
-                mle_group_df,
-                str(group_id),
-                metadata_by_sample_id,
-                confidence_drop=confidence_drop,
-            )
+        group_result = _independent_mle_cumulative_group(
+            mle_group_df,
+            str(group_id),
+            metadata_by_sample_id,
+            confidence_drop=confidence_drop,
+        )
         if not group_result.empty:
             frames.append(group_result)
 
@@ -1494,79 +1490,6 @@ def _independent_mle_cumulative_group(
             )
         )
     return pd.DataFrame.from_records(rows)
-
-
-def _constrained_mle_cumulative_group(
-    group_df: pd.DataFrame,
-    group_id: str,
-    metadata_by_sample_id: dict[str, SampleMetadata],
-    *,
-    confidence_drop: float,
-) -> pd.DataFrame:
-    blocks: list[dict[str, Any]] = []
-    group_df = group_df.sort_values("temperature_C", ascending=False)
-    for _, temperature_df in group_df.groupby("temperature_C", sort=False):
-        blocks.append(
-            _mle_block(
-                [temperature_df],
-                group_id,
-                metadata_by_sample_id,
-                confidence_drop=confidence_drop,
-            )
-        )
-        while len(blocks) >= 2 and blocks[-2]["value"] > blocks[-1]["value"]:
-            merged_frames = blocks[-2]["frames"] + blocks[-1]["frames"]
-            blocks[-2:] = [
-                _mle_block(
-                    merged_frames,
-                    group_id,
-                    metadata_by_sample_id,
-                    confidence_drop=confidence_drop,
-                )
-            ]
-
-    rows: list[dict[str, Any]] = []
-    for block in blocks:
-        qc_flag = (0 if block["finite"] else 1) | (2 if len(block["frames"]) > 1 else 0)
-        for temperature_df in block["frames"]:
-            temperature_C = float(temperature_df["temperature_C"].iloc[0])
-            rows.append(
-                _mle_result_row(
-                    group_id,
-                    temperature_C,
-                    block["value"],
-                    block["lower_error"],
-                    block["upper_error"],
-                    block["dilution_fold"],
-                    qc_flag,
-                    temperature_df.iloc[0],
-                )
-            )
-    return pd.DataFrame.from_records(rows)
-
-
-def _mle_block(
-    temperature_frames: list[pd.DataFrame],
-    group_id: str,
-    metadata_by_sample_id: dict[str, SampleMetadata],
-    *,
-    confidence_drop: float,
-) -> dict[str, Any]:
-    block_df = pd.concat(temperature_frames, ignore_index=True)
-    value, lower_error, upper_error, finite, dilution_fold = _mle_fit_for_rows(
-        block_df,
-        group_id,
-        metadata_by_sample_id,
-        confidence_drop=confidence_drop,
-    )
-    return {
-        "frames": temperature_frames,
-        "value": value,
-        "lower_error": lower_error,
-        "upper_error": upper_error,
-        "finite": finite,
-        "dilution_fold": dilution_fold,
-    }
 
 
 def _mle_fit_for_rows(

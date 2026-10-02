@@ -159,8 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     counts.add_argument("--step-C", type=float, default=0.5)
-    counts.add_argument("--method", choices=("max", "latest"), default="max")
-    counts.add_argument("--temperature-tolerance-C", type=float, default=0.05)
+    counts.add_argument("--method", choices=("max", "latest", "window_max_count"), default="latest")
+    counts.add_argument("--temperature-tolerance-C", type=float)
 
     frozen = parser.add_argument_group("frozen_at_temp input options")
     frozen.add_argument(

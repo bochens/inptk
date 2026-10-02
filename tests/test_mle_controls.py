@@ -200,3 +200,32 @@ def test_mle_action_counts_require_decay_parameter() -> None:
 
     with pytest.raises(ValueError, match="requires action_weight"):
         ufolaf.cumulative_spec_mle([low], action_counts={"low": 0})
+
+
+@pytest.mark.parametrize("repeat", [1, 10])
+def test_mle_rejects_pooling_repeated_temperature_states(repeat):
+    table = _fraction_table_rows(
+        "same-droplets",
+        sample_name="S",
+        dilution=1,
+        temperature_C=[-5 - i / repeat for i in range(2 * repeat)],
+        n_frozen=[16] * repeat + [8] * repeat,
+    )
+    with pytest.raises(ValueError, match="same droplets, not independent observations"):
+        ufolaf.cumulative_spec_mle(table, enforce_monotone=True)
+
+
+def test_pointwise_mle_precision_does_not_improve_from_extra_temperature_rows():
+    coarse = _fraction_table_rows(
+        "same-droplets", sample_name="S", dilution=1,
+        temperature_C=[-5, -6], n_frozen=[16, 8],
+    )
+    dense = _fraction_table_rows(
+        "same-droplets", sample_name="S", dilution=1,
+        temperature_C=[-5, -5.1, -6, -6.1], n_frozen=[16, 16, 8, 8],
+    )
+    coarse_result = ufolaf.cumulative_spec_mle(coarse).to_dataframe()
+    dense_result = ufolaf.cumulative_spec_mle(dense).to_dataframe()
+    common = dense_result[dense_result.temperature_C.isin([-5, -6])]
+    for column in ("value", "lower_ci", "upper_ci"):
+        np.testing.assert_allclose(coarse_result[column], common[column])

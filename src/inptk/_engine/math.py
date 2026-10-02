@@ -519,41 +519,32 @@ def differential_inp_per_ml_per_c_from_counts(
     n_frozen: Any,
     n_total: Any,
     well_volume_uL: float,
-    temperature_bin_width_C: float,
+    temperature_bin_width_C: Any,
     dilution: Any = 1.0,
 ) -> np.ndarray:
-    """Return Vali differential nucleus spectrum k(T), expressed as INP/mL/C.
+    """Return concentration change per degree between adjacent count states.
 
-    ``temperature_bin_width_C`` is Vali's finite temperature interval ``Delta T``.
-    For threshold rows, ``delta_frozen`` is the number of wells newly frozen in
-    the interval ending at that threshold, and ``unfrozen_before_bin`` is N(T) at
-    the warm side of the interval.
+    Counts must be ordered warm to cold. The width is a positive scalar or one
+    width per adjacent interval. N states produce N-1 intervals; no unobserved
+    zero-frozen warm baseline is assumed. With fixed totals this is algebraically
+    identical to the Vali count formula. Changing corrected totals are supported
+    by using each state's own frozen fraction. Negative differences are retained.
+    This arithmetic does not establish a scientific correction for droplet loss.
     """
 
-    frozen = as_float_array(n_frozen, name="n_frozen")
-    total = as_float_array(n_total, name="n_total")
-    dilution_array = as_float_array(dilution, name="dilution")
-    frozen, total, dilution_array = np.broadcast_arrays(frozen, total, dilution_array)
-    validate_counts(frozen, total)
-    if temperature_bin_width_C <= 0:
-        raise ValueError("temperature_bin_width_C must be positive")
-    previous_frozen = np.r_[0.0, frozen[:-1]]
-    delta_frozen = frozen - previous_frozen
-    unfrozen_before_bin = total - previous_frozen
-    valid_interval = (
-        (unfrozen_before_bin > 0) & (delta_frozen >= 0) & (delta_frozen <= unfrozen_before_bin)
+    concentration = cumulative_inp_per_ml_from_counts(
+        n_frozen, n_total, well_volume_uL, dilution
     )
-    with np.errstate(divide="ignore", invalid="ignore"):
-        fraction_freezing_in_bin = delta_frozen / unfrozen_before_bin
-    fraction_freezing_in_bin = np.where(valid_interval, fraction_freezing_in_bin, np.nan)
-    return (
-        cumulative_inp_per_ml_from_fraction(
-            fraction_freezing_in_bin,
-            well_volume_uL,
-            dilution_array,
-        )
-        / temperature_bin_width_C
-    )
+    if concentration.ndim != 1:
+        raise ValueError("Differential spectra require a one-dimensional sequence of counts")
+    width = as_float_array(temperature_bin_width_C, name="temperature_bin_width_C")
+    if np.any(~np.isfinite(width)) or np.any(width <= 0):
+        raise ValueError("Temperature interval widths must be finite and positive")
+    intervals = max(0, len(concentration) - 1)
+    if width.ndim > 1 or (width.ndim == 1 and len(width) != intervals):
+        raise ValueError("Supply one temperature interval width per adjacent pair of count states")
+    with np.errstate(invalid="ignore"):
+        return np.diff(concentration) / width
 
 
 def ci_limits_to_errors(

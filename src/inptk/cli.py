@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 from . import __version__, analyze_concentration, load, read_counts, read_icescopy
+from .experiment import Experiment
 from .methods import resolve_method
+from .tables import CountsTable
 
 
 def build_parser():
@@ -24,6 +26,14 @@ def build_parser():
         "--sample-map", help="JSON file mapping Icescopy measurement names to parent samples"
     )
     analyze.add_argument("--run-id", default="1")
+    analyze.add_argument(
+        "--sample",
+        action="append",
+        help="Exact parent sample ID to analyze; repeat to select several",
+    )
+    analyze.add_argument(
+        "--cycle", action="append", help="Exact cycle ID to analyze; repeat to select several"
+    )
     analyze.add_argument("--out", required=True)
     analyze.add_argument("--dilution-method", choices=("stitch", "manual", "mle"), default="stitch")
     analyze.add_argument(
@@ -34,7 +44,7 @@ def build_parser():
     )
     analyze.add_argument("--step-C", type=float, default=0.5)
     analyze.add_argument(
-        "--temperature-method", choices=("max", "latest", "window_max_count"), default="max"
+        "--temperature-method", choices=("max", "latest", "window_max_count"), default="latest"
     )
     analyze.add_argument("--temperature-tolerance-C", type=float)
     analyze.add_argument("--z", type=float, default=1.96)
@@ -46,6 +56,34 @@ def build_parser():
     export.add_argument("input")
     export.add_argument("--out", required=True)
     return parser
+
+
+def _select_experiment(experiment, sample_ids, cycle_ids):
+    if sample_ids is None and cycle_ids is None:
+        return experiment
+    frame = experiment.counts.to_dataframe()
+    selection = {}
+    for column, values in (("sample_id", sample_ids), ("cycle_id", cycle_ids)):
+        if values is None:
+            continue
+        unknown = set(values) - set(frame[column])
+        if unknown:
+            raise ValueError(f"Unknown {column} selection: {sorted(unknown)}")
+        frame = frame.loc[frame[column].isin(values)]
+        selection[column] = list(dict.fromkeys(values))
+    counts = CountsTable(
+        frame, history=experiment.counts.history + [{"operation": "select", **selection}]
+    )
+    return Experiment(
+        counts,
+        {key: value for key, value in experiment.samples.items() if key in set(frame.sample_id)},
+        {
+            key: value
+            for key, value in experiment.measurements.items()
+            if key in set(frame.measurement_id)
+        },
+        source={**experiment.source, "selection": selection},
+    )
 
 
 def main(argv=None):
@@ -86,6 +124,7 @@ def main(argv=None):
             experiment = load(args.input)
             if hasattr(experiment, "experiment"):
                 experiment = experiment.experiment
+        experiment = _select_experiment(experiment, args.sample, args.cycle)
         result = analyze_concentration(
             experiment,
             dilution_method=method,

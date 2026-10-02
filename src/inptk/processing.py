@@ -102,7 +102,7 @@ def frozen_fraction(
     source: Experiment | CountsTable,
     *,
     step_C: float = 0.5,
-    temperature_method: Literal["max", "latest", "window_max_count"] = "max",
+    temperature_method: Literal["max", "latest", "window_max_count"] = "latest",
     temperature_tolerance_C: float | None = None,
 ) -> FrozenFractionTable:
     """Evaluate frozen fractions at temperature thresholds using counts alone.
@@ -118,7 +118,8 @@ def frozen_fraction(
 
     ``window_max_count`` also retains a first-freeze row rounded to 0.1 C and
     four warmer zero rows. It adapts original OLAF's table-construction rule.
-    Its default tolerance is 0.01 C; the other methods use 0.05 C.
+    Default selection is ``latest`` with zero tolerance. ``max`` defaults to
+    0.05 C tolerance; ``window_max_count`` defaults to 0.01 C.
     """
     counts = source.counts if isinstance(source, Experiment) else source
     if not isinstance(counts, CountsTable):
@@ -129,7 +130,7 @@ def frozen_fraction(
         raise ValueError("step_C must be finite and positive")
     tolerance = temperature_tolerance_C
     if tolerance is None:
-        tolerance = 0.01 if temperature_method == "window_max_count" else 0.05
+        tolerance = {"latest": 0.0, "max": 0.05, "window_max_count": 0.01}[temperature_method]
     if not np.isfinite(tolerance) or tolerance < 0:
         raise ValueError("temperature_tolerance_C must be finite and nonnegative")
     source_frame = counts.to_dataframe()
@@ -216,7 +217,14 @@ def cumulative_spectrum(
 def differential_spectrum(
     fractions: FrozenFractionTable, *, experiment: Experiment
 ) -> DifferentialSpectrumTable:
-    """Calculate activity per degree for each measurement and freezing cycle."""
+    """Calculate adjacent concentration changes per degree for each droplet set.
+
+    Each interval uses its actual temperature width and both endpoint frozen
+    fractions, so corrected totals may change. The first state has no preceding
+    observed interval and supplies no output row. Negative changes are retained
+    with quality flag 2; nonfinite values carry flag 1. This arithmetic does not
+    establish that arbitrary droplet loss is a valid background correction.
+    """
     frame = validate_fraction_context(fractions, experiment)
     frames = []
     for identity, fraction in _grouped_fractions(frame, experiment):

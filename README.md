@@ -81,6 +81,14 @@ separate calculation. `inptk.subtract_blanks(combined, {"A": blank_spectrum})`
 applies explicit blank correction before unit conversion. The complete workflow
 still packages all stages for saving with `result.save(...)`.
 
+Differential concentration is the increase in cumulative concentration between
+adjacent temperatures, divided by their actual temperature difference. Each
+endpoint uses its own frozen fraction, so changing blank-corrected totals are
+supported. Negative changes are retained with quality flag `2`; non-finite
+results carry flag `1` (flags can combine). Each row stores both interval edges;
+there is no invented interval before the first supplied state. This calculation
+does not establish whether a change caused by lost droplets is unbiased.
+
 ## Choose how to combine dilutions
 
 Each method has its own settings object. Pass it as `method=` to
@@ -179,6 +187,18 @@ cannot be combined. The package does not infer action counts from cycle numbers.
 `confidence_drop` controls the decrease in log likelihood defining the uncertainty
 interval; its default resolves to `z**2/2`. The effective value is saved.
 
+Each temperature is fitted separately. `enforce_monotone=True` is rejected for
+MLE: the former implementation reused cumulative observations of the same
+droplets across temperatures and could artificially narrow uncertainty. This
+option is available only for automatic stitching, where it raises decreasing
+values to the preceding maximum and must be requested explicitly.
+
+MLE assumes independent droplet sets across its dilution inputs. Repeated cycles
+remain separate. When supplied counts have already been water-blank corrected,
+the fit does not include the uncertainty of estimating that blank or correlations
+introduced by a shared blank. Relative weights also change the likelihood;
+weighted intervals should not be described as ordinary droplet-count intervals.
+
 ### Command-line settings
 
 The same settings are accepted as a JSON object or the path to a JSON file:
@@ -193,6 +213,10 @@ inptk analyze counts.csv --metadata measurements.csv --dilution-method manual \
 Resolved settings are saved in `result.settings["method_options"]` and table
 history. Manual results also record the dilution order. Common temperature-grid,
 output-unit, and error-bar settings remain workflow arguments.
+Use `--sample A --cycle 01` to analyze only those exact labels; repeat either
+option to select several. Sample selection uses the original sample name, while
+MLE controls use measurement names. Unknown selections raise an error. Selection
+and the retained source metadata are recorded in the saved experiment.
 
 ## Samples, measurements, cycles, dictionaries, and lists
 
@@ -274,6 +298,13 @@ relationships by stripping numbers from names. Icescopy's header metadata must
 provide the droplet volume and dilution, or the reader must receive metadata
 overrides (`metadata=` in Python or `--metadata` on the command line). Overrides
 use Icescopy measurement labels as `sample_id` and `well_volume_uL` for droplet volume.
+Only supplied, nonmissing fields replace the corresponding header values; unknown
+measurement names are rejected. CLI overrides accept CSV or a JSON array of
+records, for example `[{"sample_id":"Sample_0","well_volume_uL":50}]`.
+
+Partially missing cycle labels are rejected rather than merged into a single
+cycle. Zero-total observations are also rejected: exclude unusable observations
+explicitly and retain the exclusion record, as demonstrated in the notebook.
 
 An external application can invoke:
 
@@ -284,7 +315,9 @@ inptk analyze freeze_count_timeseries.csv --format icescopy \
 
 The application supplies input files and reads the saved analysis or exported
 CSV. No Icescopy GUI plugin is installed by this package. Connecting the
-Icescopy interface is a separate integration task.
+Icescopy interface is a separate integration task. The
+[Icescopy handoff](ICESCOPY_HANDOFF.md) defines the executable contract, settings
+placement, plots, and remaining integration work.
 
 ## Results and scientific methods
 
@@ -317,9 +350,10 @@ observations through the first coldest temperature. Choose one rule with
 The selected frozen count and total count stay together. Ties for either maximum
 use the latest qualifying observation. `step_C` sets the output temperature
 spacing; `temperature_tolerance_C` sets the allowance around each target.
-Defaults remain `max`, 0.5 degree C spacing, and 0.05 degree C tolerance.
-`window_max_count` defaults to 0.01 degree C tolerance. An explicit tolerance
-overrides the method default in both Python and the command line.
+Defaults are `latest`, 0.5 degree C spacing, and zero tolerance: use the last
+observation at or warmer than the target. Explicit `max` defaults to 0.05 degree C
+tolerance; `window_max_count` defaults to 0.01 degree C tolerance. An explicit
+tolerance overrides the method default in both Python and the command line.
 
 ```python
 fractions = inptk.frozen_fraction(
@@ -375,14 +409,15 @@ src/inptk/
   _engine/          retained numerical methods and their internal working tables
 ```
 
-The private engine preserves the existing numerical implementations while the
-public workflow and data structures are replaced. New applications should use
+The private engine contains the numerical implementations behind the public
+workflow and scientific tables. New applications should use
 `inptk`'s public imports; they should not import `_engine`. Individual-droplet
 freezing-event analysis and GUI development are not yet implemented.
 
-Saved analyses use format version 1 in `analysis.json`. They include metadata,
-identifiers, tables, settings, and history; loading does not execute code. IEEE
-non-finite numbers are explicitly encoded, rather than silently changing
+Saved analyses use format version 1 in `analysis.json`. They include the writing
+package version (`toolkit_version`), metadata, identifiers, tables, settings, and
+history; loading does not execute code. Non-finite numbers are explicitly
+encoded, rather than silently changing
 infinite concentrations into missing values.
 
 ## Origin and licence

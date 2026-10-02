@@ -59,7 +59,9 @@ def test_workflow_matches_retained_methods_and_keeps_cycles_separate(method):
                 sample_id=mid, sample_name=sample, well_volume_uL=50, dilution=measurement.dilution
             )
             old_counts = engine.CountsTable.from_dataframe(old_data, metadata=metadata)
-            fractions.append(engine.fraction_frozen(old_counts, temperature_tolerance_C=0.05))
+            fractions.append(
+                engine.fraction_frozen(old_counts, method="latest", temperature_tolerance_C=0)
+            )
         combine = (
             engine.cumulative_spec_stitch if method == "stitch" else engine.cumulative_spec_mle
         )
@@ -202,3 +204,80 @@ def test_supplied_invalid_timestamps_are_not_replaced_with_row_numbers():
     )
     with pytest.raises(ValueError, match="timestamps must be valid"):
         inptk.read_icescopy(frame, metadata={"A": {"dilution": 1, "well_volume_uL": 50}})
+
+
+@pytest.mark.parametrize("missing", [None, float("nan"), "", "  "])
+def test_icescopy_rejects_partially_missing_cycle_labels(missing):
+    frame = pd.DataFrame(
+        {
+            "temperature_C": [-5, -6, -7],
+            "cycle": ["1", missing, "1"],
+            "A number total": [20] * 3,
+            "A number frozen": [0, 2, 5],
+        }
+    )
+    with pytest.raises(ValueError, match="Some Icescopy cycle labels are missing"):
+        inptk.read_icescopy(frame, metadata={"A": {"dilution": 1, "well_volume_uL": 50}})
+
+
+def test_icescopy_all_missing_cycle_labels_mean_one_cycle():
+    frame = pd.DataFrame(
+        {
+            "temperature_C": [-5, -6],
+            "cycle": [None, ""],
+            "A number total": [20, 20],
+            "A number frozen": [0, 2],
+        }
+    )
+    result = inptk.read_icescopy(frame, metadata={"A": {"dilution": 1, "well_volume_uL": 50}})
+    assert set(result.counts.to_dataframe().cycle_id) == {"1"}
+
+
+@pytest.mark.parametrize(
+    "sample_map", [["A"], {"A": None}, {"A": []}, {"A": ""}, {"A": "  "}, {1: "A"}]
+)
+def test_icescopy_rejects_invalid_sample_maps(sample_map):
+    frame = pd.DataFrame({"temperature_C": [-5], "A number total": [20], "A number frozen": [0]})
+    with pytest.raises(TypeError, match="sample_map must map non-empty"):
+        inptk.read_icescopy(frame, sample_map=sample_map)
+
+
+@pytest.mark.parametrize("shape", ["mapping", "records", "dataframe", "common"])
+def test_icescopy_metadata_overrides_keep_unsupplied_header_values(tmp_path, shape):
+    path = tmp_path / "counts.csv"
+    path.write_text(
+        "# well_volume_uL: 50\n"
+        "# sample_name,A,B\n"
+        "# sample_type,air,air\n"
+        "# dilution,1,10\n"
+        "# air_volume_L,100,100\n"
+        "# suspension_volume_mL,5,5\n"
+        "# filter_fraction_used,1,1\n"
+        "temperature_C,A number total,A number frozen,B number total,B number frozen\n"
+        "-5,20,0,20,0\n-6,20,2,20,1\n"
+    )
+    supplied = {"air_volume_L": 200, "well_volume_uL": 25, "dilution": None}
+    if shape == "mapping":
+        metadata = {"A": supplied}
+    elif shape == "records":
+        metadata = [dict(supplied, sample_id="A")]
+    elif shape == "dataframe":
+        metadata = pd.DataFrame([dict(supplied, sample_id="A")])
+    else:
+        metadata = supplied
+    result = inptk.read_icescopy(path, metadata=metadata)
+    assert result.measurements["A"].dilution == 1
+    assert result.measurements["A"].droplet_volume_uL == 25
+    assert result.samples["A"].sample_type == "air"
+    assert result.samples["A"].air_volume_L == 200
+    assert result.samples["A"].suspension_volume_mL == 5
+    assert result.measurements["B"].dilution == 10
+    assert result.samples["B"].air_volume_L == (200 if shape == "common" else 100)
+    assert result.measurements["B"].droplet_volume_uL == (25 if shape == "common" else 50)
+    assert len(inptk.analyze_concentration(result, output_basis="sampled_air").final) > 0
+
+
+def test_icescopy_metadata_rejects_unknown_measurement_names():
+    frame = pd.DataFrame({"temperature_C": [-5], "A number total": [20], "A number frozen": [0]})
+    with pytest.raises(ValueError, match="Unknown measurement in Icescopy metadata: 'wrong'"):
+        inptk.read_icescopy(frame, metadata={"wrong": {"well_volume_uL": 50}})

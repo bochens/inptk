@@ -61,7 +61,12 @@ def convert_concentration(
 def subtract_blanks(
     spectrum: CumulativeSpectrumTable, blank_by_sample: dict[str, CumulativeSpectrumTable]
 ) -> CumulativeSpectrumTable:
-    """Match blank curves explicitly by target sample, run, cycle and temperature."""
+    """Match blank curves by target sample, run, cycle and temperature.
+
+    Error widths use an independent-error root-sum-of-squares approximation.
+    Subtraction pairs the sample's lower error with the blank's upper error,
+    and vice versa. This is not an exact confidence interval for the difference.
+    """
     data = spectrum.to_dataframe()
     if not data.basis.eq("suspension").all():
         raise ValueError("Blank correction requires suspension concentrations")
@@ -88,10 +93,12 @@ def subtract_blanks(
         data.loc[rows.index, "concentration"] = (
             rows.concentration.to_numpy() - aligned.concentration.to_numpy()
         )
-        for column in ("lower_error", "upper_error"):
-            if column in rows and column in aligned:
+        for column, blank_column in (
+            ("lower_error", "upper_error"), ("upper_error", "lower_error")
+        ):
+            if column in rows and blank_column in aligned:
                 data.loc[rows.index, column] = np.sqrt(
-                    rows[column].to_numpy() ** 2 + aligned[column].to_numpy() ** 2
+                    rows[column].to_numpy() ** 2 + aligned[blank_column].to_numpy() ** 2
                 )
             elif column in rows:
                 raise ValueError("Blank and sample must both supply uncertainty to propagate it")
@@ -107,7 +114,8 @@ def subtract_blanks(
                 "operation": "subtract_filter_blank",
                 "targets": list(blank_by_sample),
                 "uncertainty_assumption": (
-                    "independent sample and blank errors; retained root-sum-of-squares method"
+                    "independent errors; approximate root-sum-of-squares with opposite "
+                    "blank error direction for subtraction"
                 ),
                 "blanks": {
                     key: value.to_dataframe().to_dict("records")
@@ -236,6 +244,11 @@ def combine_dilutions(
     effective method settings are retained on the returned spectrum.
     """
     chosen = resolve_method(method)
+    if isinstance(chosen, MLE) and enforce_monotone:
+        raise ValueError(
+            "MLE requires enforce_monotone=False: cumulative counts at adjacent "
+            "temperatures describe the same droplets, not independent observations"
+        )
     if isinstance(chosen, ManualStitch) and enforce_monotone:
         raise ValueError("Manual stitching selects curves directly; enforce_monotone must be False")
     if not np.isfinite(z) or z <= 0:
@@ -331,7 +344,7 @@ def analyze_concentration(
     dilution_method: str | DilutionMethod = "stitch",
     output_basis: str = "suspension",
     step_C: float = 0.5,
-    temperature_method: Literal["max", "latest", "window_max_count"] = "max",
+    temperature_method: Literal["max", "latest", "window_max_count"] = "latest",
     temperature_tolerance_C: float | None = None,
     z: float = 1.96,
     differential: bool = False,
@@ -340,6 +353,11 @@ def analyze_concentration(
 ) -> AnalysisResult:
     """Run the separately callable processing steps and retain all their results."""
     method = resolve_method(dilution_method)
+    if isinstance(method, MLE) and enforce_monotone:
+        raise ValueError(
+            "MLE requires enforce_monotone=False: cumulative counts at adjacent "
+            "temperatures describe the same droplets, not independent observations"
+        )
     if output_basis not in UNITS:
         raise ValueError(f"Unknown output_basis {output_basis!r}")
     if not np.isfinite(z) or z <= 0:
@@ -368,7 +386,7 @@ def analyze_concentration(
     )
     tolerance = temperature_tolerance_C
     if tolerance is None:
-        tolerance = 0.01 if temperature_method == "window_max_count" else 0.05
+        tolerance = {"latest": 0.0, "max": 0.05, "window_max_count": 0.01}[temperature_method]
     settings = {
         "dilution_method": method_name(method),
         "method_options": method_options(method, z=z),
