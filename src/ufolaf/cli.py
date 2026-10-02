@@ -62,7 +62,7 @@ def _add_read_counts_command(subcommands: argparse._SubParsersAction) -> None:
     parser.add_argument("--metadata", help="Optional metadata CSV or JSON")
     parser.add_argument(
         "--cycle-policy",
-        choices=("single", "pooled", "preserve"),
+        choices=("single", "averaged", "preserve"),
         default="single",
     )
     parser.add_argument("--cycle", help="Cycle to select when cycle-policy is single")
@@ -165,7 +165,7 @@ def _add_pipeline_command(subcommands: argparse._SubParsersAction) -> None:
     parser.add_argument("--metadata", help="Optional metadata CSV or JSON")
     parser.add_argument(
         "--cycle-policy",
-        choices=("single", "pooled", "preserve"),
+        choices=("single", "averaged", "preserve"),
         default="single",
     )
     parser.add_argument("--cycle", help="Cycle to select when cycle-policy is single")

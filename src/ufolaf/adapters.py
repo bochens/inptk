@@ -18,7 +18,7 @@ from .models import (
 
 
 CountInputFormat = Literal["auto", "long", "canonical", "icescopy", "icescopy_wide", "wide"]
-CountCyclePolicy = Literal["single", "pooled", "preserve"]
+CountCyclePolicy = Literal["single", "averaged", "preserve"]
 CountColumn = Literal[
     "sample_id",
     "temperature_C",
@@ -178,8 +178,9 @@ def read_counts(
       dict[str, dict], metadata DataFrame, or a dict of common metadata defaults
 
     ``cycle_policy="single"`` selects one cycle and returns a table or dilution
-    list. ``cycle_policy="pooled"`` marks all cycles for pooled threshold
-    reduction and returns a table or dilution list. ``cycle_policy="preserve"``
+    list. ``cycle_policy="averaged"`` marks repeated measurements of the same
+    droplets for averaging after temperature reduction and returns a table or
+    dilution list. ``cycle_policy="preserve"``
     returns ``dict[cycle_id, table_or_dilution_list]``.
     """
 
@@ -254,16 +255,22 @@ def _apply_count_cycle_policy(
     cycle_policy: CountCyclePolicy,
     cycle: Any | None,
 ) -> CountsTable | list[CountsTable] | dict[str, CountsTable | list[CountsTable]]:
-    if cycle_policy not in ("single", "pooled", "preserve"):
-        raise ValueError("cycle_policy must be 'single', 'pooled', or 'preserve'")
+    if cycle_policy == "pooled":
+        raise ValueError(
+            "cycle_policy='pooled' has been removed: cycles measure the same droplets. "
+            "Use 'averaged' to average frozen fractions without adding droplet counts, "
+            "or 'preserve' to keep cycles separate."
+        )
+    if cycle_policy not in ("single", "averaged", "preserve"):
+        raise ValueError("cycle_policy must be 'single', 'averaged', or 'preserve'")
     if cycle is not None and cycle_policy != "single":
         raise ValueError("cycle can only be selected when cycle_policy='single'")
-    if cycle_policy == "pooled":
+    if cycle_policy == "averaged":
         return _single_or_list(
             [
                 _with_cycle_policy_processing(
                     table,
-                    cycle_policy="pooled",
+                    cycle_policy="averaged",
                     source_cycles=_cycle_keys(_with_cycle_key(table.to_dataframe())),
                 )
                 for table in tables
@@ -561,7 +568,7 @@ def _selected_cycle_key(cycle_keys: list[str], cycle: Any | None) -> str:
             return cycle_keys[0]
         available = ", ".join(cycle_keys)
         raise ValueError(
-            "Multiple cycles found. Pass cycle=..., use cycle_policy='pooled', "
+            "Multiple cycles found. Pass cycle=..., use cycle_policy='averaged', "
             f"or use cycle_policy='preserve'. Available cycles: {available}"
         )
     selected = _normalize_cycle_key(cycle)

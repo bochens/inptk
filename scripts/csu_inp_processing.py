@@ -52,7 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.cycle_policy == "preserve":
             raise ValueError(
                 "CSU INPs_L export writes one analysis table. Use --cycle-policy single "
-                "or --cycle-policy pooled, not preserve."
+                "or --cycle-policy averaged, not preserve."
             )
         counts = _read_count_inputs(args)
         fraction = ufolaf.fraction_frozen(
@@ -150,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     counts.add_argument(
         "--cycle-policy",
-        choices=("single", "pooled", "preserve"),
+        choices=("single", "averaged", "preserve"),
         default="single",
     )
     counts.add_argument("--cycle", help="Cycle to select when cycle-policy is single")

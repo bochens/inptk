@@ -610,11 +610,19 @@ class TemperatureDependentTable:
 
 @dataclass(frozen=True, kw_only=True)
 class TemperatureFrozenFractionTable(TemperatureDependentTable):
-    """Temperature-binned frozen fraction derived from count observations."""
+    """Frozen fractions, optionally averaged over repeated cycles of the same droplets.
+
+    For averaged cycles, ``n_frozen`` is a mean count and ``n_total`` remains the
+    droplet count of one cycle. ``cycle_count`` records the number of contributing
+    cycles at each temperature. ``fraction_frozen_cycle_std`` is their sample
+    standard deviation, not a confidence interval or an error of the mean.
+    """
 
     n_total: Any
     n_frozen: Any
     obs_count: Any | None = None
+    cycle_count: Any | None = None
+    fraction_frozen_cycle_std: Any | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -625,6 +633,10 @@ class TemperatureFrozenFractionTable(TemperatureDependentTable):
             self, "n_frozen", _required_array(self.n_frozen, dtype=float, name="n_frozen")
         )
         object.__setattr__(self, "obs_count", _optional_array(self.obs_count, dtype=int))
+        object.__setattr__(self, "cycle_count", _optional_array(self.cycle_count, dtype=int))
+        object.__setattr__(
+            self, "fraction_frozen_cycle_std", _optional_array(self.fraction_frozen_cycle_std)
+        )
         lengths = {
             "sample_id": len(self.sample_id),
             "temperature_C": len(self.temperature_C),
@@ -634,7 +646,11 @@ class TemperatureFrozenFractionTable(TemperatureDependentTable):
         _add_optional_length(lengths, "temperature_bin_left_C", self.temperature_bin_left_C)
         _add_optional_length(lengths, "temperature_bin_right_C", self.temperature_bin_right_C)
         _add_optional_length(lengths, "obs_count", self.obs_count)
+        _add_optional_length(lengths, "cycle_count", self.cycle_count)
+        _add_optional_length(lengths, "fraction_frozen_cycle_std", self.fraction_frozen_cycle_std)
         _same_length_or_raise(lengths)
+        if self.cycle_count is not None and np.any(self.cycle_count < 1):
+            raise ValueError("cycle_count must be positive")
 
     @property
     def fraction_frozen(self) -> np.ndarray:
@@ -648,6 +664,10 @@ class TemperatureFrozenFractionTable(TemperatureDependentTable):
         data["fraction_frozen"] = self.fraction_frozen
         if self.obs_count is not None:
             data["obs_count"] = self.obs_count.copy()
+        if self.cycle_count is not None:
+            data["cycle_count"] = self.cycle_count.copy()
+        if self.fraction_frozen_cycle_std is not None:
+            data["fraction_frozen_cycle_std"] = self.fraction_frozen_cycle_std.copy()
         return data
 
     @classmethod
@@ -677,6 +697,9 @@ class TemperatureFrozenFractionTable(TemperatureDependentTable):
             n_total=df["n_total"].to_numpy(dtype=float),
             n_frozen=df["n_frozen"].to_numpy(dtype=float),
             obs_count=df["obs_count"].to_numpy(dtype=int) if "obs_count" in df else None,
+            cycle_count=df["cycle_count"].to_numpy(dtype=int) if "cycle_count" in df else None,
+            fraction_frozen_cycle_std=df["fraction_frozen_cycle_std"].to_numpy(dtype=float)
+            if "fraction_frozen_cycle_std" in df else None,
             metadata=metadata,
             processing_metadata=processing_metadata,
         )
