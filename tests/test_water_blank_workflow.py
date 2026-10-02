@@ -101,8 +101,8 @@ def test_raw_stages_cycles_differential_and_archive_remain_consistent(tmp_path, 
         cycles=("01", "02"),
     )
     before = source.counts.to_dataframe()
-    result = inptk.analyze_concentration(source, method=method, differential=True, step_C=1)
-    fractions = inptk.frozen_fraction(source, step_C=1)
+    result = inptk.analyze_concentration(source, method=method, differential=True)
+    fractions = inptk.frozen_fraction(source)
     combined = inptk.combine_dilutions(fractions, experiment=source, method=method)
     pd.testing.assert_frame_equal(
         result.final.to_dataframe(), inptk.finalize_spectrum(combined).to_dataframe()
@@ -115,9 +115,9 @@ def test_raw_stages_cycles_differential_and_archive_remain_consistent(tmp_path, 
         samples=source.samples,
         water_blank_map=source.water_blank_map,
     )
-    first_cycle_result = inptk.analyze_concentration(first_cycle_source, method=method, step_C=1)
+    first_cycle_result = inptk.analyze_concentration(first_cycle_source, method=method)
     pd.testing.assert_frame_equal(
-        result.combined.select(cycle_id="01").to_dataframe(),
+        result.combined.select(group_id="S/1/01").to_dataframe(),
         first_cycle_result.combined.to_dataframe(),
     )
     for cycle in ("01", "02"):
@@ -163,11 +163,11 @@ def test_missing_blank_temperature_is_an_error_not_extrapolation():
         },
         temperatures=(-5, -6),
     )
-    fractions = inptk.frozen_fraction(source, step_C=1).to_dataframe()
+    fractions = inptk.frozen_fraction(source).to_dataframe()
     fractions = fractions.loc[
         ~((fractions.measurement_id == "blank") & (fractions.temperature_C == -6))
     ]
-    with pytest.raises(ValueError, match="lacks matching"):
+    with pytest.raises(ValueError, match="lacks observed temperature coverage"):
         inptk.cumulative_spectrum(inptk.FrozenFractionTable(fractions), experiment=source)
 
 
@@ -188,7 +188,6 @@ def test_raw_blank_ranges_record_zero_one_and_two_contributors(method):
             "neat": {"min_C": -6},
             "diluted": {"min_C": -7, "max_C": -6},
         },
-        step_C=1,
     )
     selected = result.combined.to_dataframe().sort_values("temperature_C", ascending=False)
     assert selected.contributor_count.tolist() == [1, 2, 1, 0]
@@ -250,7 +249,7 @@ def test_excluded_temperatures_do_not_require_missing_blank_observations(method)
     assert actual.combined.to_dataframe().set_index("temperature_C").loc[-6].contributor_count == 0
     assert actual.final.to_dataframe().temperature_C.tolist() == [-5]
     pd.testing.assert_frame_equal(source.counts.to_dataframe(), counts.reset_index(drop=True))
-    with pytest.raises(ValueError, match="lacks matching"):
+    with pytest.raises(ValueError, match="lacks observed temperature coverage"):
         inptk.analyze_concentration(source, method=method)
 
 
@@ -263,7 +262,7 @@ def test_volume_scaled_blank_assumption_is_saved_without_changing_counts(tmp_pat
         },
         temperatures=(-5, -6),
     )
-    actual = inptk.analyze_concentration(source, method=method, step_C=1)
+    actual = inptk.analyze_concentration(source, method=method)
     actual.save(tmp_path / "volume_scaled.inptk")
     restored = inptk.load(tmp_path / "volume_scaled.inptk")
     assert restored.settings["water_blank_model"] == "volume_scaled"

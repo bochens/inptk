@@ -1,29 +1,35 @@
-"""One concentration workflow with explicit measurement temperature ranges."""
+"""Native-observation concentration workflows with explicit combination groups."""
 
 from __future__ import annotations
 
 import json
-from typing import Literal, cast
+from typing import Literal, TypeVar
 
 import numpy as np
 import pandas as pd
 
-from ._engine.water_blank_math import average_concentration, fit_concentration
+from .alignment import align_observations
 from .experiment import AnalysisResult, Experiment, SampleMetadata
-from .methods import validate_combination_method, validate_temperature_ranges
+from .methods import (
+    validate_combination_groups,
+    validate_combination_method,
+    validate_temperature_ranges,
+)
 from .processing import (
     cumulative_spectrum,
     differential_spectrum,
     frozen_fraction,
     prepare_fraction_analysis,
 )
-from .tables import UNITS, CumulativeSpectrumTable, FrozenFractionTable
+from .resampling import resample_spectrum
+from .tables import UNITS, CombinedSpectrumTable, CumulativeSpectrumTable, FrozenFractionTable
+from .water_blank import estimate_point, sample_rows
+
+SpectrumT = TypeVar("SpectrumT", bound=CumulativeSpectrumTable)
 
 
-def convert_concentration(
-    spectrum: CumulativeSpectrumTable, samples: dict[str, SampleMetadata], *, basis: str
-):
-    """Convert suspension concentration once; return a new cumulative spectrum."""
+def convert_concentration(spectrum: SpectrumT, samples: dict[str, SampleMetadata], *, basis: str):
+    """Convert suspension concentration once, preserving the table's identities."""
     if basis not in UNITS:
         raise ValueError(f"Unknown concentration basis {basis!r}")
     data = spectrum.to_dataframe()
@@ -36,93 +42,128 @@ def convert_concentration(
         for name in ("concentration", "lower_error", "upper_error"):
             if name in data:
                 data.loc[rows.index, name] *= factor
-    data["basis"] = basis
-    data["unit"] = UNITS[basis]
-    return CumulativeSpectrumTable(
+    data["basis"], data["unit"] = basis, UNITS[basis]
+    return type(spectrum)(
         data, history=spectrum.history + [{"operation": "convert_concentration", "basis": basis}]
     )
 
 
-def subtract_blanks(
-    spectrum: CumulativeSpectrumTable, blank_by_sample: dict[str, CumulativeSpectrumTable]
-) -> CumulativeSpectrumTable:
-    """Match blank curves by target sample, run, cycle and temperature.
+def _curve_columns(data: pd.DataFrame) -> list[str]:
+    if "group_id" in data:
+        return ["sample_id", "group_id"]
+    columns = ["run_id", "sample_id", "cycle_id"]
+    if "measurement_id" in data:
+        columns.append("measurement_id")
+    return columns
 
-    Error widths use an independent-error root-sum-of-squares approximation.
-    Subtraction pairs the sample's lower error with the blank's upper error,
-    and vice versa. This is not an exact confidence interval for the difference.
+
+def subtract_blanks(
+    spectrum: SpectrumT, blank_by_target: dict[str, CumulativeSpectrumTable]
+) -> SpectrumT:
+    """Subtract explicit, temperature-matched sample/filter blank spectra.
+
+    Map a combined group ID, or an individual spectrum's sample ID, to one
+    already aligned blank curve. This is separate from raw assay-blank fitting.
+    Opposite error widths use an approximate independent-error propagation.
     """
     data = spectrum.to_dataframe()
-    source_uncertainty_methods = []
-    propagated_method = "approximate_independent_filter_blank_error_propagation"
+    target_column = "group_id" if isinstance(spectrum, CombinedSpectrumTable) else "sample_id"
     if not data.basis.eq("suspension").all():
         raise ValueError("Blank correction requires suspension concentrations")
-    extra = set(blank_by_sample) - set(data.sample_id)
+    extra = set(blank_by_target) - set(data[target_column])
     if extra:
-        raise ValueError(f"Blank mapping names unknown target samples: {sorted(extra)}")
-    for sample_id, blank in blank_by_sample.items():
+        raise ValueError(f"Blank mapping names unknown targets: {sorted(extra)}")
+    prior_methods = []
+    method = "approximate_independent_filter_blank_error_propagation"
+    for target, blank in blank_by_target.items():
         background = blank.to_dataframe()
         if not background.basis.eq("suspension").all():
             raise ValueError("Blank correction requires suspension concentrations")
-        if background.sample_id.nunique() != 1:
-            raise ValueError("Each mapped blank must contain exactly one blank sample")
-        keys = ["run_id", "cycle_id", "temperature_C"]
-        if background.duplicated(keys).any():
-            raise ValueError("Blank curves contain duplicate run/cycle/temperature rows")
-        rows = data[(data.sample_id == sample_id) & np.isfinite(data.concentration)]
+        if len(background[_curve_columns(background)].drop_duplicates()) != 1:
+            raise ValueError("Each mapped filter blank must contain one explicitly selected curve")
+        if background.temperature_C.duplicated().any():
+            raise ValueError(
+                "Filter blank must have one value per temperature; "
+                "sample its curve explicitly before subtraction"
+            )
+        rows = data[(data[target_column] == target) & np.isfinite(data.concentration)]
         if rows.empty:
             continue
-        aligned = rows[keys].merge(
-            background, on=keys, how="left", validate="one_to_one", indicator=True
+        aligned = rows[["temperature_C"]].merge(
+            background, on="temperature_C", how="left", validate="many_to_one", indicator=True
         )
         if not aligned["_merge"].eq("both").all():
             raise ValueError(
-                f"Blank for {sample_id!r} does not cover all run/cycle/temperature rows"
+                f"Filter blank for {target!r} does not cover all requested temperatures"
             )
         data.loc[rows.index, "concentration"] = (
             rows.concentration.to_numpy() - aligned.concentration.to_numpy()
         )
-        for column, blank_column in (
-            ("lower_error", "upper_error"),
-            ("upper_error", "lower_error"),
-        ):
-            if column in rows and blank_column in aligned:
-                data.loc[rows.index, column] = np.sqrt(
-                    rows[column].to_numpy() ** 2 + aligned[blank_column].to_numpy() ** 2
+        for column, other in (("lower_error", "upper_error"), ("upper_error", "lower_error")):
+            if column in rows and other in aligned:
+                data.loc[rows.index, column] = np.hypot(
+                    rows[column].to_numpy(), aligned[other].to_numpy()
                 )
             elif column in rows:
                 raise ValueError("Blank and sample must both supply uncertainty to propagate it")
+        columns = _curve_columns(rows) + ["temperature_C"]
+        if "point_id" in rows:
+            columns.append("point_id")
+        provenance = rows[columns].copy()
+        provenance["uncertainty_method"] = rows.get("uncertainty_method")
+        prior_methods.extend(provenance.to_dict("records"))
+        data.loc[rows.index, "uncertainty_method"] = method
+        data.loc[rows.index, "correction_state"] = "blank_corrected"
         data.loc[rows.index, "is_extrapolated"] = (
             rows.is_extrapolated.to_numpy() | aligned.is_extrapolated.to_numpy()
         )
-        provenance_columns = ["sample_id", "run_id", "cycle_id", "temperature_C"]
-        if "measurement_id" in rows:
-            provenance_columns.append("measurement_id")
-        prior_methods = rows[provenance_columns].copy()
-        prior_methods["uncertainty_method"] = rows.get("uncertainty_method")
-        source_uncertainty_methods.extend(prior_methods.to_dict("records"))
-        data.loc[rows.index, "uncertainty_method"] = propagated_method
-        data.loc[rows.index, "correction_state"] = "blank_corrected"
-    return CumulativeSpectrumTable(
+    return type(spectrum)(
         data,
         history=spectrum.history
         + [
             {
                 "operation": "subtract_filter_blank",
-                "targets": list(blank_by_sample),
-                "uncertainty_method": propagated_method,
-                "source_uncertainty_methods": source_uncertainty_methods,
+                "targets": list(blank_by_target),
+                "uncertainty_method": method,
+                "source_uncertainty_methods": prior_methods,
                 "uncertainty_assumption": (
-                    "independent errors; approximate root-sum-of-squares with opposite "
+                    "Independent errors; approximate propagation with opposite "
                     "blank error direction for subtraction"
                 ),
                 "blanks": {
                     key: value.to_dataframe().to_dict("records")
-                    for key, value in blank_by_sample.items()
+                    for key, value in blank_by_target.items()
                 },
             }
         ],
     )
+
+
+def _state_key(point) -> tuple:
+    columns = ["measurement_id", "run_id", "cycle_id", "n_frozen", "n_total"]
+    return tuple(
+        tuple(sorted(frame[columns].itertuples(index=False, name=None)))
+        for frame in (point.samples, point.blanks)
+    )
+
+
+def _sources(point) -> list[dict]:
+    records = []
+    for role, frame in (("sample", point.samples), ("blank", point.blanks)):
+        for row in frame.to_dict("records"):
+            item: dict[str, object] = {
+                key: str(row[key])
+                for key in ("measurement_id", "run_id", "cycle_id", "observation_id")
+            }
+            item.update(
+                role=role,
+                observed_temperature_C=float(row["temperature_C"]),
+                alignment="exact" if row["temperature_C"] == point.temperature_C else "latest",
+            )
+            if "time_s" in row and pd.notna(row["time_s"]):
+                item["time_s"] = float(row["time_s"])
+            records.append(item)
+    return records
 
 
 def combine_dilutions(
@@ -131,91 +172,87 @@ def combine_dilutions(
     experiment: Experiment,
     method: Literal["mle", "average"] = "mle",
     temperature_ranges_C=None,
+    combination_groups=None,
     z: float = 1.96,
     water_blank_correction: bool = True,
-) -> CumulativeSpectrumTable:
-    """Combine eligible measurements by joint MLE or arithmetic mean at each temperature.
+) -> CombinedSpectrumTable:
+    """Combine explicit droplet sets, preserving native states and run backgrounds.
 
-    Ranges use exact measurement names and inclusive min_C/max_C boundaries.
-    An omitted boundary or measurement places no additional restriction on its
-    observed temperature support. One measurement uses the same count likelihood
-    as several measurements. Average uses separate measurement estimates and
-    conservative bounds that allow dependent errors from a shared blank.
-    Sample, run and cycle groups are always calculated separately.
+    With no group mapping, each sample/run/cycle remains separate. Explicit
+    groups can span runs but select only one cycle from each run. Observations
+    align only where needed, using latest warmer states at observed targets.
     """
-    from .water_blank import fit_raw_rows, sample_rows
-
     method = validate_combination_method(method)
-    estimate = average_concentration if method == "average" else fit_concentration
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
     fractions, experiment = prepare_fraction_analysis(
-        fractions,
-        experiment,
-        water_blank_correction=water_blank_correction,
+        fractions, experiment, water_blank_correction=water_blank_correction
     )
-    all_rows = fractions.to_dataframe()
-    source = sample_rows(all_rows, experiment)
-    blank_ids = {name for names in experiment.water_blank_map.values() for name in names}
+    frame = fractions.to_dataframe()
+    source = sample_rows(frame, experiment)
+    if source.empty:
+        raise ValueError("No sample observations are available for concentration calculation")
+    blank_ids = {key for ids in experiment.water_blank_map.values() for key in ids}
     ranges = validate_temperature_ranges(
         temperature_ranges_C, measurement_ids=set(experiment.measurements) - blank_ids
     )
-    if source.empty:
-        raise ValueError("No sample observations are available for concentration calculation")
-    records, notices = [], []
-    for identity, group in source.groupby(["run_id", "sample_id", "cycle_id"], sort=False):
-        run_id, sample_id, cycle_id = map(str, identity)
-        group_ids = sorted(group.measurement_id.unique())
-        expected = {
-            key
-            for key, value in experiment.measurements.items()
-            if key not in blank_ids and (value.sample_id, value.run_id) == (sample_id, run_id)
-        }
-        missing = expected - set(group_ids)
-        if missing:
-            notices.append(
-                f"{sample_id}, run {run_id}, cycle {cycle_id}: "
-                f"absent measurements {sorted(missing)}"
+    groups = validate_combination_groups(combination_groups, experiment, frame)
+    records, notices, group_alignment, cache = [], [], {}, {}
+    for group_id, group in groups.items():
+        members = group["members"]
+        ids = sorted(member["measurement_id"] for member in members)
+        supports = {}
+        for member in members:
+            selected = source[
+                (source.measurement_id == member["measurement_id"])
+                & (source.cycle_id == member["cycle_id"])
+            ]
+            supports[member["measurement_id"]] = (
+                float(selected.temperature_C.min()),
+                float(selected.temperature_C.max()),
             )
+        points = align_observations(
+            frame, members, water_blank_map=experiment.water_blank_map, temperature_ranges_C=ranges
+        )
         empty_count = 0
-        for temperature, rows in group.groupby("temperature_C", sort=False):
-            temperature = float(cast(float, temperature))
-            eligible = []
-            for row in rows.itertuples():
-                limits = ranges.get(str(row.measurement_id), {})
-                minimum, maximum = limits.get("min_C"), limits.get("max_C")
-                eligible.append(
-                    (minimum is None or temperature >= minimum)
-                    and (maximum is None or temperature <= maximum)
-                )
-            selected = rows.loc[eligible]
-            ids = sorted(selected.measurement_id.astype(str).tolist())
+        group_alignment[group_id] = sorted({point.alignment for point in points})
+        for point in points:
+            contributors = sorted(point.samples.measurement_id.astype(str).tolist())
+            available = sorted(
+                key for key, (cold, warm) in supports.items() if cold <= point.temperature_C <= warm
+            )
             record = {
-                "run_id": run_id,
-                "sample_id": sample_id,
-                "cycle_id": cycle_id,
-                "temperature_C": temperature,
+                "sample_id": group["sample_id"],
+                "group_id": group_id,
+                "point_id": point.point_id,
+                "point_order": point.point_order,
+                "temperature_C": point.temperature_C,
+                "alignment": point.alignment,
                 "concentration": np.nan,
                 "lower_error": np.nan,
                 "upper_error": np.nan,
                 "unit": "INP_per_mL_suspension",
                 "basis": "suspension",
                 "qc_flag": 1,
-                "source_measurement_ids": json.dumps(group_ids),
-                "available_measurement_ids": json.dumps(sorted(rows.measurement_id.astype(str))),
-                "contributing_measurement_ids": json.dumps(ids),
-                "contributor_count": len(ids),
-                "source_measurement_id": ids[0] if len(ids) == 1 else "",
+                "source_measurement_ids": json.dumps(ids),
+                "available_measurement_ids": json.dumps(available),
+                "contributing_measurement_ids": json.dumps(contributors),
+                "contributor_count": len(contributors),
+                "source_measurement_id": contributors[0] if len(contributors) == 1 else "",
                 "selection_status": "no_eligible_measurements"
-                if not ids
+                if not contributors
                 else "single"
-                if len(ids) == 1
+                if len(contributors) == 1
                 else "combined",
-                "dilution_fold": experiment.measurements[ids[0]].dilution
-                if len(ids) == 1
+                "dilution_fold": experiment.measurements[contributors[0]].dilution
+                if len(contributors) == 1
                 else np.nan,
+                "water_blank_ids": json.dumps(
+                    sorted(point.blanks.measurement_id.astype(str).tolist())
+                ),
+                "source_observations": json.dumps(_sources(point)),
                 "uncertainty_method": "bonferroni_marginal_profile_bounds"
-                if method == "average"
+                if method == "average" and len(contributors) > 1
                 else "joint_sample_water_blank_profile_likelihood"
                 if experiment.water_blank_map
                 else "binomial_Poisson_profile_likelihood",
@@ -223,58 +260,51 @@ def combine_dilutions(
                 if experiment.water_blank_map
                 else "uncorrected",
             }
-            if not ids:
-                empty_count += 1
-            else:
-                if experiment.water_blank_map:
-                    fit = fit_raw_rows(
-                        selected, all_rows, experiment, confidence_drop=z**2 / 2, method=method
-                    )
-                    record["water_blank_ids"] = json.dumps(
-                        sorted(experiment.water_blank_map[ids[0]])
-                    )
-                else:
-                    metadata = [
-                        experiment.measurements[str(key)] for key in selected.measurement_id
-                    ]
-                    fit = estimate(
-                        selected.n_frozen.to_numpy(),
-                        selected.n_total.to_numpy(),
-                        [item.dilution for item in metadata],
-                        [item.droplet_volume_uL for item in metadata],
+            if contributors:
+                key = _state_key(point)
+                if key not in cache:
+                    cache[key] = estimate_point(
+                        point.samples,
+                        point.blanks,
+                        experiment,
                         confidence_drop=z**2 / 2,
+                        method=method,
                     )
+                fit = cache[key]
                 record.update(
                     concentration=fit[0],
                     lower_error=fit[1],
                     upper_error=fit[2],
                     qc_flag=0 if fit[3] else 1,
                 )
+            else:
+                empty_count += 1
+            record["at_zero_boundary"] = record["concentration"] == 0
             records.append(record)
         if empty_count:
-            notices.append(
-                f"{sample_id}, run {run_id}, cycle {cycle_id}: "
-                f"{empty_count} temperatures have no eligible measurements; gaps are retained"
-            )
+            notices.append(f"Group {group_id!r}: {empty_count} points have no eligible measurement")
     settings = {
         "operation": "combine_dilutions",
         "estimation_method": method,
+        "combination_groups": groups,
         "temperature_ranges_C": ranges,
-        "range_boundaries": "inclusive",
+        "range_boundaries": "inclusive; source and target",
+        "alignment": group_alignment,
+        "alignment_rule": "latest observation at or warmer than target, only where needed",
         "z": float(z),
         "confidence_drop": float(z**2 / 2),
         "water_blank_correction": water_blank_correction,
-        "water_blank_model": "volume_scaled",
         "water_blank_correction_applied": bool(experiment.water_blank_map),
+        "water_blank_model": "volume_scaled",
+        "background_groups": "separate by run and selected cycle",
         "water_blank_map": dict(experiment.water_blank_map),
         "uncertainty_assumption": (
-            "pointwise profile bounds; physical droplet sets independent; "
-            "shared blank observations retained. Average combines Bonferroni-adjusted "
-            "marginal endpoints without assuming independent errors; coverage is approximate."
+            "Independent physical droplet sets, repeated observations never pooled; "
+            "profile bounds and Bonferroni-adjusted average bounds have approximate coverage"
         ),
         "warnings": notices,
     }
-    return CumulativeSpectrumTable(
+    return CombinedSpectrumTable(
         pd.DataFrame.from_records(records), history=fractions.history + [settings]
     )
 
@@ -285,95 +315,92 @@ def _validate_decrease_policy(decrease_policy: str) -> None:
 
 
 def _final_candidates(
-    spectrum: CumulativeSpectrumTable,
+    spectrum: SpectrumT,
     *,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"],
-) -> CumulativeSpectrumTable:
-    """Mark final point selection while preserving every input value and error."""
+) -> SpectrumT:
+    """Mark native point selection in observation order without changing values."""
     _validate_decrease_policy(decrease_policy)
-    # Optimizer roundoff must not create a physical decrease when contributors
-    # change. A relative-only comparison preserves real tiny signals dropping to zero.
-    numerical_relative_tolerance = 1e-9
     if not isinstance(spectrum, CumulativeSpectrumTable):
-        raise TypeError("spectrum must be a CumulativeSpectrumTable")
+        raise TypeError("spectrum must be a cumulative spectrum table")
     data = spectrum.to_dataframe()
     data["used_in_final"] = False
     data["final_selection_status"] = "nonfinite"
-    keys = ["run_id", "sample_id", "cycle_id"]
-    if "measurement_id" in data:
-        keys.append("measurement_id")
-    groups, notices = [], []
-    for identity, rows in data.groupby(keys, sort=False):
-        group: dict[str, object] = dict(zip(keys, identity))
-        previous_temperature = None
-        previous_concentration = None
-        first_decrease_temperature = None
+    data["segment_id"] = ""
+    keys = _curve_columns(data)
+    reports, notices = [], []
+    for identity, original_rows in data.groupby(keys, sort=False):
+        rows = (
+            original_rows.sort_values("point_order", kind="stable")
+            if "point_order" in original_rows
+            else original_rows
+        )
+        previous = None
+        previous_point = None
+        stopped = False
+        segment = -1
+        contiguous = False
         excluded = []
-        retained_count = 0
-        for index, row in rows.sort_values("temperature_C", ascending=False).iterrows():
-            temperature = float(row.temperature_C)
+        retained = 0
+        for index, row in rows.iterrows():
             concentration = float(row.concentration) if pd.notna(row.concentration) else np.nan
             if not np.isfinite(concentration):
                 status = "nonfinite"
-            elif first_decrease_temperature is not None and decrease_policy == "stop_at_decrease":
-                status = "colder_than_decrease"
+            elif stopped and decrease_policy == "stop_at_decrease":
+                status = "after_decrease"
             elif (
-                previous_concentration is not None
-                and concentration < previous_concentration
-                and not np.isclose(
-                    concentration, previous_concentration,
-                    rtol=numerical_relative_tolerance, atol=0.0,
-                )
+                previous is not None
+                and concentration < previous
+                and not np.isclose(concentration, previous, rtol=1e-9, atol=0)
             ):
                 status = "decrease"
-                if first_decrease_temperature is None:
-                    first_decrease_temperature = temperature
+                stopped = True
             else:
                 status = "kept"
             data.at[index, "final_selection_status"] = status
             if status == "kept":
+                if not contiguous:
+                    segment += 1
+                data.at[index, "segment_id"] = str(segment)
                 data.at[index, "used_in_final"] = True
-                retained_count += 1
-                previous_temperature = temperature
-                previous_concentration = concentration
+                previous, previous_point = concentration, row.get("point_id")
+                retained += 1
+                contiguous = True
             else:
+                contiguous = False
                 excluded.append(
                     {
-                        "temperature_C": temperature,
+                        "point_id": row.get("point_id"),
+                        "temperature_C": float(row.temperature_C),
                         "concentration": concentration,
                         "reason": status,
-                        "reference_temperature_C": previous_temperature,
-                        "reference_concentration": previous_concentration,
+                        "reference_point_id": previous_point,
+                        "reference_concentration": previous,
                     }
                 )
-        group.update(
-            first_decrease_temperature_C=first_decrease_temperature,
-            retained_count=retained_count,
-            excluded_count=len(excluded),
-            excluded=excluded,
-        )
-        groups.append(group)
-        description = ", ".join(f"{key}={value}" for key, value in zip(keys, identity))
+        report: dict[str, object] = dict(zip(keys, identity, strict=True))
+        report.update(retained_count=retained, excluded_count=len(excluded), excluded=excluded)
+        reports.append(report)
         if excluded:
             notices.append(
-                f"{description}: final selection excluded {len(excluded)} of {len(rows)} "
-                f"points using {decrease_policy}"
+                f"{dict(zip(keys, identity, strict=True))}: final selection excluded "
+                f"{len(excluded)} of {len(rows)} points using {decrease_policy}"
             )
-        if retained_count == 0:
+        if retained == 0:
             notices.append(
-                f"{description}: no finite concentration points remain in the final result"
+                f"{dict(zip(keys, identity, strict=True))}: no finite concentration points remain"
             )
-    return CumulativeSpectrumTable(
+    return type(spectrum)(
         data,
         history=spectrum.history
         + [
             {
                 "operation": "finalize_spectrum",
                 "decrease_policy": decrease_policy,
-                "comparison_order": "warm_to_cold",
-                "numerical_relative_tolerance": numerical_relative_tolerance,
+                "comparison_order": "point_order, or supplied observation order",
+                "numerical_relative_tolerance": 1e-9,
                 "numerical_absolute_tolerance": 0.0,
-                "groups": groups,
+                "groups": reports,
                 "warnings": notices,
             }
         ],
@@ -381,21 +408,14 @@ def _final_candidates(
 
 
 def finalize_spectrum(
-    spectrum: CumulativeSpectrumTable,
+    spectrum: SpectrumT,
     *,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = "stop_at_decrease",
-) -> CumulativeSpectrumTable:
-    """Select cumulative values nondecreasing within numerical fitting precision.
+) -> SpectrumT:
+    """Keep nondecreasing concentration in observation order, allowing fitting roundoff.
 
-    Apply this after blank subtraction and concentration-unit conversion.
-    ``stop_at_decrease`` excludes the first decrease and every colder point.
-    ``skip_decreases`` excludes points below the last retained value, allowing
-    later recovery. Each sample, run, cycle and optional measurement is handled
-    separately. Equal values remain; nonfinite values are excluded and do not
-    set the comparison baseline. A fixed relative tolerance of 1e-9 treats
-    optimizer roundoff as equality; zero absolute tolerance preserves real tiny
-    signals dropping to zero. Concentrations and errors are never modified.
-    Returned history records the numerical tolerance and every excluded point.
+    No temperature sorting, rounding, value adjustment or uncertainty reduction
+    is performed. Segment IDs retain gaps for safe later resampling.
     """
     return _final_candidates(spectrum, decrease_policy=decrease_policy).select(used_in_final=True)
 
@@ -405,66 +425,90 @@ def analyze_concentration(
     *,
     method: Literal["mle", "average"] = "mle",
     temperature_ranges_C=None,
+    combination_groups=None,
     output_basis: str = "suspension",
-    step_C: float = 0.5,
-    temperature_method: Literal["max", "latest", "window_max_count"] = "latest",
-    temperature_tolerance_C: float | None = None,
     z: float = 1.96,
     differential: bool = False,
-    blank_by_sample: dict[str, CumulativeSpectrumTable] | None = None,
+    blank_by_group: dict[str, CumulativeSpectrumTable] | None = None,
     water_blank_correction: bool = True,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = "stop_at_decrease",
+    output_step_C: float | None = None,
+    output_method: Literal["sample", "interpolate"] = "sample",
 ) -> AnalysisResult:
-    """Run the separately callable processing steps and retain all their results."""
+    """Use original observations, align only when needed, and optionally grid the result."""
     from .water_blank import analysis_experiment
 
     _validate_decrease_policy(decrease_policy)
     method = validate_combination_method(method)
-    analysis_source = analysis_experiment(
-        experiment,
-        water_blank_correction=water_blank_correction,
-    )
-    if temperature_method == "window_max_count":
-        raise ValueError(
-            "Concentration estimation does not support window_max_count: its synthetic "
-            "warm zero rows are not raw measurements; use latest or max"
-        )
     if output_basis not in UNITS:
         raise ValueError(f"Unknown output_basis {output_basis!r}")
-    if not np.isfinite(z) or z <= 0:
-        raise ValueError("z must be finite and positive")
-    source = analysis_source.counts.to_dataframe()
-    if source.empty:
-        raise ValueError("Cannot analyze an experiment with no observations")
-    fractions = frozen_fraction(
-        analysis_source,
-        step_C=step_C,
-        temperature_method=temperature_method,
-        temperature_tolerance_C=temperature_tolerance_C,
-    )
-    per_dilution = cumulative_spectrum(
-        fractions,
-        experiment=experiment,
-        temperature_ranges_C=temperature_ranges_C,
-        z=z,
-        water_blank_correction=water_blank_correction,
-    )
+    if output_method not in ("sample", "interpolate"):
+        raise ValueError("output_method must be 'sample' or 'interpolate'")
+    if output_step_C is not None and (not np.isfinite(output_step_C) or output_step_C <= 0):
+        raise ValueError("output_step_C must be finite and positive")
+    source = analysis_experiment(experiment, water_blank_correction=water_blank_correction)
+    fractions = frozen_fraction(source)
     combined = combine_dilutions(
         fractions,
+        experiment=experiment,
         method=method,
+        temperature_ranges_C=temperature_ranges_C,
+        combination_groups=combination_groups,
+        z=z,
+        water_blank_correction=water_blank_correction,
+    )
+    analysis_fractions = fractions
+    if combination_groups is not None:
+        # Explicit output groups also define which individual curves need fits.
+        # Keep the full archived fractions and experiment for inspection; only
+        # this calculation view excludes unrequested measurements and cycles.
+        resolved = combined.history[-1]["combination_groups"]
+        keys = ["measurement_id", "run_id", "cycle_id"]
+        members = {
+            tuple(str(member[key]) for key in keys)
+            for group in resolved.values() for member in group["members"]
+        }
+        blanks = {
+            (blank_id, run, cycle)
+            for measurement, run, cycle in members
+            for blank_id in experiment.water_blank_map.get(measurement, [])
+        } if water_blank_correction else set()
+        requested = members | blanks
+        frame = fractions.to_dataframe()
+        selected = [
+            tuple(row) in requested for row in frame[keys].itertuples(index=False, name=None)
+        ]
+        analysis_fractions = FrozenFractionTable(
+            frame.loc[selected],
+            history=fractions.history + [{
+                "operation": "select_combination_members",
+                "combination_group_ids": list(resolved),
+                "members": [dict(zip(keys, member, strict=True)) for member in sorted(members)],
+                "water_blank_context": [
+                    dict(zip(keys, blank, strict=True)) for blank in sorted(blanks)
+                ],
+            }],
+        )
+    individual = cumulative_spectrum(
+        analysis_fractions,
         experiment=experiment,
         temperature_ranges_C=temperature_ranges_C,
         z=z,
         water_blank_correction=water_blank_correction,
     )
-    candidates = subtract_blanks(combined, blank_by_sample) if blank_by_sample else combined
+    candidates = subtract_blanks(combined, blank_by_group) if blank_by_group else combined
     if output_basis != "suspension":
         candidates = convert_concentration(candidates, experiment.samples, basis=output_basis)
     final_candidates = _final_candidates(candidates, decrease_policy=decrease_policy)
     final = final_candidates.select(used_in_final=True)
+    sampled = (
+        resample_spectrum(final, step_C=output_step_C, method=output_method)
+        if output_step_C is not None
+        else None
+    )
     differential_result = (
         differential_spectrum(
-            fractions,
+            analysis_fractions,
             experiment=experiment,
             temperature_ranges_C=temperature_ranges_C,
             water_blank_correction=water_blank_correction,
@@ -472,33 +516,40 @@ def analyze_concentration(
         if differential
         else None
     )
-    tolerance = temperature_tolerance_C
-    if tolerance is None:
-        tolerance = {"latest": 0.0, "max": 0.05, "window_max_count": 0.01}[temperature_method]
     settings = {
         "estimation_method": method,
         "temperature_ranges_C": combined.history[-1]["temperature_ranges_C"],
+        "combination_groups": combined.history[-1]["combination_groups"],
+        "observation_processing": "native; latest warmer alignment only where required",
         "output_basis": output_basis,
-        "step_C": step_C,
-        "temperature_method": temperature_method,
-        "temperature_tolerance_C": tolerance,
+        "output_step_C": output_step_C,
+        "output_method": output_method if sampled is not None else None,
         "z": z,
         "differential": differential,
         "water_blank_correction": water_blank_correction,
-        "water_blank_model": "volume_scaled",
         "water_blank_correction_applied": water_blank_correction
         and bool(experiment.water_blank_map),
+        "water_blank_model": "volume_scaled",
         "decrease_policy": decrease_policy,
     }
+    history = final.history + (sampled.history[-1:] if sampled is not None else [])
+    warnings = list(
+        dict.fromkeys(
+            final.warnings
+            + (sampled.warnings if sampled is not None else [])
+            + (differential_result.warnings if differential_result is not None else [])
+        )
+    )
     return AnalysisResult(
-        experiment,
-        fractions,
-        per_dilution,
-        combined,
-        final,
-        differential_result,
+        experiment=experiment,
+        frozen_fraction=fractions,
+        per_dilution=individual,
+        combined=combined,
+        final=final,
+        differential=differential_result,
         final_candidates=final_candidates,
+        resampled=sampled,
         settings=settings,
-        history=final.history,
-        warnings=final.warnings,
+        history=history,
+        warnings=warnings,
     )

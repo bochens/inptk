@@ -49,11 +49,10 @@ def test_disabling_correction_keeps_raw_context_and_matches_sample_only_analysis
     source, ordinary = incomplete_blank_source
     original = source.counts.to_dataframe()
     expected = inptk.analyze_concentration(
-        ordinary, step_C=1.0, temperature_ranges_C=ranges, differential=True
+        ordinary, temperature_ranges_C=ranges, differential=True
     )
     actual = inptk.analyze_concentration(
         source,
-        step_C=1.0,
         temperature_ranges_C=ranges,
         differential=True,
         water_blank_correction=False,
@@ -80,8 +79,8 @@ def test_disabling_correction_keeps_raw_context_and_matches_sample_only_analysis
     assert restored.experiment.water_blank_map == source.water_blank_map
     pd.testing.assert_frame_equal(restored.experiment.counts.to_dataframe(), original)
     assert restored.settings["water_blank_correction"] is False
-    with pytest.raises(ValueError, match="lacks matching"):
-        inptk.analyze_concentration(source, step_C=1.0, temperature_ranges_C=ranges)
+    with pytest.raises(ValueError, match="lacks observed temperature coverage"):
+        inptk.analyze_concentration(source, temperature_ranges_C=ranges)
 
 
 @pytest.mark.parametrize(
@@ -91,8 +90,8 @@ def test_stepwise_disable_does_not_require_blank_temperature_coverage(
     incomplete_blank_source, function
 ):
     source, ordinary = incomplete_blank_source
-    fractions = inptk.frozen_fraction(source, step_C=1.0)
-    sample_fractions = inptk.frozen_fraction(ordinary, step_C=1.0)
+    fractions = inptk.frozen_fraction(source)
+    sample_fractions = inptk.frozen_fraction(ordinary)
     expected = function(sample_fractions, experiment=ordinary)
     actual = function(fractions, experiment=source, water_blank_correction=False)
     pd.testing.assert_frame_equal(actual.to_dataframe(), expected.to_dataframe())
@@ -142,8 +141,6 @@ def test_cli_can_disable_saved_raw_blank_correction_with_missing_blank_temperatu
             "--format",
             "saved",
             "--no-water-blank-correction",
-            "--step-C",
-            "1",
             "--out",
             str(tmp_path / "result.inptk"),
         ],
@@ -158,7 +155,7 @@ def test_cli_can_disable_saved_raw_blank_correction_with_missing_blank_temperatu
     )
     assert process.returncode == 0, process.stderr
     actual = inptk.load(tmp_path / "result.inptk")
-    expected = inptk.analyze_concentration(source, water_blank_correction=False, step_C=1.0)
+    expected = inptk.analyze_concentration(source, water_blank_correction=False)
     pd.testing.assert_frame_equal(actual.final.to_dataframe(), expected.final.to_dataframe())
     assert actual.experiment.water_blank_map == source.water_blank_map
     assert set(actual.experiment.counts.to_dataframe().measurement_id) == {"M", "D", "W"}
@@ -174,18 +171,20 @@ def test_water_blank_analysis_rejects_synthetic_window_rows_even_when_disabled(
     incomplete_blank_source, function, correction
 ):
     source, _ = incomplete_blank_source
-    fractions = inptk.frozen_fraction(source, temperature_method="window_max_count")
+    fractions = inptk.FrozenFractionTable(source.counts.to_dataframe(), history=[{
+        "operation": "frozen_fraction", "temperature_method": "window_max_count",
+    }])
     assert len(fractions) > 0
     with pytest.raises(ValueError, match="synthetic warm zero rows are not raw measurements"):
         function(fractions, experiment=source, water_blank_correction=correction)
 
 
 @pytest.mark.parametrize("correction", [False, True])
-def test_full_analysis_rejects_window_rows_even_when_correction_disabled(
+def test_full_analysis_no_longer_accepts_temperature_selection_options(
     incomplete_blank_source, correction
 ):
     source, _ = incomplete_blank_source
-    with pytest.raises(ValueError, match="synthetic warm zero rows are not raw measurements"):
+    with pytest.raises(TypeError, match="temperature_method"):
         inptk.analyze_concentration(
             source, temperature_method="window_max_count", water_blank_correction=correction
         )

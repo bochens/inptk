@@ -52,9 +52,13 @@ def test_cli_matches_python_and_preserves_cycle_ids(tmp_path, sample_id):
     expected = inptk.analyze_concentration(inptk.read_counts(counts, metadata=metadata))
     pd.testing.assert_frame_equal(restored.final.to_dataframe(), expected.final.to_dataframe())
     assert set(restored.final.to_dataframe().sample_id) == {sample_id}
-    assert set(restored.final.to_dataframe().cycle_id) == {"01", "02"}
-    assert restored.settings["temperature_method"] == "latest"
-    assert restored.settings["temperature_tolerance_C"] == 0
+    assert set(restored.final.to_dataframe().group_id) == {f"{sample_id}/1/01", f"{sample_id}/1/02"}
+    assert (
+        restored.settings["observation_processing"]
+        == "native; latest warmer alignment only where required"
+    )
+    assert restored.settings["output_step_C"] is None
+    assert restored.resampled is None
     assert restored.settings["decrease_policy"] == "stop_at_decrease"
     payload = json.loads((tmp_path / "result" / "analysis.json").read_text())
     assert payload["toolkit_version"] == inptk.__version__
@@ -154,11 +158,9 @@ def test_cli_selects_exact_sample_and_cycle_and_saves_selection(
     expected_selection = {"sample_id": ["007"], "cycle_id": ["01"]}
     assert result.experiment.source["selection"] == expected_selection
     assert result.experiment.counts.history[-1] == {"operation": "select", **expected_selection}
-    expected = inptk.analyze_concentration(selection_source).final.select(
-        sample_id="007", cycle_id="01"
-    )
+    expected = inptk.analyze_concentration(selection_source).final.select(group_id="007/1/01")
     pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.to_dataframe())
-    assert set(result.final.to_dataframe().cycle_id) == {"01"}
+    assert set(result.final.to_dataframe().group_id) == {"007/1/01"}
     assert set(result.final.to_dataframe().sample_id) == {"007"}
     original = inptk.load(tmp_path / "source.inptk")
     assert len(original.counts) == 27
@@ -195,7 +197,12 @@ def test_cli_repeatable_selection_keeps_requested_labels_and_deduplicates_proven
     assert set(result.experiment.samples) == {"007", "NA"}
     assert set(result.experiment.measurements) == {"Sample_0", "Sample_2"}
     assert len(result.experiment.counts) == 12
-    assert set(result.final.to_dataframe().cycle_id) == {"01", "02"}
+    assert set(result.final.to_dataframe().group_id) == {
+        "007/1/01",
+        "007/1/02",
+        "NA/1/01",
+        "NA/1/02",
+    }
     assert result.experiment.source["selection"] == {
         "sample_id": ["007", "NA"],
         "cycle_id": ["02", "01"],
@@ -245,8 +252,6 @@ def test_cli_final_decrease_policy_matches_python_and_keeps_candidates(tmp_path,
         tmp_path / "counts.csv",
         "--metadata",
         tmp_path / "metadata.csv",
-        "--step-C",
-        "1",
         "--out",
         output,
         *extra,
@@ -255,7 +260,7 @@ def test_cli_final_decrease_policy_matches_python_and_keeps_candidates(tmp_path,
     actual = inptk.load(output)
     effective_policy = policy or "stop_at_decrease"
     expected = inptk.analyze_concentration(
-        inptk.read_counts(counts, metadata=metadata), step_C=1, decrease_policy=effective_policy
+        inptk.read_counts(counts, metadata=metadata), decrease_policy=effective_policy
     )
     pd.testing.assert_frame_equal(actual.final.to_dataframe(), expected.final.to_dataframe())
     pd.testing.assert_frame_equal(

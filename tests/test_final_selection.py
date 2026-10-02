@@ -13,6 +13,8 @@ def spectrum(values, *, sample="S", cycle="1", run="R", measurement=None):
     data = pd.DataFrame({
         "run_id": run, "sample_id": sample, "cycle_id": cycle,
         "temperature_C": -5 - np.arange(len(values)),
+        "point_order": np.arange(len(values)),
+        "point_id": [f"point:{index}" for index in range(len(values))],
         "concentration": values, "lower_error": np.arange(len(values)) + 0.1,
         "upper_error": np.arange(len(values)) + 0.2,
         "unit": "INP_per_mL_suspension", "basis": "suspension",
@@ -41,7 +43,7 @@ def test_policies_distinguish_stopping_from_later_recovery(policy, temperatures)
     assert event["decrease_policy"] == policy
     first_drop = event["groups"][0]["excluded"][0]
     assert first_drop["temperature_C"] == -7
-    assert first_drop["reference_temperature_C"] == -6
+    assert first_drop["reference_point_id"] == "point:1"
     assert first_drop["reference_concentration"] == 8
 
 
@@ -51,7 +53,7 @@ def test_default_stops_at_first_decrease():
 
 
 @pytest.mark.parametrize("policy", ["stop_at_decrease", "skip_decreases"])
-def test_selection_uses_cooling_order_independently_of_input_row_order(policy):
+def test_selection_uses_explicit_observation_order_independently_of_frame_row_order(policy):
     source = spectrum([0, 8, 4, 10, 12]).to_dataframe()
     expected = inptk.finalize_spectrum(
         inptk.CumulativeSpectrumTable(source), decrease_policy=policy
@@ -119,12 +121,12 @@ def test_workflow_selects_after_blank_subtraction_and_unit_conversion(policy):
     )
     blank = spectrum([0., 1., 12., 12.], sample="blank")
     result = inptk.analyze_concentration(
-        source, step_C=1, output_basis="sampled_air",
-        blank_by_sample={"S": blank}, decrease_policy=policy,
+        source, output_basis="sampled_air",
+        blank_by_group={"S/R/1": blank}, decrease_policy=policy,
     )
     raw = result.combined.to_dataframe()
     assert np.all(np.diff(raw.concentration) > 0)
-    corrected = inptk.subtract_blanks(result.combined, {"S": blank})
+    corrected = inptk.subtract_blanks(result.combined, {"S/R/1": blank})
     converted = inptk.convert_concentration(corrected, source.samples, basis="sampled_air")
     expected = inptk.finalize_spectrum(converted, decrease_policy=policy)
     pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.to_dataframe())
@@ -133,7 +135,7 @@ def test_workflow_selects_after_blank_subtraction_and_unit_conversion(policy):
     pd.testing.assert_frame_equal(candidates[list(original.columns)], original)
     assert candidates.final_selection_status.iloc[2] == "decrease"
     assert candidates.final_selection_status.iloc[3] == (
-        "colder_than_decrease" if policy == "stop_at_decrease" else "kept"
+        "after_decrease" if policy == "stop_at_decrease" else "kept"
     )
     assert result.settings["decrease_policy"] == policy
     assert result.final.history[-1]["operation"] == "finalize_spectrum"
@@ -166,7 +168,7 @@ def test_raw_blank_contributor_change_keeps_equal_concentration_with_optimizer_r
         ],
         water_blank_map={"A": ["blank"], "B": ["blank"]},
     )
-    result = inptk.analyze_concentration(source, step_C=1, decrease_policy=policy)
+    result = inptk.analyze_concentration(source, decrease_policy=policy)
     combined = result.combined.to_dataframe()
     final = result.final.to_dataframe()
     assert len(final) == 2

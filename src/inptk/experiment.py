@@ -6,8 +6,10 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from .tables import (
+    CombinedSpectrumTable,
     CountsTable,
     CumulativeSpectrumTable,
     DifferentialSpectrumTable,
@@ -185,19 +187,50 @@ class AnalysisResult:
     experiment: Experiment
     frozen_fraction: FrozenFractionTable
     per_dilution: CumulativeSpectrumTable
-    combined: CumulativeSpectrumTable
-    final: CumulativeSpectrumTable
+    combined: CombinedSpectrumTable
+    final: CombinedSpectrumTable
     differential: DifferentialSpectrumTable | None = None
-    final_candidates: CumulativeSpectrumTable | None = None
+    final_candidates: CombinedSpectrumTable | None = None
+    resampled: CombinedSpectrumTable | None = None
     settings: dict = field(default_factory=dict)
     history: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not isinstance(self.experiment, Experiment):
+            raise TypeError("AnalysisResult experiment must be an Experiment")
+        required = {
+            "frozen_fraction": FrozenFractionTable,
+            "per_dilution": CumulativeSpectrumTable,
+            "combined": CombinedSpectrumTable,
+            "final": CombinedSpectrumTable,
+        }
+        optional = {
+            "differential": DifferentialSpectrumTable,
+            "final_candidates": CombinedSpectrumTable,
+            "resampled": CombinedSpectrumTable,
+        }
+        for name, expected in {**required, **optional}.items():
+            table = getattr(self, name)
+            if table is None and name in optional:
+                continue
+            if not isinstance(table, expected) or (
+                name == "per_dilution" and isinstance(table, CombinedSpectrumTable)
+            ):
+                raise TypeError(f"AnalysisResult {name} must be a {expected.__name__}")
 
     def save(self, path: str | Path) -> None:
         from .io import save
 
         save(self, path)
 
-    def export_csv(self, path: str | Path) -> None:
-        """Export final rows with cycle identities; refuse to overwrite a file."""
-        self.final.to_dataframe().to_csv(path, index=False, mode="x")
+    def export_csv(
+        self, path: str | Path, *, table: Literal["final", "resampled"] = "final"
+    ) -> None:
+        """Export a selected result table; existing files are never overwritten."""
+        if not isinstance(table, str) or table not in ("final", "resampled"):
+            raise ValueError("table must be 'final' or 'resampled'")
+        selected = getattr(self, table)
+        if selected is None:
+            raise ValueError("No resampled spectrum is available")
+        selected.to_dataframe().to_csv(path, index=False, mode="x")

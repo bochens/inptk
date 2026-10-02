@@ -32,6 +32,10 @@ def saved_analysis(
     basis="sampled_air",
     dilutions=(1,),
     method="mle",
+    combination_groups=None,
+    output_step_C=None,
+    temperatures=(-5, -6, -7, -8),
+    frozen_counts=(0, 8, 4, 12),
 ):
     counts, metadata = [], {}
     for sample, run, cycle in groups:
@@ -48,7 +52,7 @@ def saved_analysis(
                 "air_volume_L": 100,
                 "filter_fraction_used": 1,
             }
-            for temperature, frozen in zip((-5, -6, -7, -8), (0, 8, 4, 12), strict=True):
+            for temperature, frozen in zip(temperatures, frozen_counts, strict=True):
                 counts.append(
                     {
                         "measurement_id": measurement,
@@ -60,7 +64,12 @@ def saved_analysis(
                 )
     source = inptk.read_counts(pd.DataFrame(counts), metadata=list(metadata.values()))
     result = inptk.analyze_concentration(
-        source, output_basis=basis, decrease_policy=policy, step_C=1, method=method
+        source,
+        output_basis=basis,
+        decrease_policy=policy,
+        method=method,
+        combination_groups=combination_groups,
+        output_step_C=output_step_C,
     )
     path = tmp_path / "result.inptk"
     result.save(path)
@@ -107,29 +116,31 @@ def test_combined_points_do_not_invent_a_single_dilution_factor(tmp_path, csu):
     np.testing.assert_allclose(actual.INPS_L, result.final.to_dataframe().concentration)
 
 
-def test_multiple_groups_require_exact_sample_run_and_cycle_selection(tmp_path, csu):
+def test_multiple_groups_require_exact_group_selection(tmp_path, csu):
     path, result = saved_analysis(
         tmp_path,
         groups=(("01", "001", "01"), ("01", "001", "1"), ("01", "1", "01"), ("1", "001", "01")),
     )
     output = tmp_path / "selected.csv"
     base = [str(path), "--out", str(output), "--allow-missing-header"]
-    for selection in ([], ["--sample", "01"], ["--sample", "01", "--run", "001"]):
-        with pytest.raises(ValueError, match="Multiple saved sample/run/cycle groups"):
+    for selection in ([], ["--sample", "01"]):
+        with pytest.raises(ValueError, match="Multiple saved groups"):
             csu.main(base + selection)
         assert not output.exists()
-    assert csu.main(base + ["--sample", "01", "--run", "001", "--cycle", "01"]) == 0
+    assert csu.main(base + ["--sample", "01", "--group", "01/001/01"]) == 0
     _, actual = read_export(output)
-    expected = result.final.select(sample_id="01", run_id="001", cycle_id="01").to_dataframe()
+    expected = result.final.select(sample_id="01", group_id="01/001/01").to_dataframe()
     np.testing.assert_allclose(actual.INPS_L, expected.concentration)
     assert len(actual) == len(expected)
 
 
-@pytest.mark.parametrize("selection", [["--sample", "A "], ["--run", "R"], ["--cycle", "1"]])
+@pytest.mark.parametrize(
+    "selection", [["--sample", "A "], ["--group", "A/R1/1"], ["--group", "A/R1/01 "]]
+)
 def test_unknown_selection_is_not_inferred(tmp_path, csu, selection):
     path, _ = saved_analysis(tmp_path)
     output = tmp_path / "missing.csv"
-    with pytest.raises(ValueError, match="No saved final rows match"):
+    with pytest.raises(ValueError, match="No saved rows match"):
         csu.main([str(path), "--out", str(output), "--allow-missing-header", *selection])
     assert not output.exists()
 
@@ -151,7 +162,7 @@ def test_export_never_overwrites_existing_files_or_adds_to_saved_analysis(tmp_pa
 def test_experiment_and_suspension_result_are_not_silently_processed(tmp_path, csu):
     path, result = saved_analysis(tmp_path, basis="suspension")
     output = tmp_path / "invalid.csv"
-    with pytest.raises(ValueError, match="saved final sampled_air spectrum"):
+    with pytest.raises(ValueError, match="saved sampled_air spectrum"):
         csu.main([str(path), "--out", str(output), "--allow-missing-header"])
     experiment_path = tmp_path / "experiment.inptk"
     result.experiment.save(experiment_path)
@@ -214,3 +225,55 @@ def test_command_line_reports_actionable_export_error_without_traceback(tmp_path
     assert process.returncode == 2
     assert "run inptk analyze --output-basis sampled_air first" in process.stderr
     assert "Traceback" not in process.stderr
+
+
+def test_export_keeps_native_observation_order_and_repeated_temperatures(tmp_path, csu):
+    temperatures = (-5.1, -5.1, -4.9, -6.2)
+    path, result = saved_analysis(tmp_path, temperatures=temperatures, frozen_counts=(0, 4, 8, 12))
+    output = tmp_path / "native.csv"
+    csu.main([str(path), "--out", str(output), "--allow-missing-header"])
+    _, actual = read_export(output)
+    assert actual.degC.tolist() == list(temperatures)
+    np.testing.assert_allclose(actual.INPS_L, result.final.to_dataframe().concentration)
+
+
+def test_cross_run_group_is_exported_as_one_whole_saved_curve(tmp_path, csu):
+    path, result = saved_analysis(
+        tmp_path,
+        groups=(("A", "R1", "01"), ("A", "R2", "02")),
+        combination_groups={
+            "across": [
+                {"measurement_id": "A-R1-1", "cycle_id": "01"},
+                {"measurement_id": "A-R2-1", "cycle_id": "02"},
+            ]
+        },
+    )
+    output = tmp_path / "across.csv"
+    csu.main([str(path), "--out", str(output), "--group", "across", "--allow-missing-header"])
+    _, actual = read_export(output)
+    expected = result.final.to_dataframe()
+    assert set(expected.group_id) == {"across"}
+    assert not {"run_id", "cycle_id"} & set(expected)
+    np.testing.assert_allclose(actual.INPS_L, expected.concentration)
+
+
+def test_resampled_export_must_be_explicit_and_already_saved(tmp_path, csu):
+    path, result = saved_analysis(tmp_path, output_step_C=0.5)
+    for name, expected in (("final", result.final), ("resampled", result.resampled)):
+        output = tmp_path / f"{name}.csv"
+        args = [] if name == "final" else ["--table", "resampled"]
+        csu.main([str(path), "--out", str(output), "--allow-missing-header", *args])
+        _, actual = read_export(output)
+        assert actual.degC.tolist() == expected.to_dataframe().temperature_C.tolist()
+        np.testing.assert_allclose(actual.INPS_L, expected.to_dataframe().concentration)
+    assert len(result.resampled) > len(result.final)
+
+
+def test_export_cannot_generate_missing_resampled_data(tmp_path, csu):
+    path, _ = saved_analysis(tmp_path)
+    output = tmp_path / "missing-grid.csv"
+    with pytest.raises(ValueError, match="No saved resampled spectrum"):
+        csu.main(
+            [str(path), "--out", str(output), "--table", "resampled", "--allow-missing-header"]
+        )
+    assert not output.exists()

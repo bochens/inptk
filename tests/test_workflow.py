@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 import inptk
-from inptk import _engine as engine
+from inptk._engine.math import binomial_poisson_profile_ci_inp_per_ml
 
 
 def experiment():
@@ -43,38 +43,35 @@ def experiment():
     return inptk.read_counts(pd.DataFrame(rows), metadata=measurements)
 
 
-def test_workflow_matches_existing_mle_and_keeps_cycles_separate():
-    method = "mle"
+def test_workflow_matches_pointwise_mle_and_keeps_cycles_separate():
     source = experiment()
     original = source.counts.to_dataframe()
-    result = inptk.analyze_concentration(source, method=method, output_basis="sampled_air")
-    assert len(result.final.to_dataframe().groupby(["sample_id", "cycle_id"])) == 4
+    result = inptk.analyze_concentration(source, method="mle", output_basis="sampled_air")
+    assert result.final.to_dataframe().group_id.nunique() == 4
     assert result.frozen_fraction.to_dataframe().n_total.eq(32).all()
     assert "cycle_policy" not in inspect.signature(inptk.analyze_concentration).parameters
-    for (sample, cycle), rows in original.groupby(["sample_id", "cycle_id"]):
-        fractions = []
-        for mid, data in rows.groupby("measurement_id"):
-            measurement = source.measurements[mid]
-            old_data = data.assign(sample_id=mid, cycle=cycle)
-            metadata = engine.SampleMetadata(
-                sample_id=mid, sample_name=sample, well_volume_uL=50, dilution=measurement.dilution
+    for group_id, group in result.settings["combination_groups"].items():
+        members = group["members"]
+        assert len({member["cycle_id"] for member in members}) == 1
+        selected_rows = original[
+            original.measurement_id.isin([member["measurement_id"] for member in members])
+            & original.cycle_id.eq(members[0]["cycle_id"])
+        ]
+        expected = []
+        for _, rows in selected_rows.groupby("temperature_C", sort=False):
+            point, lower, upper = binomial_poisson_profile_ci_inp_per_ml(
+                rows.n_frozen.to_numpy(), rows.n_total.to_numpy(), 50,
+                [source.measurements[mid].dilution for mid in rows.measurement_id],
+                confidence_drop=1.96**2 / 2,
             )
-            old_counts = engine.CountsTable.from_dataframe(old_data, metadata=metadata)
-            fractions.append(
-                engine.fraction_frozen(old_counts, method="latest", temperature_tolerance_C=0)
-            )
-        combine = engine.cumulative_spec_mle
-        options = {"confidence_drop": 1.96**2 / 2} if method == "mle" else {}
-        expected = combine(
-            fractions, sample_group_by={m: sample for m in rows.measurement_id.unique()}, **options
-        ).to_dataframe()
-        candidate = result.final_candidates.select(sample_id=sample, cycle_id=cycle).to_dataframe()
-        np.testing.assert_allclose(candidate.concentration, expected.value * 0.05, equal_nan=True)
-        np.testing.assert_allclose(candidate.lower_error, expected.lower_ci * 0.05, equal_nan=True)
-        selected = inptk.finalize_spectrum(
-            result.final_candidates.select(sample_id=sample, cycle_id=cycle)
+            expected.append([point, point - lower, upper - point])
+        candidate = result.final_candidates.select(group_id=group_id).to_dataframe()
+        np.testing.assert_allclose(
+            candidate[["concentration", "lower_error", "upper_error"]],
+            np.array(expected) * 0.05, rtol=1e-8, atol=1e-9,
         )
-        actual = result.final.select(sample_id=sample, cycle_id=cycle)
+        selected = inptk.finalize_spectrum(result.final_candidates.select(group_id=group_id))
+        actual = result.final.select(group_id=group_id)
         pd.testing.assert_frame_equal(actual.to_dataframe(), selected.to_dataframe())
     pd.testing.assert_frame_equal(original, source.counts.to_dataframe())
 
@@ -96,7 +93,7 @@ def test_results_roundtrip_and_selection_do_not_change_source(tmp_path):
         )
     assert restored.experiment.samples == result.experiment.samples
     assert restored.settings == result.settings
-    frame = result.final.select(sample_id="001", cycle_id=["01", "02"]).to_dataframe()
+    frame = result.final.select(sample_id="001").to_dataframe()
     frame.loc[:, "concentration"] = -5
     assert not result.final.to_dataframe().concentration.eq(-5).any()
     with pytest.raises(FileExistsError):
@@ -122,7 +119,9 @@ def test_independent_runs_with_same_cycle_labels_are_not_combined():
         [rows.assign(run_id=run, measurement_id=run + rows.measurement_id) for run in ("R1", "R2")]
     )
     result = inptk.analyze_concentration(inptk.read_counts(both, metadata=metadata))
-    assert len(result.final.to_dataframe().groupby(["run_id", "sample_id", "cycle_id"])) == 8
+    assert result.final.to_dataframe().group_id.nunique() == 8
+    for group in result.settings["combination_groups"].values():
+        assert len({(member["run_id"], member["cycle_id"]) for member in group["members"]}) == 1
 
 
 def test_invalid_counts_and_second_conversion_are_rejected():
@@ -136,17 +135,21 @@ def test_invalid_counts_and_second_conversion_are_rejected():
         inptk.convert_concentration(result.final, source.samples, basis="sampled_air")
 
 
-def test_explicit_blank_mapping_preserves_status_and_missing_cycles_fail():
+def test_explicit_group_blank_mapping_preserves_status_and_requires_temperature_coverage():
     source = experiment()
     base = inptk.analyze_concentration(source)
-    background = base.combined.select(sample_id="001").to_dataframe()
-    background["sample_id"] = "blank"
-    background["concentration"] = 0.1
-    background["lower_error"] = 0.01
-    background["upper_error"] = 0.02
-    background["is_extrapolated"] = True
-    blank = inptk.CumulativeSpectrumTable(background)
-    corrected = inptk.analyze_concentration(source, blank_by_sample={"001": blank})
+    blank_map = {}
+    for cycle in ("01", "02"):
+        background = base.per_dilution.select(
+            measurement_id="001_neat", cycle_id=cycle
+        ).to_dataframe()
+        background["sample_id"] = "blank"
+        background["concentration"] = 0.1
+        background["lower_error"] = 0.01
+        background["upper_error"] = 0.02
+        background["is_extrapolated"] = True
+        blank_map[f"001/1/{cycle}"] = inptk.CumulativeSpectrumTable(background)
+    corrected = inptk.analyze_concentration(source, blank_by_group=blank_map)
     selected = corrected.final.select(sample_id="001").to_dataframe()
     assert selected.is_extrapolated.all()
     assert selected.correction_state.eq("blank_corrected").all()
@@ -154,14 +157,12 @@ def test_explicit_blank_mapping_preserves_status_and_missing_cycles_fail():
         selected.concentration,
         base.final.select(sample_id="001").to_dataframe().concentration - 0.1,
     )
-    assert (
-        corrected.final.select(sample_id="B")
-        .to_dataframe()
-        .correction_state.eq("uncorrected")
-        .all()
-    )
+    assert corrected.final.select(sample_id="B").to_dataframe().correction_state.eq(
+        "uncorrected"
+    ).all()
+    blank_map["001/1/01"] = blank_map["001/1/01"].select(temperature_C=[-5, -6, -7])
     with pytest.raises(ValueError, match="does not cover"):
-        inptk.analyze_concentration(source, blank_by_sample={"001": blank.select(cycle_id="01")})
+        inptk.analyze_concentration(source, blank_by_group=blank_map)
 
 
 def test_icescopy_import_requires_explicit_parent_mapping():
@@ -184,7 +185,7 @@ def test_icescopy_import_requires_explicit_parent_mapping():
     )
     assert set(imported.samples) == {"A"}
     assert set(imported.counts.to_dataframe().cycle_id) == {"1", "2"}
-    assert len(inptk.analyze_concentration(imported).final.to_dataframe().groupby("cycle_id")) == 2
+    assert len(inptk.analyze_concentration(imported).final.to_dataframe().groupby("group_id")) == 2
 
 
 def test_icescopy_file_preserves_labels_without_inventing_elapsed_seconds(tmp_path):
@@ -201,7 +202,7 @@ def test_icescopy_file_preserves_labels_without_inventing_elapsed_seconds(tmp_pa
     result = inptk.read_icescopy(source, sample_map={"A_neat": "A", "A_diluted": "A"})
     assert set(result.counts.to_dataframe().cycle_id) == {"01", "02"}
     assert "time_s" not in result.counts.columns
-    assert len(inptk.analyze_concentration(result).final.to_dataframe().groupby("cycle_id")) == 2
+    assert len(inptk.analyze_concentration(result).final.to_dataframe().groupby("group_id")) == 2
 
 
 def test_supplied_invalid_timestamps_are_not_replaced_with_row_numbers():
@@ -300,7 +301,7 @@ def test_icescopy_metadata_rejects_unknown_measurement_names():
         (
             "stop_at_decrease",
             [True, True, False, False, False],
-            ["kept", "kept", "decrease", "colder_than_decrease", "colder_than_decrease"],
+            ["kept", "kept", "decrease", "after_decrease", "after_decrease"],
         ),
         (
             "skip_decreases",
@@ -335,7 +336,7 @@ def test_roundtrip_retains_discarded_final_values_and_uncertainty(tmp_path, poli
         ],
     )
     result = inptk.analyze_concentration(
-        source, step_C=1, output_basis="sampled_air", decrease_policy=policy
+        source, output_basis="sampled_air", decrease_policy=policy
     )
     result.save(tmp_path / "result.inptk")
     restored = inptk.load(tmp_path / "result.inptk")

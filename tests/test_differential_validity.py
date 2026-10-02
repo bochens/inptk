@@ -22,7 +22,7 @@ def experiment(*, temperatures=(-5, -6, -7), totals=(32, 32, 32), frozen=(0, 8, 
 
 def test_regular_differential_matches_original_fixed_total_count_formula():
     source = experiment()
-    fractions = inptk.frozen_fraction(source, step_C=1)
+    fractions = inptk.frozen_fraction(source)
     result = inptk.differential_spectrum(fractions, experiment=source).to_dataframe()
     expected = -np.log(np.array([24 / 32, 16 / 24])) / 0.05
     np.testing.assert_allclose(result.concentration, expected)
@@ -37,7 +37,7 @@ def test_regular_differential_matches_original_fixed_total_count_formula():
 )
 def test_changing_corrected_totals_use_each_states_fraction(totals, frozen):
     source = experiment(totals=totals, frozen=frozen)
-    fractions = inptk.frozen_fraction(source, step_C=1)
+    fractions = inptk.frozen_fraction(source)
     result = inptk.differential_spectrum(fractions, experiment=source).to_dataframe()
     concentrations = -np.log1p(-np.array(frozen) / np.array(totals)) / 0.05
     np.testing.assert_allclose(result.concentration, np.diff(concentrations))
@@ -46,7 +46,7 @@ def test_changing_corrected_totals_use_each_states_fraction(totals, frozen):
 
 def test_initial_frozen_count_does_not_invent_a_warm_zero_baseline():
     source = experiment(frozen=(1, 8, 16))
-    fractions = inptk.frozen_fraction(source, step_C=1)
+    fractions = inptk.frozen_fraction(source)
     result = inptk.differential_spectrum(fractions, experiment=source).to_dataframe()
     assert len(result) == 2
     assert result.temperature_bin_right_C.max() == -5
@@ -69,10 +69,9 @@ def test_irregular_observations_use_actual_adjacent_interval_edges():
 
 def test_saturated_intervals_are_flagged_without_clipping():
     source = experiment(frozen=(0, 32, 32))
-    fractions = inptk.frozen_fraction(source, step_C=1)
+    fractions = inptk.frozen_fraction(source)
     result = inptk.differential_spectrum(fractions, experiment=source).to_dataframe()
-    assert np.isinf(result.concentration.iloc[0])
-    assert np.isnan(result.concentration.iloc[1])
+    assert result.concentration.isna().all()
     assert (result.qc_flag & 1).eq(1).all()
 
 

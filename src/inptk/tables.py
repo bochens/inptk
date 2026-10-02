@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 IDENTITY_COLUMNS = ("run_id", "sample_id", "cycle_id")
+IDENTIFIER_COLUMNS = (*IDENTITY_COLUMNS, "measurement_id", "observation_id", "group_id", "point_id")
 UNITS = {
     "suspension": "INP_per_mL_suspension",
     "sampled_air": "INP_per_L_air",
@@ -26,7 +27,7 @@ class ScientificTable:
         missing = set(self.required) - set(frame.columns)
         if missing:
             raise ValueError(f"{type(self).__name__} is missing columns: {sorted(missing)}")
-        for name in (*IDENTITY_COLUMNS, "measurement_id"):
+        for name in IDENTIFIER_COLUMNS:
             if name in frame:
                 if frame[name].isna().any() or frame[name].astype(str).str.strip().eq("").any():
                     raise ValueError(f"{name} must contain non-empty identifiers")
@@ -67,7 +68,7 @@ class ScientificTable:
             if column not in frame:
                 raise KeyError(f"Unknown column {column!r}")
             selected = list(values) if isinstance(values, (list, tuple, set)) else [values]
-            if column in (*IDENTITY_COLUMNS, "measurement_id"):
+            if column in IDENTIFIER_COLUMNS:
                 selected = [str(value) for value in selected]
             frame = frame[frame[column].isin(selected)]
         return type(self)(frame, history=self.history)
@@ -82,6 +83,13 @@ class CountsTable(ScientificTable):
     required = ScientificTable.required + ("measurement_id", "n_total", "n_frozen")
 
     def _validate(self, frame: pd.DataFrame) -> None:
+        observation_keys = ["measurement_id", "run_id", "cycle_id"]
+        if "observation_id" not in frame:
+            frame["observation_id"] = (
+                frame.groupby(observation_keys, sort=False).cumcount().astype(str)
+            )
+        if frame.duplicated([*observation_keys, "observation_id"]).any():
+            raise ValueError("Observation IDs must be unique within each measurement/run/cycle")
         for column in ("n_total", "n_frozen"):
             frame[column] = pd.to_numeric(frame[column], errors="raise")
             if not np.isfinite(frame[column]).all():
@@ -97,14 +105,11 @@ class CountsTable(ScientificTable):
 
 
 class FrozenFractionTable(CountsTable):
-    """Counts evaluated at temperature thresholds, with a derived frozen fraction."""
+    """Observed counts with frozen fractions; repeated temperatures remain separate."""
 
     def _validate(self, frame: pd.DataFrame) -> None:
         super()._validate(frame)
         frame["fraction_frozen"] = frame.n_frozen / frame.n_total
-        keys = [*IDENTITY_COLUMNS, "measurement_id", "temperature_C"]
-        if frame.duplicated(keys).any():
-            raise ValueError("Frozen fractions require one row per measurement/cycle/temperature")
 
 
 class CumulativeSpectrumTable(ScientificTable):
@@ -126,15 +131,41 @@ class CumulativeSpectrumTable(ScientificTable):
             raise ValueError("Concentration unit does not match its basis")
         if frame.basis.nunique() > 1:
             raise ValueError("A spectrum table must use one concentration basis")
-        keys = [*IDENTITY_COLUMNS, "temperature_C"]
-        if "measurement_id" in frame:
-            keys.append("measurement_id")
-        if frame.duplicated(keys).any():
-            raise ValueError("A spectrum requires unique identity/temperature rows")
+        if frame.duplicated(self._row_keys(frame)).any():
+            raise ValueError("A spectrum requires unique identity/point rows")
         if "is_extrapolated" not in frame:
             frame["is_extrapolated"] = False
         if "correction_state" not in frame:
             frame["correction_state"] = "uncorrected"
+
+    def _row_keys(self, frame: pd.DataFrame) -> list[str]:
+        keys = list(IDENTITY_COLUMNS)
+        if "measurement_id" in frame:
+            keys.append("measurement_id")
+        keys.append("point_id" if "point_id" in frame else "temperature_C")
+        return keys
+
+
+class CombinedSpectrumTable(CumulativeSpectrumTable):
+    """Concentrations for explicit groups, with no invented physical run or cycle."""
+
+    required = (
+        "sample_id",
+        "group_id",
+        "point_id",
+        "temperature_C",
+        "concentration",
+        "unit",
+        "basis",
+    )
+
+    def _row_keys(self, frame: pd.DataFrame) -> list[str]:
+        return ["group_id", "point_id"]
+
+    def _validate(self, frame: pd.DataFrame) -> None:
+        super()._validate(frame)
+        if frame.groupby("group_id", sort=False).sample_id.nunique().gt(1).any():
+            raise ValueError("Each combined group must refer to exactly one parent sample")
 
 
 class DifferentialSpectrumTable(ScientificTable):

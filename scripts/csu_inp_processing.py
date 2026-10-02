@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export one saved, final INP-toolkit spectrum in CSU INPs_L CSV format.
+"""Export one saved INP-toolkit result group in CSU INPs_L CSV format.
 
 Run ``inptk analyze --output-basis sampled_air`` first. This script does not
 calculate, combine, normalize or select concentration points. CSU lower_CI and
@@ -47,10 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out", required=True, help="New CSU CSV path; existing files are never replaced"
     )
-    for name in ("sample", "run", "cycle"):
+    for name in ("sample", "group"):
         parser.add_argument(
             f"--{name}", help=f"Exact saved {name}_id; required when selection is ambiguous"
         )
+    parser.add_argument("--table", choices=("final", "resampled"), default="final")
     parser.add_argument(
         "--header",
         action="append",
@@ -66,29 +67,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_final(result: AnalysisResult, args: argparse.Namespace) -> pd.DataFrame:
-    frame = result.final.to_dataframe()
-    for name in ("sample", "run", "cycle"):
+def _select_result(result: AnalysisResult, args: argparse.Namespace) -> pd.DataFrame:
+    table = getattr(result, args.table)
+    if table is None:
+        raise ValueError("No saved resampled spectrum is available")
+    frame = table.to_dataframe()
+    for name in ("sample", "group"):
         requested = getattr(args, name)
         if requested is not None:
             frame = frame.loc[frame[f"{name}_id"].eq(requested)]
     if frame.empty:
-        raise ValueError("No saved final rows match the requested sample/run/cycle selection")
-    groups = frame[["sample_id", "run_id", "cycle_id"]].drop_duplicates()
+        raise ValueError("No saved rows match the requested sample/group selection")
+    groups = frame[["sample_id", "group_id"]].drop_duplicates()
     if len(groups) != 1:
         raise ValueError(
-            "Multiple saved sample/run/cycle groups remain. Select exact IDs with "
-            f"--sample, --run and --cycle. Available groups: {groups.to_dict('records')}"
+            "Multiple saved groups remain. Select an exact ID with --group. "
+            f"Available groups: {groups.to_dict('records')}"
         )
     if not frame.unit.eq("INP_per_L_air").all() or not frame.basis.eq("sampled_air").all():
         raise ValueError(
-            "CSU INPs_L export requires a saved final sampled_air spectrum in INP_per_L_air; "
+            "CSU INPs_L export requires a saved sampled_air spectrum in INP_per_L_air; "
             "run inptk analyze --output-basis sampled_air first"
         )
     if not np.isfinite(frame.concentration.to_numpy(dtype=float)).all():
-        raise ValueError("Saved final concentrations must be finite for CSU export")
+        raise ValueError("Saved concentrations must be finite for CSU export")
     if not {"lower_error", "upper_error"}.issubset(frame.columns):
-        raise ValueError("Saved final spectrum must include lower_error and upper_error widths")
+        raise ValueError("Saved spectrum must include lower_error and upper_error widths")
     return frame.reset_index(drop=True)
 
 
@@ -151,7 +155,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = load(args.input)
     if not isinstance(result, AnalysisResult):
         raise TypeError("Input must be a saved AnalysisResult; run inptk analyze first")
-    frame = _select_final(result, args)
+    frame = _select_result(result, args)
     header = _csu_header(
         result,
         frame,
@@ -177,8 +181,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     with output.open("x", encoding="utf-8", newline="") as handle:
         handle.write(payload)
     print(
-        f"Exported sample {frame.sample_id.iloc[0]!r}, run {frame.run_id.iloc[0]!r}, "
-        f"cycle {frame.cycle_id.iloc[0]!r} to {output}"
+        f"Exported {args.table} group {frame.group_id.iloc[0]!r} "
+        f"for sample {frame.sample_id.iloc[0]!r} to {output}"
     )
     return 0
 

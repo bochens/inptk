@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import __version__, analyze_concentration, load, read_counts, read_icescopy
-from .experiment import Experiment
+from .experiment import AnalysisResult, Experiment
 from .tables import CountsTable
 
 
@@ -18,11 +18,19 @@ def build_parser():
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     analyze = commands.add_parser(
-        "analyze", help="Combine dilutions into a spectrum for each sample and cycle"
+        "analyze", help="Combine original observations into explicit sample groups"
     )
     analyze.add_argument("input")
     analyze.add_argument("--metadata", help="Native metadata or Icescopy metadata overrides")
-    analyze.add_argument("--format", choices=("native", "icescopy", "saved"), default="native")
+    analyze.add_argument(
+        "--format",
+        choices=("native", "icescopy", "saved"),
+        default="native",
+        help=(
+            "Saved analyses reuse original observations; processing settings use "
+            "this command's arguments, not prior settings"
+        ),
+    )
     analyze.add_argument(
         "--sample-map", help="JSON file mapping Icescopy measurement names to parent samples"
     )
@@ -58,9 +66,16 @@ def build_parser():
     analyze.add_argument(
         "--output-basis", choices=("suspension", "sampled_air", "dry_soil"), default="suspension"
     )
-    analyze.add_argument("--step-C", type=float, default=0.5)
-    analyze.add_argument("--temperature-method", choices=("max", "latest"), default="latest")
-    analyze.add_argument("--temperature-tolerance-C", type=float)
+    analyze.add_argument(
+        "--combination-groups",
+        help="JSON object or file mapping group IDs to lists of measurement_id/cycle_id members",
+    )
+    analyze.add_argument(
+        "--output-step-C",
+        type=float,
+        help="Optional temperature spacing applied only to the final result",
+    )
+    analyze.add_argument("--output-method", choices=("sample", "interpolate"), default="sample")
     analyze.add_argument("--z", type=float, default=1.96)
     analyze.add_argument("--differential", action="store_true")
     analyze.add_argument(
@@ -74,6 +89,7 @@ def build_parser():
     )
     export.add_argument("input")
     export.add_argument("--out", required=True)
+    export.add_argument("--table", choices=("final", "resampled"), default="final")
     return parser
 
 
@@ -130,21 +146,30 @@ def _select_experiment(experiment, sample_ids, cycle_ids):
     )
 
 
+def _json_object(value, option):
+    if value is None:
+        return None
+    payload = value
+    if not payload.lstrip().startswith(("{", "[")):
+        payload = Path(payload).read_text(encoding="utf-8")
+    result = json.loads(payload)
+    if not isinstance(result, dict):
+        raise TypeError(f"{option} must contain a JSON object")
+    return result
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "export-csv":
-            load(args.input).export_csv(args.out)
+            result = load(args.input)
+            if not isinstance(result, AnalysisResult):
+                raise TypeError("CSV export requires a saved AnalysisResult")
+            result.export_csv(args.out, table=args.table)
             return 0
-        temperature_ranges = None
-        if args.temperature_ranges is not None:
-            payload = args.temperature_ranges
-            if not payload.lstrip().startswith(("{", "[")):
-                payload = Path(payload).read_text(encoding="utf-8")
-            temperature_ranges = json.loads(payload)
-            if not isinstance(temperature_ranges, dict):
-                raise ValueError("--temperature-ranges must contain a JSON object")
+        temperature_ranges = _json_object(args.temperature_ranges, "--temperature-ranges")
+        combination_groups = _json_object(args.combination_groups, "--combination-groups")
         if args.format == "native":
             if args.sample_map:
                 raise ValueError("--sample-map applies only to Icescopy input")
@@ -182,17 +207,17 @@ def main(argv=None):
             if args.metadata or args.sample_map:
                 raise ValueError("Saved input already contains its metadata and sample mapping")
             experiment = load(args.input)
-            if hasattr(experiment, "experiment"):
+            if isinstance(experiment, AnalysisResult):
                 experiment = experiment.experiment
         experiment = _select_experiment(experiment, args.sample, args.cycle)
         result = analyze_concentration(
             experiment,
             method=args.method,
             temperature_ranges_C=temperature_ranges,
+            combination_groups=combination_groups,
             output_basis=args.output_basis,
-            step_C=args.step_C,
-            temperature_method=args.temperature_method,
-            temperature_tolerance_C=args.temperature_tolerance_C,
+            output_step_C=args.output_step_C,
+            output_method=args.output_method,
             z=args.z,
             differential=args.differential,
             water_blank_correction=not args.no_water_blank_correction,

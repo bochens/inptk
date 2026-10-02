@@ -27,6 +27,6 @@ metadata = pd.DataFrame(
 experiment = inptk.read_counts(pd.DataFrame(observations), metadata=metadata)
 result = inptk.analyze_concentration(experiment)
 
-print(result.final.select(sample_id="A", cycle_id="1").to_dataframe())
+print(result.final.select(group_id="A/1/1").to_dataframe())
 # When ready to save, choose a new destination:
 # result.save("analysis.inptk")

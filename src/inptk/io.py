@@ -11,19 +11,21 @@ import pandas as pd
 
 from .experiment import AnalysisResult, Experiment, MeasurementMetadata, SampleMetadata
 from .tables import (
+    CombinedSpectrumTable,
     CountsTable,
     CumulativeSpectrumTable,
     DifferentialSpectrumTable,
     FrozenFractionTable,
 )
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 TABLE_TYPES = {
     cls.__name__: cls
     for cls in (
         CountsTable,
         FrozenFractionTable,
         CumulativeSpectrumTable,
+        CombinedSpectrumTable,
         DifferentialSpectrumTable,
     )
 }
@@ -104,6 +106,7 @@ def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
                     "final",
                     "differential",
                     "final_candidates",
+                    "resampled",
                 )
                 if getattr(value, name) is not None
             },

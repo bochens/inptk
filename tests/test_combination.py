@@ -42,7 +42,7 @@ def test_one_workflow_handles_single_overlap_and_gaps_with_explicit_sources(meth
     )
     ranges = {"A": {"min_C": -6}, "B": {"min_C": -6, "max_C": -6}}
     result = inptk.analyze_concentration(
-        source, step_C=1, method=method, temperature_ranges_C=ranges
+        source, method=method, temperature_ranges_C=ranges
     )
     combined = result.combined.to_dataframe().sort_values("temperature_C", ascending=False)
     assert combined.contributor_count.tolist() == [1, 2, 0]
@@ -58,7 +58,7 @@ def test_one_workflow_handles_single_overlap_and_gaps_with_explicit_sources(meth
     assert excluded.concentration.isna().all()
     assert excluded.n_total.eq(32).all()
     assert len(result.frozen_fraction) == 6
-    fractions = inptk.frozen_fraction(source, step_C=1)
+    fractions = inptk.frozen_fraction(source)
     stepwise = inptk.combine_dilutions(
         fractions, experiment=source, method=method, temperature_ranges_C=ranges
     )
@@ -90,7 +90,7 @@ def test_equal_exposure_contributor_change_does_not_create_a_false_decrease():
     source = observations([("A", 32, [1, 1], 1, 50), ("B", 32, [1, 1], 2, 100)], (-5, -6))
     for method in ("mle", "average"):
         result = inptk.analyze_concentration(
-            source, method=method, step_C=1, temperature_ranges_C={"B": {"max_C": -6}}
+            source, method=method, temperature_ranges_C={"B": {"max_C": -6}}
         )
         assert len(result.final) == 2
         assert result.final.to_dataframe().concentration.nunique() == 1
@@ -115,9 +115,8 @@ def test_filter_blank_does_not_require_coverage_at_excluded_temperatures():
     )
     result = inptk.analyze_concentration(
         source,
-        step_C=1,
         temperature_ranges_C={"A": {"min_C": -6, "max_C": -6}},
-        blank_by_sample={"S": blank},
+        blank_by_group={"S/R/01": blank},
     )
     assert result.final.to_dataframe().temperature_C.tolist() == [-6]
     assert result.final_candidates.to_dataframe().concentration.isna().sum() == 2

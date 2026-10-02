@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal, cast
+import json
 
 import numpy as np
 import pandas as pd
 
-from . import _engine as engine
-from ._engine.water_blank_math import fit_concentration
+from .alignment import align_observations
 from .experiment import Experiment
 from .methods import validate_temperature_ranges
 from .tables import (
@@ -72,7 +71,7 @@ def prepare_fraction_analysis(
     ):
         raise ValueError(
             "Concentration estimation does not support window_max_count: its synthetic "
-            "warm zero rows are not raw measurements; use latest or max"
+            "warm zero rows are not raw measurements; use original observed counts"
         )
     if view is not experiment:
         rows = sample_rows(fractions.to_dataframe(), experiment)
@@ -82,80 +81,26 @@ def prepare_fraction_analysis(
     return fractions, view
 
 
-def frozen_fraction(
-    source: Experiment | CountsTable,
-    *,
-    step_C: float = 0.5,
-    temperature_method: Literal["max", "latest", "window_max_count"] = "latest",
-    temperature_tolerance_C: float | None = None,
-) -> FrozenFractionTable:
-    """Evaluate frozen fractions at temperature thresholds using counts alone.
+def frozen_fraction(source: Experiment | CountsTable) -> FrozenFractionTable:
+    """Add frozen fraction to each original observation without selecting temperatures.
 
-    Dilution and droplet-volume metadata are unnecessary for this step. Every
-    measurement and freezing cycle is reduced separately, using its cooling phase.
-
-    ``max`` selects the highest frozen fraction among observations at or warmer
-    than each target (allowing the tolerance). ``latest`` selects the last such
-    observation. ``window_max_count`` selects the highest frozen count within
-    the temperature tolerance window; if empty, it uses the highest count on
-    the warmer side. The selected frozen and total counts remain paired.
-
-    ``window_max_count`` also retains a first-freeze row rounded to 0.1 C and
-    four warmer zero rows. It adapts original OLAF's table-construction rule.
-    Default selection is ``latest`` with zero tolerance. ``max`` defaults to
-    0.05 C tolerance; ``window_max_count`` defaults to 0.01 C.
+    Counts, measured temperatures, observation identities, times and row order
+    remain unchanged. Repeated temperatures and warming observations remain
+    available. Dilution and droplet-volume metadata are unnecessary for this step.
     """
     counts = source.counts if isinstance(source, Experiment) else source
     if not isinstance(counts, CountsTable):
         raise TypeError("source must be an Experiment or CountsTable")
-    if temperature_method not in ("max", "latest", "window_max_count"):
-        raise ValueError("temperature_method must be max, latest, or window_max_count")
-    if not np.isfinite(step_C) or step_C <= 0:
-        raise ValueError("step_C must be finite and positive")
-    tolerance = temperature_tolerance_C
-    if tolerance is None:
-        tolerance = {"latest": 0.0, "max": 0.05, "window_max_count": 0.01}[temperature_method]
-    if not np.isfinite(tolerance) or tolerance < 0:
-        raise ValueError("temperature_tolerance_C must be finite and nonnegative")
-    source_frame = counts.to_dataframe()
-    if source_frame.empty:
+    frame = counts.to_dataframe()
+    if frame.empty:
         raise ValueError("Cannot calculate frozen fractions from an empty counts table")
-    frames = []
-    for (run_id, sample_id, cycle_id, measurement_id), rows in source_frame.groupby(
-        ["run_id", "sample_id", "cycle_id", "measurement_id"], sort=False
-    ):
-        identity = {
-            "run_id": str(run_id),
-            "sample_id": str(sample_id),
-            "cycle_id": str(cycle_id),
-            "measurement_id": str(measurement_id),
-        }
-        raw = engine.CountsTable.from_dataframe(
-            rows.assign(sample_id=str(measurement_id), cycle=str(cycle_id))
-        )
-        reduced = cast(
-            engine.TemperatureFrozenFractionTable,
-            engine.fraction_frozen(
-                raw,
-                step_C=step_C,
-                method=temperature_method,
-                temperature_tolerance_C=tolerance,
-                cooling_only=True,
-            ),
-        )
-        frames.append(reduced.to_dataframe().assign(**identity))
     return FrozenFractionTable(
-        pd.concat(frames, ignore_index=True),
-        history=counts.history
-        + [
-            {
-                "operation": "frozen_fraction",
-                "step_C": float(step_C),
-                "temperature_method": temperature_method,
-                "temperature_tolerance_C": float(tolerance),
-                "cooling_only": True,
-            }
-        ],
+        frame,
+        history=counts.history + [{
+            "operation": "frozen_fraction",
+            "temperature_source": "original_observations",
+            "observation_selection": "none",
+        }],
     )
 
 
@@ -167,21 +112,20 @@ def cumulative_spectrum(
     z: float = 1.96,
     water_blank_correction: bool = True,
 ) -> CumulativeSpectrumTable:
-    """Calculate each measurement with the same count model used for combination.
+    """Estimate each measurement at its original observed temperatures.
 
-    Outside-range rows retain their observed counts but have no concentration
-    estimate. Matching blank observations are required only for eligible rows.
+    Original counts, times and observation identities remain in the output.
+    Ranges are inclusive and apply before alignment. Outside-range rows have
+    no concentration estimate and do not require a matching water blank.
+    Blanks use matching acquisition rows when possible; otherwise they use the
+    latest observed state at or warmer than the target, within observed support.
     """
-    import json
-
-    from .water_blank import fit_raw_rows, pooled_blank, sample_rows
+    from .water_blank import estimate_point, sample_rows
 
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
     fractions, experiment = prepare_fraction_analysis(
-        fractions,
-        experiment,
-        water_blank_correction=water_blank_correction,
+        fractions, experiment, water_blank_correction=water_blank_correction,
     )
     frame = fractions.to_dataframe()
     source = sample_rows(frame, experiment)
@@ -192,80 +136,102 @@ def cumulative_spectrum(
     if source.empty:
         raise ValueError("No sample observations are available for concentration calculation")
     records = []
-    for position in range(len(source)):
-        selected = source.iloc[[position]]
-        row = selected.iloc[0].to_dict()
-        measurement = str(row["measurement_id"])
-        metadata = experiment.measurements[measurement]
-        limits = ranges.get(measurement, {})
-        minimum, maximum = limits.get("min_C"), limits.get("max_C")
-        temperature = float(row["temperature_C"])
-        eligible = (minimum is None or temperature >= minimum) and (
-            maximum is None or temperature <= maximum
-        )
-        row.update(
-            concentration=np.nan,
-            lower_error=np.nan,
-            upper_error=np.nan,
-            unit="INP_per_mL_suspension",
-            basis="suspension",
-            qc_flag=1,
-            dilution_fold=metadata.dilution,
-            selection_status="selected" if eligible else "outside_temperature_range",
-            uncertainty_method="joint_sample_water_blank_profile_likelihood"
-            if experiment.water_blank_map
-            else "binomial_Poisson_profile_likelihood",
-            correction_state="water_blank_corrected"
-            if experiment.water_blank_map
-            else "uncorrected",
-        )
-        if experiment.water_blank_map:
-            row["water_blank_ids"] = json.dumps(sorted(experiment.water_blank_map[measurement]))
-        if eligible:
-            if experiment.water_blank_map:
-                fit = fit_raw_rows(selected, frame, experiment, confidence_drop=z**2 / 2)
-                blank = (
-                    pooled_blank(selected, frame, experiment.water_blank_map[measurement])
-                    .iloc[0]
-                    .to_dict()
-                )
-                row.update(blank_n_frozen=blank["n_frozen"], blank_n_total=blank["n_total"])
-            else:
-                fit = fit_concentration(
-                    row["n_frozen"],
-                    row["n_total"],
-                    metadata.dilution,
-                    metadata.droplet_volume_uL,
-                    confidence_drop=z**2 / 2,
-                )
-            row.update(
-                concentration=fit[0],
-                lower_error=fit[1],
-                upper_error=fit[2],
-                qc_flag=0 if fit[3] else 1,
+    cache: dict[tuple, tuple[float, float, float, bool]] = {}
+    drop = z**2 / 2
+
+    def count_state(rows: pd.DataFrame) -> tuple:
+        return tuple(sorted(
+            (str(measurement), str(run), str(cycle), float(frozen), float(total))
+            for measurement, run, cycle, frozen, total in zip(
+                rows.measurement_id, rows.run_id, rows.cycle_id,
+                rows.n_frozen.to_numpy(dtype=float), rows.n_total.to_numpy(dtype=float),
             )
-        row["at_zero_boundary"] = row["concentration"] == 0
-        records.append(row)
+        ))
+
+    for (measurement, run, cycle), rows in source.groupby(
+        ["measurement_id", "run_id", "cycle_id"], sort=False
+    ):
+        measurement = str(measurement)
+        metadata = experiment.measurements[measurement]
+        ordered = rows.sort_values("time_s", kind="stable") if "time_s" in rows else rows
+        ordered = ordered.reset_index(drop=True)
+        points = align_observations(
+            frame,
+            [{"measurement_id": measurement, "run_id": str(run), "cycle_id": str(cycle)}],
+            water_blank_map=experiment.water_blank_map,
+            temperature_ranges_C=ranges,
+        )
+        for point in points:
+            row = ordered.iloc[point.point_order].to_dict()
+            eligible = not point.samples.empty
+            row.update(
+                point_id=point.point_id,
+                point_order=point.point_order,
+                observed_temperature_C=float(row["temperature_C"]),
+                alignment=point.alignment,
+                concentration=np.nan,
+                lower_error=np.nan,
+                upper_error=np.nan,
+                unit="INP_per_mL_suspension",
+                basis="suspension",
+                qc_flag=1,
+                dilution_fold=metadata.dilution,
+                selection_status="selected" if eligible else "outside_temperature_range",
+                uncertainty_method="joint_sample_water_blank_profile_likelihood"
+                if experiment.water_blank_map else "binomial_Poisson_profile_likelihood",
+                correction_state="water_blank_corrected"
+                if experiment.water_blank_map else "uncorrected",
+            )
+            if experiment.water_blank_map:
+                row.update(
+                    water_blank_ids=json.dumps(sorted(experiment.water_blank_map[measurement])),
+                    water_blank_observations=json.dumps([
+                        {
+                            "measurement_id": str(blank["measurement_id"]),
+                            "run_id": str(blank["run_id"]),
+                            "cycle_id": str(blank["cycle_id"]),
+                            "observation_id": str(blank["observation_id"]),
+                            "observed_temperature_C": float(blank["temperature_C"]),
+                        }
+                        for blank in point.blanks.to_dict("records")
+                    ]),
+                    blank_n_frozen=float(point.blanks.n_frozen.sum()) if eligible else np.nan,
+                    blank_n_total=float(point.blanks.n_total.sum()) if eligible else np.nan,
+                )
+            if eligible:
+                key = ("mle", float(drop), count_state(point.samples), count_state(point.blanks))
+                if key not in cache:
+                    cache[key] = estimate_point(
+                        point.samples, point.blanks, experiment,
+                        confidence_drop=drop, method="mle",
+                    )
+                fit = cache[key]
+                row.update(
+                    concentration=fit[0], lower_error=fit[1], upper_error=fit[2],
+                    qc_flag=0 if fit[3] else 1,
+                )
+            row["at_zero_boundary"] = row["concentration"] == 0
+            records.append(row)
     return CumulativeSpectrumTable(
         pd.DataFrame.from_records(records),
-        history=fractions.history
-        + [
-            {
-                "operation": "cumulative_spectrum",
-                "estimation_method": "mle",
-                "z": float(z),
-                "temperature_ranges_C": ranges,
-                "range_boundaries": "inclusive",
-                "water_blank_correction": water_blank_correction,
-                "water_blank_model": "volume_scaled",
-                "water_blank_correction_applied": bool(experiment.water_blank_map),
-                "water_blank_map": dict(experiment.water_blank_map),
-                "uncertainty_assumption": (
-                    "pointwise count likelihood; sample and blank observations at each "
-                    "temperature retain their own totals and volumes"
-                ),
-            }
-        ],
+        history=fractions.history + [{
+            "operation": "cumulative_spectrum",
+            "estimation_method": "mle",
+            "z": float(z),
+            "temperature_source": "original_observations",
+            "alignment_when_needed": "latest",
+            "temperature_ranges_C": ranges,
+            "range_boundaries": "inclusive",
+            "water_blank_correction": water_blank_correction,
+            "water_blank_model": "volume_scaled",
+            "water_blank_correction_applied": bool(experiment.water_blank_map),
+            "water_blank_map": dict(experiment.water_blank_map),
+            "uncertainty_assumption": (
+                "pointwise count likelihood; sample and blank observations retain "
+                "their own totals and volumes; repeated observation states do not "
+                "add independent droplets"
+            ),
+        }],
     )
 
 
@@ -276,11 +242,13 @@ def differential_spectrum(
     temperature_ranges_C=None,
     water_blank_correction: bool = True,
 ) -> DifferentialSpectrumTable:
-    """Calculate adjacent concentration changes per degree for each droplet set.
+    """Calculate adjacent concentration changes in observation order.
 
-    Each interval uses its actual width and both endpoint concentrations.
-    Excluded or unavailable endpoints produce a flagged missing interval;
-    intervals never bridge a missing point. Cycles remain separate.
+    Strictly cooling transitions use their measured temperature difference.
+    Missing endpoints retain a flagged missing interval. Repeated-temperature
+    and warming transitions have no cooling-interval value; their source IDs
+    and temperatures are recorded in history. No interval bridges a skipped
+    transition or an excluded observation. Cycles remain separate.
     """
     cumulative = cumulative_spectrum(
         fractions,
@@ -288,25 +256,52 @@ def differential_spectrum(
         temperature_ranges_C=temperature_ranges_C,
         water_blank_correction=water_blank_correction,
     )
-    intervals = []
-    for _, group in cumulative.to_dataframe().groupby(
-        ["run_id", "sample_id", "cycle_id", "measurement_id"], sort=False
-    ):
-        group = group.sort_values("temperature_C", ascending=False)
-        temperatures = group.temperature_C.to_numpy(dtype=float)
-        out = group.iloc[:-1][["run_id", "sample_id", "cycle_id", "measurement_id"]].copy()
-        out["temperature_C"] = temperatures[:-1]
-        out["temperature_bin_left_C"] = temperatures[1:]
-        out["temperature_bin_right_C"] = temperatures[:-1]
-        with np.errstate(invalid="ignore"):
-            out["concentration"] = np.diff(group.concentration) / -np.diff(temperatures)
-        out["unit"] = "INP_per_mL_suspension_per_C"
-        out["basis"] = "suspension"
-        out["qc_flag"] = np.where(np.isfinite(out.concentration), 0, 1) | np.where(
-            out.concentration < 0, 2, 0
-        )
-        intervals.append(out)
+    records, omitted = [], []
+    identity_columns = ["run_id", "sample_id", "cycle_id", "measurement_id"]
+    for _, group in cumulative.to_dataframe().groupby(identity_columns, sort=False):
+        group = group.sort_values("point_order", kind="stable").reset_index(drop=True)
+        for position in range(len(group) - 1):
+            previous, following = group.iloc[position], group.iloc[position + 1]
+            start, end = float(previous.temperature_C), float(following.temperature_C)
+            identity = {name: str(previous[name]) for name in identity_columns}
+            if end >= start:
+                omitted.append({
+                    **identity,
+                    "from_observation_id": str(previous.observation_id),
+                    "to_observation_id": str(following.observation_id),
+                    "from_temperature_C": start,
+                    "to_temperature_C": end,
+                    "reason": "repeated_temperature" if end == start else "warming",
+                })
+                continue
+            endpoints = float(previous.concentration), float(following.concentration)
+            value = (endpoints[1] - endpoints[0]) / (start - end) if np.isfinite(
+                endpoints
+            ).all() else np.nan
+            records.append({
+                **identity,
+                "observation_id": str(previous.observation_id),
+                "next_observation_id": str(following.observation_id),
+                "point_id": str(previous.point_id),
+                "point_order": int(previous.point_order),
+                "temperature_C": start,
+                "temperature_bin_left_C": end,
+                "temperature_bin_right_C": start,
+                "concentration": value,
+                "unit": "INP_per_mL_suspension_per_C",
+                "basis": "suspension",
+                "qc_flag": (0 if np.isfinite(value) else 1) | (2 if value < 0 else 0),
+            })
+    columns = [
+        *identity_columns, "observation_id", "next_observation_id", "point_id", "point_order",
+        "temperature_C", "temperature_bin_left_C", "temperature_bin_right_C",
+        "concentration", "unit", "basis", "qc_flag",
+    ]
     return DifferentialSpectrumTable(
-        pd.concat(intervals, ignore_index=True),
-        history=cumulative.history + [{"operation": "differential_spectrum"}],
+        pd.DataFrame.from_records(records, columns=columns),
+        history=cumulative.history + [{
+            "operation": "differential_spectrum",
+            "observation_order": "time_s_then_input_order",
+            "omitted_transitions": omitted,
+        }],
     )

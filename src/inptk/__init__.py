@@ -4,7 +4,9 @@ from .experiment import AnalysisResult, Experiment, MeasurementMetadata, SampleM
 from .io import load, save
 from .processing import cumulative_spectrum, differential_spectrum, frozen_fraction
 from .readers import read_counts, read_icescopy
+from .resampling import resample_spectrum
 from .tables import (
+    CombinedSpectrumTable,
     CountsTable,
     CumulativeSpectrumTable,
     DifferentialSpectrumTable,
@@ -21,6 +23,7 @@ from .workflows import (
 __version__ = "0.2.0"
 __all__ = [
     "AnalysisResult",
+    "CombinedSpectrumTable",
     "CountsTable",
     "CumulativeSpectrumTable",
     "DifferentialSpectrumTable",
@@ -38,6 +41,7 @@ __all__ = [
     "load",
     "read_counts",
     "read_icescopy",
+    "resample_spectrum",
     "save",
     "subtract_blanks",
 ]

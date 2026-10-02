@@ -77,15 +77,13 @@ def test_cli_temperature_ranges_match_python_and_keep_inclusive_boundaries(
         *([] if method is None else ["--method", method]),
         "--temperature-ranges",
         argument,
-        "--step-C",
-        "1",
         "--out",
         output,
     )
     assert process.returncode == 0, process.stderr
     result = inptk.load(output)
     expected = inptk.analyze_concentration(
-        range_source, method=method or "mle", step_C=1.0, temperature_ranges_C=ranges
+        range_source, method=method or "mle", temperature_ranges_C=ranges
     )
     pd.testing.assert_frame_equal(result.combined.to_dataframe(), expected.combined.to_dataframe())
     pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
@@ -120,7 +118,16 @@ def test_cli_rejects_invalid_ranges_without_saving(tmp_path, range_source, range
     assert not output.exists()
 
 
-@pytest.mark.parametrize("flag,value", [("--dilution-method", "mle"), ("--method-options", "{}")])
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--dilution-method", "mle"),
+        ("--method-options", "{}"),
+        ("--step-C", "1"),
+        ("--temperature-method", "latest"),
+        ("--temperature-tolerance-C", "0.05"),
+    ],
+)
 def test_cli_rejects_removed_method_switches(tmp_path, flag, value):
     output = tmp_path / "result.inptk"
     process = run_cli("analyze", "unused.csv", flag, value, "--out", output)
@@ -133,6 +140,10 @@ def test_cli_does_not_offer_synthetic_window_counts_for_concentration():
     process = run_cli("analyze", "--help")
     assert process.returncode == 0
     assert "--temperature-ranges" in process.stdout
+    assert "--combination-groups" in process.stdout
+    assert "--output-step-C" in process.stdout
+    assert "--output-method {sample,interpolate}" in process.stdout
+    assert "--temperature-method" not in process.stdout
     assert "--method {mle,average}" in process.stdout
     assert "window_max_count" not in process.stdout
     assert "--dilution-method" not in process.stdout

@@ -12,7 +12,15 @@ import pandas as pd
 from .experiment import Experiment, MeasurementMetadata, SampleMetadata
 from .tables import CountsTable
 
-IDENTIFIERS = ("sample_id", "measurement_id", "run_id", "cycle_id", "cycle", "observation_id")
+IDENTIFIERS = (
+    "sample_id",
+    "measurement_id",
+    "run_id",
+    "cycle_id",
+    "cycle",
+    "observation_id",
+    "picture_id",
+)
 
 
 def _frame(source) -> pd.DataFrame:
@@ -81,6 +89,8 @@ def read_counts(
     Native counts need measurement_id, temperature_C, n_total, and n_frozen.
     sample_id/run_id can be supplied by metadata. Missing cycle_id means this
     input describes one cycle, labelled '1'; cycles are never detected or pooled.
+    Observation IDs identify source rows within each measurement/run/cycle. Missing
+    IDs are assigned in input order; repeated temperatures are preserved.
     Metadata has one row per measurement with sample_id, measurement_id,
     dilution, droplet_volume_uL and any sample normalization inputs.
     With water_blank_map, supply raw counts for samples and water blanks. Map
@@ -227,6 +237,7 @@ def read_icescopy(
         if missing_cycle.all():
             data = data.drop(columns="cycle")
     has_time = "time_s" in data or "timestamp" in data
+    has_image_identity = "picture" in data or "image_name" in data
     grouped = read_export(data, format="icescopy", metadata=header_metadata)
     known = {
         str(name) for tables in grouped.values() for table in tables for name in table.sample_id
@@ -261,6 +272,13 @@ def read_icescopy(
                     "dry_mass_g": original.dry_mass_g,
                 }
                 rows = rows.copy()
+                if "observation_id" in rows:
+                    if has_image_identity:
+                        rows = rows.rename(columns={"observation_id": "picture_id"})
+                    else:
+                        # The older adapter fills this field with row numbers.
+                        # They are not evidence of a shared image acquisition.
+                        rows = rows.drop(columns="observation_id")
                 rows["measurement_id"] = measurement_id
                 rows["sample_id"] = sample_id
                 rows["run_id"] = str(run_id)
