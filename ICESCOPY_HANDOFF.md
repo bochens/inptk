@@ -27,7 +27,7 @@ its relevant controls.
 | `z` | Advanced uncertainty setting | Default 1.96, for nominal 95% bounds |
 | `differential` | Request additional concentration-per-degree output | Optional starting checkbox; default off |
 | `blank_by_sample` | Sample-to-blank assignment; currently Python-only, so do not enable in the CLI dialog | Never store sample names globally |
-| `enforce_monotone` | Advanced automatic-stitching option to prevent a decrease during cooling; unavailable for manual stitching and MLE | Default off |
+| `decrease_policy` | Visible final-curve choice: stop at first decrease, or skip decreases and allow recovery | Default `stop_at_decrease`; allow per-analysis override |
 | `min_unfrozen` | Automatic stitching: minimum unfrozen droplets | Default 3 |
 | `overlap_points` | Automatic stitching: points examined near a dilution transition | Default 4 |
 | `switch_temperatures_C` | Manual stitching: draggable switches and numerical values | Never store run-specific switches globally |
@@ -66,6 +66,9 @@ belong to the same original sample.
 - For MLE, display a warm cutoff for each measurement and the fitted curve.
   A −15°C cutoff retains **T ≤ −15°C**, on the colder left side. The excluded
   warmer observations are on the right.
+- Show the final-decrease choice beside the combined plot. Use `final_candidates`
+  to draw excluded points faintly and explain each selection flag; overlay the
+  retained `final` curve. Do not draw an invented plateau or hide excluded data.
 - Distinguish edited controls from the last calculated result. Provide
   **Recalculate**, **Cancel**, and **Save**; display package warnings and errors.
 
@@ -79,6 +82,20 @@ Use one CLI job per selected sample/cycle when switches or cutoffs differ betwee
 groups. Manual stitching requires the same dilution-factor set in all groups
 supplied to one job and one switch list for that job. Its list is ordered **warm
 to cold**, e.g. `[-12, -16, -20]`, even though the plot axis increases left to right.
+
+Final selection runs after blank correction and unit conversion, independently
+for each sample/run/cycle, examining finite values from warm to cold:
+
+- `stop_at_decrease` stops at the first value below the last retained value and
+  excludes every colder point. Even a small decrease triggers this; there is no
+  hidden tolerance or multi-point window.
+- `skip_decreases` excludes a lower value but keeps checking colder points,
+  retaining values that recover to or exceed the last retained value.
+
+Equal concentrations are retained. Nonfinite values are excluded and do not set
+the comparison value. Negative values are not clipped. Neither choice changes
+concentrations or error bounds. This final selection does not change which raw
+observations were selected or which measurements entered an MLE fit.
 
 ## CLI and saved-result contract
 
@@ -105,7 +122,7 @@ inptk analyze freeze_count_timeseries.csv \
   --dilution-method mle --method-options method-options.json \
   --output-basis sampled_air --step-C 0.5 \
   --temperature-method latest --temperature-tolerance-C 0 \
-  --out analysis.inptk
+  --decrease-policy stop_at_decrease --out analysis.inptk
 ```
 
 `--sample` selects exact parent sample IDs; `--cycle` selects exact cycle IDs.
@@ -140,8 +157,13 @@ history, and warnings. Tables contain columns and row records. Nonfinite values
 use explicit objects such as `{"$nonfinite": "inf"}`; decode them for display,
 retain their quality flags, and do not draw them as finite concentrations.
 
-Read the returned `frozen_fraction`, `per_dilution`, `combined`, `final`, and optional
-`differential` tables for plotting. `lower_error` and `upper_error` are widths, so
+Read `frozen_fraction`, `per_dilution`, `combined`, `final_candidates`, `final`, and
+optional `differential` tables for plotting. `final_candidates` contains all rows
+after blank correction and unit conversion, with `used_in_final` and
+`final_selection_status` (`kept`, `nonfinite`, `decrease`, or
+`colder_than_decrease`). It is optional when reading older saved analyses;
+new full-workflow results include it. `final` contains only retained rows.
+`lower_error` and `upper_error` are widths, so
 bounds are concentration minus/plus those widths. They are not interval endpoints.
 `source_measurement_ids` lists candidate measurements, not proof that every one
 contributed at every temperature. Manual results additionally report
@@ -158,11 +180,14 @@ Any exclusion of invalid source rows must be an explicit, recorded decision.
 ## Scientific boundaries to retain
 
 - Icescopy counts may already contain matched, per-picture water correction. Do
-  not subtract that blank a second time. MLE uncertainty from corrected counts
-  remains approximate because it does not jointly fit the blank observations.
-- MLE does not combine temperatures as independent observations of new droplets.
-  `enforce_monotone=True` is rejected for MLE to avoid that false increase in
-  precision. Cycles also remain separate.
+  not subtract that blank a second time. Both OLAF count-based error bounds and
+  MLE bounds change when the frozen/total counts are corrected, but neither
+  separately propagates uncertainty in the measured water blank or correlations
+  from sharing a blank across measurements.
+- MLE fits temperatures separately; observations of the same droplets at other
+  temperatures are not additional independent droplets. Cycles also remain
+  separate. There is no public `enforce_monotone` option; final-decrease selection
+  excludes rows without fitting them again or changing their uncertainty.
 - Differential output is per measurement: the change in adjacent cumulative
   concentrations divided by the actual cooling-temperature interval. The first
   point has no preceding interval and is omitted. Corrected totals may vary;
@@ -193,12 +218,6 @@ CLI contracts rather than the private `_engine` modules.
 
 ## Verification before handoff
 
-- All 141 automated tests passed, including CLI/Python agreement, preserved cycle
-  labels, named MLE controls, manual switches, and changing-total differential output.
-- Ruff, mypy (17 source files), and Bandit passed.
-- The M1 notebook executed all 13 code cells and saved five figures. Its separate
-  steps match the full workflow; the input CSV remains unchanged. External export
-  stays disabled. Temperature axes increase left to right.
-- Wheel and source distribution built. The installed wheel ran CLI analysis,
-  differential calculation, CSV export, and saved-result loading outside the checkout.
-- Icescopy integration is specified here but has not been implemented or tested.
+Validation of the final-decrease selection change is pending. Record the final
+test, notebook, and installed-CLI checks here after they complete. Icescopy
+integration is specified here but has not been implemented or tested.

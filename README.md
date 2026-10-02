@@ -32,10 +32,12 @@ result = inptk.analyze_concentration(
     experiment,
     dilution_method="stitch",
     output_basis="sampled_air",
+    decrease_policy="stop_at_decrease",
 )
 
 result.final.to_dataframe()                       # final combined concentration
 result.per_dilution.to_dataframe()                # inspect individual dilutions
+result.final_candidates.to_dataframe()           # inspect retained and excluded final points
 result.frozen_fraction.to_dataframe()             # inspect the count reduction
 result.final.select(sample_id="A", cycle_id="2") # returns another spectrum table
 result.save("analysis.inptk")                     # includes original observations
@@ -65,7 +67,8 @@ combined = inptk.combine_dilutions(
     experiment=experiment,
     method=inptk.Stitch(min_unfrozen=3, overlap_points=4),
 )
-final = inptk.convert_concentration(combined, experiment.samples, basis="sampled_air")
+converted = inptk.convert_concentration(combined, experiment.samples, basis="sampled_air")
+final = inptk.finalize_spectrum(converted, decrease_policy="stop_at_decrease")
 ```
 
 Frozen fractions need only the labelled counts table. Concentration calculations
@@ -78,8 +81,12 @@ results or settings that could not apply.
 
 `inptk.differential_spectrum(fractions, experiment=experiment)` is an optional
 separate calculation. `inptk.subtract_blanks(combined, {"A": blank_spectrum})`
-applies explicit blank correction before unit conversion. The complete workflow
-still packages all stages for saving with `result.save(...)`.
+applies explicit blank correction before unit conversion. `finalize_spectrum`
+then selects the final nondecreasing concentration rows without changing the
+input table, concentrations, or error bounds. It returns one spectrum table.
+The complete workflow also retains every candidate final row in
+`result.final_candidates`, including the reason for each exclusion, and packages
+all stages for saving with `result.save(...)`.
 
 Differential concentration is the increase in cumulative concentration between
 adjacent temperatures, divided by their actual temperature difference. Each
@@ -147,9 +154,9 @@ or averaging. Missing temperatures or non-finite estimates in the selected curve
 remain missing, with warnings; another dilution is never substituted. Each output
 row records `dilution_fold`, `source_measurement_id`, and `selection_status`.
 `source_measurement_ids` lists all supplied measurements, not just the selected one.
-`enforce_monotone=True` is rejected for manual stitching because it would change
-the selected values. Subsequent requested blank correction or unit conversion
-still acts on the combined spectrum.
+Requested blank correction and unit conversion act on the combined spectrum.
+The final `decrease_policy` can exclude rows from it; the combined curve remains
+available unchanged for inspection.
 
 ### Joint count fitting (MLE)
 
@@ -187,17 +194,49 @@ cannot be combined. The package does not infer action counts from cycle numbers.
 `confidence_drop` controls the decrease in log likelihood defining the uncertainty
 interval; its default resolves to `z**2/2`. The effective value is saved.
 
-Each temperature is fitted separately. `enforce_monotone=True` is rejected for
-MLE: the former implementation reused cumulative observations of the same
-droplets across temperatures and could artificially narrow uncertainty. This
-option is available only for automatic stitching, where it raises decreasing
-values to the preceding maximum and must be requested explicitly.
+Each temperature is fitted separately. The same droplets observed at different
+temperatures are not treated as additional independent observations. Final
+selection uses `decrease_policy`; it does not refit concentrations or narrow their
+uncertainty bounds. There is no public `enforce_monotone` option.
 
 MLE assumes independent droplet sets across its dilution inputs. Repeated cycles
-remain separate. When supplied counts have already been water-blank corrected,
-the fit does not include the uncertainty of estimating that blank or correlations
-introduced by a shared blank. Relative weights also change the likelihood;
-weighted intervals should not be described as ordinary droplet-count intervals.
+remain separate. With counts already corrected for a water blank, both the
+retained OLAF count-based intervals and MLE intervals change because they use the
+adjusted frozen and total counts. Neither separately propagates uncertainty in
+the measured water blank or correlations introduced by a shared blank. Relative
+weights also change the likelihood; weighted intervals should not be described
+as ordinary droplet-count intervals.
+
+### Select the final concentration curve
+
+After dilution combination, any requested blank subtraction, and unit conversion,
+`decrease_policy` selects concentration rows independently for each sample, run,
+and cycle. It examines temperatures from warm to cold and compares each finite
+concentration with the last retained value:
+
+- `"stop_at_decrease"` (default): at the first strictly lower concentration,
+  exclude that point and every colder point, even if the curve later recovers.
+- `"skip_decreases"`: exclude a strictly lower point and continue checking colder
+  points. Retain them if they equal or exceed the last retained value.
+
+For concentrations `10, 12, 11, 13` in cooling order, the default retains `10, 12`;
+`skip_decreases` retains `10, 12, 13`. Equal values are retained. Even a small
+strict decrease triggers the rule: there is no hidden tolerance or window.
+Nonfinite values are excluded and do not establish a comparison value. Negative
+finite concentrations are not clipped; this selection rule alone does not
+establish that they are scientifically usable.
+
+Neither policy raises a concentration to make a plateau or changes error bounds.
+`result.final` contains the retained rows. `result.final_candidates` contains all
+rows after blank correction and unit conversion, with `used_in_final` and
+`final_selection_status` to explain selection. Statuses are `kept`, `nonfinite`,
+`decrease`, or `colder_than_decrease`. Earlier tables remain available.
+This final selection is separate from selecting count observations by temperature
+and from choosing which measurement rows enter the MLE fit.
+
+```python
+result = inptk.analyze_concentration(experiment, decrease_policy="skip_decreases")
+```
 
 ### Command-line settings
 
@@ -212,7 +251,8 @@ inptk analyze counts.csv --metadata measurements.csv --dilution-method manual \
 
 Resolved settings are saved in `result.settings["method_options"]` and table
 history. Manual results also record the dilution order. Common temperature-grid,
-output-unit, and error-bar settings remain workflow arguments.
+output-unit, error-bar, and final-decrease settings remain workflow arguments.
+Use `--decrease-policy stop_at_decrease` (default) or `--decrease-policy skip_decreases`.
 Use `--sample A --cycle 01` to analyze only those exact labels; repeat either
 option to select several. Sample selection uses the original sample name, while
 MLE controls use measurement names. Unknown selections raise an error. Selection
@@ -329,7 +369,8 @@ placement, plots, and remaining integration work.
 | `frozen_fraction` | `FrozenFractionTable` | Frozen counts and fractions at selected temperature thresholds |
 | `per_dilution` | `CumulativeSpectrumTable` | Each dilution's concentration in the original suspension |
 | `combined` | `CumulativeSpectrumTable` | Dilution-combined suspension concentration |
-| `final` | `CumulativeSpectrumTable` | Requested blank correction and concentration units applied |
+| `final_candidates` | `CumulativeSpectrumTable` or `None` | All rows after requested blank correction and unit conversion, with final-selection flags; present in new full-workflow results |
+| `final` | `CumulativeSpectrumTable` | Rows retained under `decrease_policy`; concentrations and error bounds are unchanged |
 | `differential` | `DifferentialSpectrumTable` or `None` | Optional per-measurement activity per degree, with interval limits |
 
 `dilution_method="stitch"` retains OLAF's dilution-transition calculation.
@@ -378,15 +419,17 @@ option name `olaf` has been replaced by `window_max_count`.
 Concentration columns are `concentration`, `unit`, and `basis`. `lower_error`
 and `upper_error` are error-bar widths: interval endpoints are concentration
 minus/plus these widths. Their calculation method is recorded. They do not
-include variability across repeated cycles. Non-finite estimates retain their
-quality flags; values must be inspected before plotting or further analysis.
+include variability across repeated cycles. Non-finite estimates remain in
+candidate and intermediate tables with their quality flags and are excluded from
+`final`; inspect flags before plotting or further analysis.
 
 Optional `blank_by_sample={"A": blank_spectrum}` maps each target sample to a
 single blank sample's cumulative suspension spectra. Matching is exact by run,
 cycle, and temperature. Missing coverage is an error; no extrapolation is done
 implicitly. The retained root-sum-of-squares error propagation assumes independent
-sample and blank errors. Corrected values may be negative; this workflow does
-not silently clamp them or apply additional quality-control adjustments.
+sample and blank errors. Corrected values may be negative and are not clipped.
+The final `decrease_policy` selects rows after correction and unit conversion,
+while retaining every corrected candidate for inspection.
 
 `output_basis` is `suspension`, `sampled_air`, or `dry_soil`. Changing this basis
 returns the same cumulative table type. Converting an already normalized result

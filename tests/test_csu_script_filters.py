@@ -107,3 +107,59 @@ def test_csu_export_keeps_repeated_cycles_in_separate_files(tmp_path):
     )
     assert (tmp_path / "out" / "cycle-1" / "A_INPs_L.csv").exists()
     assert (tmp_path / "out" / "cycle-2" / "A_INPs_L.csv").exists()
+
+
+def test_csu_export_applies_both_final_selection_policies(tmp_path):
+    import pandas as pd
+
+    csu = _load_csu_script()
+    counts = tmp_path / "counts.csv"
+    metadata = tmp_path / "metadata.csv"
+    pd.DataFrame(
+        {
+            "sample_id": ["A"] * 4,
+            "temperature_C": [-5, -6, -7, -8],
+            "n_total": [32] * 4,
+            "n_frozen": [0, 8, 4, 12],
+        }
+    ).to_csv(counts, index=False)
+    pd.DataFrame(
+        [
+            {
+                "sample_id": "A",
+                "sample_type": "air",
+                "well_volume_uL": 50,
+                "dilution": 1,
+                "suspension_volume_mL": 5,
+                "air_volume_L": 100,
+                "filter_fraction_used": 1,
+            }
+        ]
+    ).to_csv(metadata, index=False)
+    for policy, temperatures in (
+        ("stop_at_decrease", [-5, -6]),
+        ("skip_decreases", [-5, -6, -8]),
+    ):
+        target = tmp_path / f"{policy}.csv"
+        assert (
+            csu.main(
+                [
+                    str(counts),
+                    "--metadata",
+                    str(metadata),
+                    "--out",
+                    str(target),
+                    "--allow-missing-header",
+                    "--step-C",
+                    "1",
+                    "--decrease-policy",
+                    policy,
+                ]
+            )
+            == 0
+        )
+        lines = target.read_text().splitlines()
+        header = next(i for i, line in enumerate(lines) if line.startswith("degC,"))
+        exported = pd.read_csv(target, skiprows=header)
+        assert exported.degC.tolist() == temperatures
+        assert exported.INPS_L.is_monotonic_increasing

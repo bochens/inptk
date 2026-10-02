@@ -1,4 +1,5 @@
 import inspect
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -69,9 +70,14 @@ def test_workflow_matches_retained_methods_and_keeps_cycles_separate(method):
         expected = combine(
             fractions, sample_group_by={m: sample for m in rows.measurement_id.unique()}, **options
         ).to_dataframe()
-        actual = result.final.select(sample_id=sample, cycle_id=cycle).to_dataframe()
-        np.testing.assert_allclose(actual.concentration, expected.value * 0.05, equal_nan=True)
-        np.testing.assert_allclose(actual.lower_error, expected.lower_ci * 0.05, equal_nan=True)
+        candidate = result.final_candidates.select(sample_id=sample, cycle_id=cycle).to_dataframe()
+        np.testing.assert_allclose(candidate.concentration, expected.value * 0.05, equal_nan=True)
+        np.testing.assert_allclose(candidate.lower_error, expected.lower_ci * 0.05, equal_nan=True)
+        selected = inptk.finalize_spectrum(
+            result.final_candidates.select(sample_id=sample, cycle_id=cycle)
+        )
+        actual = result.final.select(sample_id=sample, cycle_id=cycle)
+        pd.testing.assert_frame_equal(actual.to_dataframe(), selected.to_dataframe())
     pd.testing.assert_frame_equal(original, source.counts.to_dataframe())
 
 
@@ -79,7 +85,14 @@ def test_results_roundtrip_and_selection_do_not_change_source(tmp_path):
     result = inptk.analyze_concentration(experiment(), differential=True)
     result.save(tmp_path / "result")
     restored = inptk.load(tmp_path / "result")
-    for name in ("frozen_fraction", "per_dilution", "combined", "final", "differential"):
+    for name in (
+        "frozen_fraction",
+        "per_dilution",
+        "combined",
+        "final",
+        "differential",
+        "final_candidates",
+    ):
         pd.testing.assert_frame_equal(
             getattr(restored, name).to_dataframe(), getattr(result, name).to_dataframe()
         )
@@ -281,3 +294,77 @@ def test_icescopy_metadata_rejects_unknown_measurement_names():
     frame = pd.DataFrame({"temperature_C": [-5], "A number total": [20], "A number frozen": [0]})
     with pytest.raises(ValueError, match="Unknown measurement in Icescopy metadata: 'wrong'"):
         inptk.read_icescopy(frame, metadata={"wrong": {"well_volume_uL": 50}})
+
+
+@pytest.mark.parametrize(
+    "policy,kept,statuses",
+    [
+        (
+            "stop_at_decrease",
+            [True, True, False, False, False],
+            ["kept", "kept", "decrease", "colder_than_decrease", "colder_than_decrease"],
+        ),
+        (
+            "skip_decreases",
+            [True, True, False, True, True],
+            ["kept", "kept", "decrease", "kept", "kept"],
+        ),
+    ],
+)
+def test_roundtrip_retains_discarded_final_values_and_uncertainty(tmp_path, policy, kept, statuses):
+    counts = pd.DataFrame(
+        {
+            "measurement_id": ["M"] * 5,
+            "cycle_id": ["01"] * 5,
+            "temperature_C": [-5, -6, -7, -8, -9],
+            "n_total": [20, 20, 16, 16, 16],
+            "n_frozen": [0, 8, 4, 10, 12],
+        }
+    )
+    source = inptk.read_counts(
+        counts,
+        metadata=[
+            {
+                "measurement_id": "M",
+                "sample_id": "A",
+                "sample_type": "air",
+                "droplet_volume_uL": 50,
+                "dilution": 1,
+                "air_volume_L": 100,
+                "suspension_volume_mL": 5,
+                "filter_fraction_used": 1,
+            }
+        ],
+    )
+    result = inptk.analyze_concentration(
+        source, step_C=1, output_basis="sampled_air", decrease_policy=policy
+    )
+    result.save(tmp_path / "result.inptk")
+    restored = inptk.load(tmp_path / "result.inptk")
+    candidates = restored.final_candidates.to_dataframe()
+    assert candidates.used_in_final.tolist() == kept
+    assert candidates.final_selection_status.tolist() == statuses
+    assert candidates.temperature_C.tolist() == [-5, -6, -7, -8, -9]
+    assert restored.final.to_dataframe().temperature_C.tolist() == [
+        temperature
+        for temperature, selected in zip([-5, -6, -7, -8, -9], kept, strict=True)
+        if selected
+    ]
+    assert restored.settings["decrease_policy"] == policy
+    for column in ("concentration", "lower_error", "upper_error"):
+        np.testing.assert_allclose(
+            candidates[column], result.combined.to_dataframe()[column] * 0.05, rtol=0, atol=0
+        )
+    pd.testing.assert_frame_equal(candidates, result.final_candidates.to_dataframe())
+    pd.testing.assert_frame_equal(restored.final.to_dataframe(), result.final.to_dataframe())
+    pd.testing.assert_frame_equal(
+        restored.experiment.counts.to_dataframe(), source.counts.to_dataframe()
+    )
+
+
+def test_saving_analysis_without_optional_final_candidates(tmp_path):
+    result = replace(inptk.analyze_concentration(experiment()), final_candidates=None)
+    result.save(tmp_path / "result.inptk")
+    restored = inptk.load(tmp_path / "result.inptk")
+    assert restored.final_candidates is None
+    pd.testing.assert_frame_equal(restored.final.to_dataframe(), result.final.to_dataframe())

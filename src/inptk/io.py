@@ -95,7 +95,14 @@ def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
             "experiment": _experiment_payload(value.experiment),
             "tables": {
                 name: _table_payload(getattr(value, name))
-                for name in ("frozen_fraction", "per_dilution", "combined", "final", "differential")
+                for name in (
+                    "frozen_fraction",
+                    "per_dilution",
+                    "combined",
+                    "final",
+                    "differential",
+                    "final_candidates",
+                )
                 if getattr(value, name) is not None
             },
             "settings": value.settings,

@@ -235,7 +235,6 @@ def combine_dilutions(
     experiment: Experiment,
     method: str | DilutionMethod = "stitch",
     z: float = 1.96,
-    enforce_monotone: bool = False,
 ) -> CumulativeSpectrumTable:
     """Combine dilution measurements separately for each sample, run and cycle.
 
@@ -244,13 +243,6 @@ def combine_dilutions(
     effective method settings are retained on the returned spectrum.
     """
     chosen = resolve_method(method)
-    if isinstance(chosen, MLE) and enforce_monotone:
-        raise ValueError(
-            "MLE requires enforce_monotone=False: cumulative counts at adjacent "
-            "temperatures describe the same droplets, not independent observations"
-        )
-    if isinstance(chosen, ManualStitch) and enforce_monotone:
-        raise ValueError("Manual stitching selects curves directly; enforce_monotone must be False")
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
     validate_fraction_context(fractions, experiment)
@@ -262,7 +254,6 @@ def combine_dilutions(
         "dilution_method": method_name(chosen),
         "method_options": options,
         "z": z,
-        "enforce_monotone": enforce_monotone,
     }
     if isinstance(chosen, ManualStitch):
         settings["manual_dilution_order"] = dilution_order
@@ -301,7 +292,7 @@ def combine_dilutions(
             inputs = _fraction_inputs(group, experiment)
             if isinstance(chosen, Stitch):
                 if len(inputs) == 1:
-                    if chosen != Stitch() or enforce_monotone:
+                    if chosen != Stitch():
                         notices.append(
                             f"{sample_id}, run {run_id}, cycle {cycle_id}: only one measurement; "
                             "automatic stitching settings are not applied"
@@ -312,7 +303,7 @@ def combine_dilutions(
                     combined = engine.cumulative_spec_stitch(
                         inputs,
                         sample_group_by={key: sample_id for key in measurement_ids},
-                        enforce_monotone=enforce_monotone,
+                        enforce_monotone=False,
                         z=z,
                         min_unfrozen=chosen.min_unfrozen,
                         overlap_points=chosen.overlap_points,
@@ -322,7 +313,7 @@ def combine_dilutions(
                 combined = engine.cumulative_spec_mle(
                     inputs,
                     sample_group_by={key: sample_id for key in measurement_ids},
-                    enforce_monotone=enforce_monotone,
+                    enforce_monotone=False,
                     **options,
                 )
                 uncertainty_method = "binomial_Poisson_profile_likelihood"
@@ -338,6 +329,107 @@ def combine_dilutions(
     )
 
 
+def _validate_decrease_policy(decrease_policy: str) -> None:
+    if decrease_policy not in ("stop_at_decrease", "skip_decreases"):
+        raise ValueError("decrease_policy must be 'stop_at_decrease' or 'skip_decreases'")
+
+
+def _final_candidates(
+    spectrum: CumulativeSpectrumTable,
+    *,
+    decrease_policy: Literal["stop_at_decrease", "skip_decreases"],
+) -> CumulativeSpectrumTable:
+    """Mark final point selection while preserving every input value and error."""
+    _validate_decrease_policy(decrease_policy)
+    if not isinstance(spectrum, CumulativeSpectrumTable):
+        raise TypeError("spectrum must be a CumulativeSpectrumTable")
+    data = spectrum.to_dataframe()
+    data["used_in_final"] = False
+    data["final_selection_status"] = "nonfinite"
+    keys = ["run_id", "sample_id", "cycle_id"]
+    if "measurement_id" in data:
+        keys.append("measurement_id")
+    groups, notices = [], []
+    for identity, rows in data.groupby(keys, sort=False):
+        group: dict[str, object] = dict(zip(keys, identity))
+        previous_temperature = None
+        previous_concentration = None
+        first_decrease_temperature = None
+        excluded = []
+        retained_count = 0
+        for index, row in rows.sort_values("temperature_C", ascending=False).iterrows():
+            temperature = float(row.temperature_C)
+            concentration = float(row.concentration) if pd.notna(row.concentration) else np.nan
+            if not np.isfinite(concentration):
+                status = "nonfinite"
+            elif first_decrease_temperature is not None and decrease_policy == "stop_at_decrease":
+                status = "colder_than_decrease"
+            elif previous_concentration is not None and concentration < previous_concentration:
+                status = "decrease"
+                if first_decrease_temperature is None:
+                    first_decrease_temperature = temperature
+            else:
+                status = "kept"
+            data.at[index, "final_selection_status"] = status
+            if status == "kept":
+                data.at[index, "used_in_final"] = True
+                retained_count += 1
+                previous_temperature = temperature
+                previous_concentration = concentration
+            else:
+                excluded.append({
+                    "temperature_C": temperature,
+                    "concentration": concentration,
+                    "reason": status,
+                    "reference_temperature_C": previous_temperature,
+                    "reference_concentration": previous_concentration,
+                })
+        group.update(
+            first_decrease_temperature_C=first_decrease_temperature,
+            retained_count=retained_count,
+            excluded_count=len(excluded),
+            excluded=excluded,
+        )
+        groups.append(group)
+        description = ", ".join(f"{key}={value}" for key, value in zip(keys, identity))
+        if excluded:
+            notices.append(
+                f"{description}: final selection excluded {len(excluded)} of {len(rows)} "
+                f"points using {decrease_policy}"
+            )
+        if retained_count == 0:
+            notices.append(
+                f"{description}: no finite concentration points remain in the final result"
+            )
+    return CumulativeSpectrumTable(
+        data,
+        history=spectrum.history + [{
+            "operation": "finalize_spectrum",
+            "decrease_policy": decrease_policy,
+            "comparison_order": "warm_to_cold",
+            "groups": groups,
+            "warnings": notices,
+        }],
+    )
+
+
+def finalize_spectrum(
+    spectrum: CumulativeSpectrumTable,
+    *,
+    decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = "stop_at_decrease",
+) -> CumulativeSpectrumTable:
+    """Select nondecreasing cumulative values in cooling order without changing them.
+
+    Apply this after blank subtraction and concentration-unit conversion.
+    ``stop_at_decrease`` excludes the first decrease and every colder point.
+    ``skip_decreases`` excludes points below the last retained value, allowing
+    later recovery. Each sample, run, cycle and optional measurement is handled
+    separately. Equal values remain; nonfinite values are excluded and do not
+    set the comparison baseline. Returned history records every excluded point.
+    """
+    return _final_candidates(spectrum, decrease_policy=decrease_policy).select(used_in_final=True)
+
+
 def analyze_concentration(
     experiment: Experiment,
     *,
@@ -349,21 +441,15 @@ def analyze_concentration(
     z: float = 1.96,
     differential: bool = False,
     blank_by_sample: dict[str, CumulativeSpectrumTable] | None = None,
-    enforce_monotone: bool = False,
+    decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = "stop_at_decrease",
 ) -> AnalysisResult:
     """Run the separately callable processing steps and retain all their results."""
+    _validate_decrease_policy(decrease_policy)
     method = resolve_method(dilution_method)
-    if isinstance(method, MLE) and enforce_monotone:
-        raise ValueError(
-            "MLE requires enforce_monotone=False: cumulative counts at adjacent "
-            "temperatures describe the same droplets, not independent observations"
-        )
     if output_basis not in UNITS:
         raise ValueError(f"Unknown output_basis {output_basis!r}")
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
-    if isinstance(method, ManualStitch) and enforce_monotone:
-        raise ValueError("Manual stitching selects curves directly; enforce_monotone must be False")
     source = experiment.counts.to_dataframe()
     if source.empty:
         raise ValueError("Cannot analyze an experiment with no observations")
@@ -376,11 +462,13 @@ def analyze_concentration(
     )
     per_dilution = cumulative_spectrum(fractions, experiment=experiment, z=z)
     combined = combine_dilutions(
-        fractions, experiment=experiment, method=method, z=z, enforce_monotone=enforce_monotone
+        fractions, experiment=experiment, method=method, z=z
     )
-    final = subtract_blanks(combined, blank_by_sample) if blank_by_sample else combined
+    candidates = subtract_blanks(combined, blank_by_sample) if blank_by_sample else combined
     if output_basis != "suspension":
-        final = convert_concentration(final, experiment.samples, basis=output_basis)
+        candidates = convert_concentration(candidates, experiment.samples, basis=output_basis)
+    final_candidates = _final_candidates(candidates, decrease_policy=decrease_policy)
+    final = final_candidates.select(used_in_final=True)
     differential_result = (
         differential_spectrum(fractions, experiment=experiment) if differential else None
     )
@@ -396,7 +484,7 @@ def analyze_concentration(
         "temperature_tolerance_C": tolerance,
         "z": z,
         "differential": differential,
-        "enforce_monotone": enforce_monotone,
+        "decrease_policy": decrease_policy,
     }
     if isinstance(method, ManualStitch):
         settings["manual_dilution_order"] = dilution_order
@@ -407,6 +495,7 @@ def analyze_concentration(
         combined,
         final,
         differential_result,
+        final_candidates=final_candidates,
         settings=settings,
         history=final.history,
         warnings=final.warnings,

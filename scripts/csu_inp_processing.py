@@ -17,6 +17,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if SRC_ROOT.exists():
     sys.path.insert(0, str(SRC_ROOT))
 
+from inptk import CumulativeSpectrumTable, finalize_spectrum  # noqa: E402
 from inptk import _engine as engine  # noqa: E402
 
 HEADER_ORDER = (
@@ -75,6 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sample_id=args.sample_id,
             allow_multiple=bool(args.out_dir),
         )
+        data = _select_final_rows(data, str(cycle_id), args.decrease_policy)
         if len(cycles) > 1:
             cycle_dir = Path(args.out_dir) / (
                 "cycle-" + str(cycle_id).replace("/", "_").replace("\\", "_")
@@ -189,7 +191,11 @@ def build_parser() -> argparse.ArgumentParser:
     spectrum = parser.add_argument_group("spectrum options")
     spectrum.add_argument("--combine", choices=("stitch", "mle", "none"), default="stitch")
     spectrum.add_argument("--sample-group-by", default="inferred")
-    spectrum.add_argument("--enforce-monotone", action="store_true")
+    spectrum.add_argument(
+        "--decrease-policy",
+        choices=("stop_at_decrease", "skip_decreases"),
+        default="stop_at_decrease",
+    )
     spectrum.add_argument("--z", type=float, default=1.96)
     spectrum.add_argument(
         "--confidence-drop",
@@ -489,14 +495,12 @@ def _combine_fraction_tables(fraction: Any, args: argparse.Namespace) -> Any:
         return engine.cumulative_spec_stitch(
             fraction,
             sample_group_by=sample_group_by,
-            enforce_monotone=args.enforce_monotone,
             z=args.z,
         )
     if args.combine == "mle":
         return engine.cumulative_spec_mle(
             fraction,
             sample_group_by=sample_group_by,
-            enforce_monotone=args.enforce_monotone,
             confidence_drop=args.confidence_drop,
         )
     if args.combine == "none":
@@ -553,6 +557,34 @@ def _csu_data_frame(
         raise ValueError("No finite INPs_L rows were produced")
     output = output.sort_values(["_sample_id", "degC"], ascending=[True, False])
     return output.reset_index(drop=True)
+
+
+def _select_final_rows(data: pd.DataFrame, cycle_id: str, decrease_policy: str) -> pd.DataFrame:
+    """Use the package's final selection while preserving the CSU CSV columns."""
+    candidates = data.rename(
+        columns={
+            "_sample_id": "sample_id",
+            "degC": "temperature_C",
+            "INPS_L": "concentration",
+            "lower_CI": "lower_error",
+            "upper_CI": "upper_error",
+        }
+    ).assign(
+        run_id="1",
+        cycle_id=cycle_id,
+        unit="INP_per_L_air",
+        basis="sampled_air",
+        source_row=list(range(len(data))),
+    )
+    selected = finalize_spectrum(
+        CumulativeSpectrumTable(candidates), decrease_policy=decrease_policy
+    )
+    for warning in selected.warnings:
+        print(f"Warning: {warning}")
+    indices = selected.to_dataframe().source_row.to_numpy(dtype=int)
+    if len(indices) == 0:
+        raise ValueError("No finite INPs_L rows remain after final selection")
+    return data.iloc[indices].reset_index(drop=True)
 
 
 def _csu_header(

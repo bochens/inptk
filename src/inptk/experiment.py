@@ -123,6 +123,7 @@ class AnalysisResult:
     combined: CumulativeSpectrumTable
     final: CumulativeSpectrumTable
     differential: DifferentialSpectrumTable | None = None
+    final_candidates: CumulativeSpectrumTable | None = None
     settings: dict = field(default_factory=dict)
     history: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

@@ -15,6 +15,7 @@ from .workflows import (
     analyze_concentration,
     combine_dilutions,
     convert_concentration,
+    finalize_spectrum,
     subtract_blanks,
 )
 
@@ -36,6 +37,7 @@ __all__ = [
     "convert_concentration",
     "cumulative_spectrum",
     "differential_spectrum",
+    "finalize_spectrum",
     "frozen_fraction",
     "load",
     "read_counts",

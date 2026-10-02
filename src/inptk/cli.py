@@ -49,7 +49,12 @@ def build_parser():
     analyze.add_argument("--temperature-tolerance-C", type=float)
     analyze.add_argument("--z", type=float, default=1.96)
     analyze.add_argument("--differential", action="store_true")
-    analyze.add_argument("--enforce-monotone", action="store_true")
+    analyze.add_argument(
+        "--decrease-policy",
+        choices=("stop_at_decrease", "skip_decreases"),
+        default="stop_at_decrease",
+        help="Select final cumulative points without changing calculated values",
+    )
     export = commands.add_parser(
         "export-csv", help="Export final concentration rows from a saved analysis"
     )
@@ -134,7 +139,7 @@ def main(argv=None):
             temperature_tolerance_C=args.temperature_tolerance_C,
             z=args.z,
             differential=args.differential,
-            enforce_monotone=args.enforce_monotone,
+            decrease_policy=args.decrease_policy,
         )
         result.save(args.out)
         for warning in result.warnings:

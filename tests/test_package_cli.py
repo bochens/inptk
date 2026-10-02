@@ -55,6 +55,7 @@ def test_cli_matches_python_and_preserves_cycle_ids(tmp_path, sample_id):
     assert set(restored.final.to_dataframe().cycle_id) == {"01", "02"}
     assert restored.settings["temperature_method"] == "latest"
     assert restored.settings["temperature_tolerance_C"] == 0
+    assert restored.settings["decrease_policy"] == "stop_at_decrease"
     payload = json.loads((tmp_path / "result" / "analysis.json").read_text())
     assert payload["toolkit_version"] == inptk.__version__
 
@@ -219,3 +220,49 @@ def test_cli_unknown_selection_fails_without_creating_output(
     assert process.returncode == 1
     assert message in process.stderr
     assert not output.exists()
+
+
+@pytest.mark.parametrize("policy", [None, "stop_at_decrease", "skip_decreases"])
+def test_cli_final_decrease_policy_matches_python_and_keeps_candidates(tmp_path, policy):
+    counts = pd.DataFrame(
+        {
+            "measurement_id": ["001"] * 5,
+            "cycle_id": ["01"] * 5,
+            "temperature_C": [-5, -6, -7, -8, -9],
+            "n_total": [20, 20, 16, 16, 16],
+            "n_frozen": [0, 8, 4, 10, 12],
+        }
+    )
+    metadata = pd.DataFrame(
+        [{"measurement_id": "001", "sample_id": "007", "dilution": 1, "droplet_volume_uL": 50}]
+    )
+    counts.to_csv(tmp_path / "counts.csv", index=False)
+    metadata.to_csv(tmp_path / "metadata.csv", index=False)
+    extra = [] if policy is None else ["--decrease-policy", policy]
+    output = tmp_path / "result.inptk"
+    process = _run_cli(
+        "analyze",
+        tmp_path / "counts.csv",
+        "--metadata",
+        tmp_path / "metadata.csv",
+        "--step-C",
+        "1",
+        "--out",
+        output,
+        *extra,
+    )
+    assert process.returncode == 0, process.stderr
+    actual = inptk.load(output)
+    effective_policy = policy or "stop_at_decrease"
+    expected = inptk.analyze_concentration(
+        inptk.read_counts(counts, metadata=metadata), step_C=1, decrease_policy=effective_policy
+    )
+    pd.testing.assert_frame_equal(actual.final.to_dataframe(), expected.final.to_dataframe())
+    pd.testing.assert_frame_equal(
+        actual.final_candidates.to_dataframe(), expected.final_candidates.to_dataframe()
+    )
+    assert len(actual.final_candidates) == 5
+    assert actual.final.to_dataframe().temperature_C.tolist() == (
+        [-5, -6] if effective_policy == "stop_at_decrease" else [-5, -6, -8, -9]
+    )
+    assert actual.settings["decrease_policy"] == effective_policy

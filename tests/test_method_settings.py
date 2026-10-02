@@ -185,7 +185,7 @@ def test_manual_rejects_absent_dilution_in_one_cycle_and_monotone_adjustment():
     incomplete = inptk.read_counts(rows, metadata=list(source.measurements.values()))
     with pytest.raises(ValueError):
         analyze(incomplete, inptk.ManualStitch(switch_temperatures_C=[-7]))
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError, match="enforce_monotone"):
         analyze(source, inptk.ManualStitch(switch_temperatures_C=[-7]), enforce_monotone=True)
 
 
@@ -344,14 +344,16 @@ def test_mle_numeric_string_key_is_valid_only_as_an_actual_measurement_name():
     result = analyze(
         renamed,
         inptk.MLE(
-            temperature_eligibility_C={"10": -6}, mask_mode="drop_rows",
+            temperature_eligibility_C={"10": -6},
+            mask_mode="drop_rows",
             likelihood_weights={"10": 0.25},
         ),
     )
     expected = analyze(
         original,
         inptk.MLE(
-            temperature_eligibility_C={"R1_10": -6}, mask_mode="drop_rows",
+            temperature_eligibility_C={"R1_10": -6},
+            mask_mode="drop_rows",
             likelihood_weights={"R1_10": 0.25},
         ),
     )
@@ -489,7 +491,8 @@ def test_stepwise_calculation_matches_full_workflow(name):
         )
     )
     corrected = inptk.subtract_blanks(combined, {"A": blank})
-    final = inptk.convert_concentration(corrected, source.samples, basis="sampled_air")
+    converted = inptk.convert_concentration(corrected, source.samples, basis="sampled_air")
+    final = inptk.finalize_spectrum(converted)
     full = analyze(
         source,
         method,
@@ -557,9 +560,7 @@ def test_window_max_count_cli_roundtrip_matches_stepwise_and_workflow(tmp_path):
     expected = inptk.analyze_concentration(
         source, step_C=1.0, temperature_method="window_max_count"
     )
-    fractions = inptk.frozen_fraction(
-        source, step_C=1.0, temperature_method="window_max_count"
-    )
+    fractions = inptk.frozen_fraction(source, step_C=1.0, temperature_method="window_max_count")
     actual = inptk.load(tmp_path / "result")
     pd.testing.assert_frame_equal(actual.frozen_fraction.to_dataframe(), fractions.to_dataframe())
     pd.testing.assert_frame_equal(actual.final.to_dataframe(), expected.final.to_dataframe())
@@ -604,14 +605,14 @@ def test_stepwise_table_exposes_combination_warnings():
     combined = inptk.combine_dilutions(fractions, experiment=source, method=method)
     full = analyze(source, method)
     assert combined.warnings
-    assert combined.warnings == full.warnings
+    assert set(combined.warnings).issubset(full.warnings)
     assert combined.select(temperature_C=-8).warnings == combined.warnings
 
 
 @pytest.mark.parametrize("entrypoint", ["stepwise", "workflow"])
-def test_public_mle_rejects_reusing_droplets_across_temperatures(entrypoint):
+def test_public_mle_has_no_option_to_reuse_droplets_across_temperatures(entrypoint):
     source = experiment()
-    with pytest.raises(ValueError, match="same droplets, not independent observations"):
+    with pytest.raises(TypeError, match="enforce_monotone"):
         if entrypoint == "workflow":
             inptk.analyze_concentration(source, dilution_method="mle", enforce_monotone=True)
         else:
@@ -629,9 +630,7 @@ def test_default_temperature_selection_preserves_the_latest_corrected_state():
     result = inptk.analyze_concentration(source, step_C=1)
     assert result.settings["temperature_method"] == "latest"
     assert result.settings["temperature_tolerance_C"] == 0
-    pd.testing.assert_frame_equal(
-        fractions.to_dataframe(), result.frozen_fraction.to_dataframe()
-    )
+    pd.testing.assert_frame_equal(fractions.to_dataframe(), result.frozen_fraction.to_dataframe())
 
 
 def test_explicit_max_keeps_its_temperature_tolerance_default():
@@ -642,11 +641,19 @@ def test_explicit_max_keeps_its_temperature_tolerance_default():
 
 @pytest.mark.parametrize("method", ["latest", "max"])
 def test_temperature_range_without_a_regular_threshold_returns_empty(method):
-    counts = inptk.CountsTable(pd.DataFrame({
-        "run_id": ["R"], "sample_id": ["S"], "cycle_id": ["1"],
-        "measurement_id": ["M"], "temperature_C": [-10.2],
-        "n_total": [32], "n_frozen": [1],
-    }))
+    counts = inptk.CountsTable(
+        pd.DataFrame(
+            {
+                "run_id": ["R"],
+                "sample_id": ["S"],
+                "cycle_id": ["1"],
+                "measurement_id": ["M"],
+                "temperature_C": [-10.2],
+                "n_total": [32],
+                "n_frozen": [1],
+            }
+        )
+    )
     fractions = inptk.frozen_fraction(counts, step_C=0.5, temperature_method=method)
     assert fractions.to_dataframe().empty
     assert {"n_total", "n_frozen", "measurement_id", "cycle_id"}.issubset(fractions.columns)
