@@ -58,7 +58,8 @@ def _in_range(temperature: float, limits: Mapping) -> bool:
 def _latest_position(rows: pd.DataFrame, temperature: float, limits: Mapping) -> int | None:
     if not _in_support(rows, temperature) or not _in_range(temperature, limits):
         return None
-    eligible = rows.temperature_C.ge(temperature).to_numpy()
+    # This temporary mask must be writable with pandas Copy-on-Write enabled.
+    eligible = rows.temperature_C.ge(temperature).to_numpy(copy=True)
     minimum, maximum = limits.get("min_C"), limits.get("max_C")
     if minimum is not None:
         eligible &= rows.temperature_C.ge(minimum).to_numpy()
