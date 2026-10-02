@@ -13,12 +13,13 @@ from .models import (
     CountsTable,
     SampleMetadata,
     TemperatureFrozenFractionTable,
+    _normalize_sample_type,
+    _optional_float,
+    _optional_int,
     processing_metadata_for,
 )
 
-
 CountInputFormat = Literal["auto", "long", "canonical", "icescopy", "icescopy_wide", "wide"]
-CountCyclePolicy = Literal["single", "pooled", "preserve"]
 CountColumn = Literal[
     "sample_id",
     "temperature_C",
@@ -41,8 +42,8 @@ __all__ = [
     "parse_olaf_frozen_at_temp",
     "parse_olaf_frozen_at_temp_csv",
     "parse_sync_wide",
-    "read_counts",
     "read_commented_preamble",
+    "read_counts",
     "read_icescopy_freeze_count_timeseries_csv",
     "read_icescopy_sample_metadata",
     "read_icescopy_temperature_sync_csv",
@@ -95,7 +96,13 @@ def read_sync(path: str | Path) -> tuple[pd.DataFrame, dict[str, str]]:
     """Read an Icescopy temperature-sync CSV with optional commented preamble."""
 
     preamble = read_preamble(path)
-    df = pd.read_csv(path, comment="#")
+    df = pd.read_csv(
+        path,
+        comment="#",
+        dtype={"sample_id": str, "cycle": str, "observation_id": str},
+        keep_default_na=False,
+        na_values=[""],
+    )
     return df, preamble
 
 
@@ -124,8 +131,7 @@ def read_metadata(
     row_count = max((len(values) for values in sample_rows.values()), default=0)
     for index in range(row_count):
         raw_sample_metadata = {
-            key: values[index] if index < len(values) else ""
-            for key, values in sample_rows.items()
+            key: values[index] if index < len(values) else "" for key, values in sample_rows.items()
         }
         sample_id = (
             raw_sample_metadata.get("sample_name")
@@ -139,20 +145,20 @@ def read_metadata(
             user_name=session_metadata.get("user_name", ""),
             institution=session_metadata.get("institution", ""),
             date=session_metadata.get("analysis_date", session_metadata.get("date", "")),
-            well_volume_uL=session_metadata.get("well_volume_uL"),
-            reset_temperature_C=session_metadata.get("reset_temperature_C"),
+            well_volume_uL=_optional_float(session_metadata.get("well_volume_uL")),
+            reset_temperature_C=_optional_float(session_metadata.get("reset_temperature_C")),
             sample_id=sample_id,
             sample_name=raw_sample_metadata.get("sample_name", ""),
             sample_long_name=raw_sample_metadata.get("sample_long_name", ""),
             collection_start=raw_sample_metadata.get("collection_start", ""),
             collection_end=raw_sample_metadata.get("collection_end", ""),
-            sample_type=raw_sample_metadata.get("sample_type", "other"),
-            dilution=raw_sample_metadata.get("dilution"),
-            air_volume_L=raw_sample_metadata.get("air_volume_L"),
-            filter_fraction_used=raw_sample_metadata.get("filter_fraction_used"),
-            suspension_volume_mL=raw_sample_metadata.get("suspension_volume_mL"),
-            dry_mass_g=raw_sample_metadata.get("dry_mass_g"),
-            total_cells=raw_sample_metadata.get("cell_number"),
+            sample_type=_normalize_sample_type(raw_sample_metadata.get("sample_type", "other")),
+            dilution=_optional_float(raw_sample_metadata.get("dilution")),
+            air_volume_L=_optional_float(raw_sample_metadata.get("air_volume_L")),
+            filter_fraction_used=_optional_float(raw_sample_metadata.get("filter_fraction_used")),
+            suspension_volume_mL=_optional_float(raw_sample_metadata.get("suspension_volume_mL")),
+            dry_mass_g=_optional_float(raw_sample_metadata.get("dry_mass_g")),
+            total_cells=_optional_int(raw_sample_metadata.get("cell_number")),
             raw_preamble=session_metadata,
             raw_sample_metadata=raw_sample_metadata,
         )
@@ -165,9 +171,7 @@ def read_counts(
     format: CountInputFormat = "auto",
     columns: CountColumnMap | None = None,
     metadata: Any = None,
-    cycle_policy: CountCyclePolicy = "single",
-    cycle: Any | None = None,
-) -> CountsTable | list[CountsTable] | dict[str, CountsTable | list[CountsTable]]:
+) -> dict[str, list[CountsTable]]:
     """Read count observations into sample/dilution table(s).
 
     Supported inputs:
@@ -177,10 +181,7 @@ def read_counts(
     - optional metadata as SampleMetadata, dict[str, SampleMetadata],
       dict[str, dict], metadata DataFrame, or a dict of common metadata defaults
 
-    ``cycle_policy="single"`` selects one cycle and returns a table or dilution
-    list. ``cycle_policy="pooled"`` marks all cycles for pooled threshold
-    reduction and returns a table or dilution list. ``cycle_policy="preserve"``
-    returns ``dict[cycle_id, table_or_dilution_list]``.
+    All cycles are preserved as labelled lists of measurement tables.
     """
 
     df = source.copy() if isinstance(source, pd.DataFrame) else read_sync(source)[0]
@@ -188,16 +189,16 @@ def read_counts(
     if columns is not None:
         mapped_df = map_count_columns(df, columns)
         count_tables = _count_tables_from_long_dataframe(mapped_df, metadata_source)
-        return _apply_count_cycle_policy(count_tables, cycle_policy=cycle_policy, cycle=cycle)
+        return _preserve_count_cycles(count_tables)
 
     resolved_format = _resolve_counts_format(df, format)
 
     if resolved_format == "long":
         count_tables = _count_tables_from_long_dataframe(df, metadata_source)
-        return _apply_count_cycle_policy(count_tables, cycle_policy=cycle_policy, cycle=cycle)
+        return _preserve_count_cycles(count_tables)
 
     count_tables = parse_sync_wide(df, metadata=metadata_source)
-    return _apply_count_cycle_policy(count_tables, cycle_policy=cycle_policy, cycle=cycle)
+    return _preserve_count_cycles(count_tables)
 
 
 def map_count_columns(df: pd.DataFrame, columns: CountColumnMap) -> pd.DataFrame:
@@ -225,8 +226,7 @@ def _count_tables_from_long_dataframe(
 ) -> list[CountsTable]:
     tables: list[CountsTable] = []
     groups = [
-        (str(sample_id), sample_df)
-        for sample_id, sample_df in df.groupby("sample_id", sort=False)
+        (str(sample_id), sample_df) for sample_id, sample_df in df.groupby("sample_id", sort=False)
     ]
     metadata_by_sample = _metadata_mapping_for_sample_ids(
         metadata,
@@ -248,38 +248,7 @@ def _count_tables_from_long_dataframe(
     return tables
 
 
-def _apply_count_cycle_policy(
-    tables: list[CountsTable],
-    *,
-    cycle_policy: CountCyclePolicy,
-    cycle: Any | None,
-) -> CountsTable | list[CountsTable] | dict[str, CountsTable | list[CountsTable]]:
-    if cycle_policy not in ("single", "pooled", "preserve"):
-        raise ValueError("cycle_policy must be 'single', 'pooled', or 'preserve'")
-    if cycle is not None and cycle_policy != "single":
-        raise ValueError("cycle can only be selected when cycle_policy='single'")
-    if cycle_policy == "pooled":
-        return _single_or_list(
-            [
-                _with_cycle_policy_processing(
-                    table,
-                    cycle_policy="pooled",
-                    source_cycles=_cycle_keys(_with_cycle_key(table.to_dataframe())),
-                )
-                for table in tables
-            ]
-        )
-    if cycle_policy == "single":
-        return _single_or_list(
-            [
-                _select_counts_cycle(table, cycle)
-                for table in tables
-            ]
-        )
-    return _preserve_count_cycles(tables)
-
-
-def _preserve_count_cycles(tables: list[CountsTable]) -> dict[str, CountsTable | list[CountsTable]]:
+def _preserve_count_cycles(tables: list[CountsTable]) -> dict[str, list[CountsTable]]:
     grouped: dict[str, list[CountsTable]] = {}
     for table in tables:
         keyed = _with_cycle_key(table.to_dataframe())
@@ -291,62 +260,13 @@ def _preserve_count_cycles(tables: list[CountsTable]) -> dict[str, CountsTable |
                     processing_metadata=processing_metadata_for(
                         "read_counts",
                         inputs=(table,),
-                        parameters={"cycle_policy": "preserve"},
+                        parameters={},
                         source_sample_ids=_sample_ids_from_dataframe(cycle_df),
                         source_cycles=(cycle_key,),
                     ),
                 )
             )
-    return {cycle_key: _single_or_list(cycle_tables) for cycle_key, cycle_tables in grouped.items()}
-
-
-def _select_counts_cycle(table: CountsTable, cycle: Any | None) -> CountsTable:
-    keyed = _with_cycle_key(table.to_dataframe())
-    cycle_keys = _cycle_keys(keyed)
-    selected_cycle = _selected_cycle_key(cycle_keys, cycle)
-    selected_df = keyed[keyed["_ufolaf_cycle_key"] == selected_cycle].drop(
-        columns="_ufolaf_cycle_key"
-    )
-    return CountsTable.from_dataframe(
-        selected_df.reset_index(drop=True),
-        metadata=table.metadata,
-        processing_metadata=processing_metadata_for(
-            "read_counts",
-            inputs=(table,),
-            parameters={"cycle_policy": "single", "cycle": selected_cycle},
-            source_sample_ids=_sample_ids_from_dataframe(selected_df),
-            source_cycles=(selected_cycle,),
-        ),
-    )
-
-
-def _single_or_list(tables: list[CountsTable]) -> CountsTable | list[CountsTable]:
-    return tables[0] if len(tables) == 1 else tables
-
-
-def _with_cycle_policy_processing(
-    table: CountsTable,
-    *,
-    cycle_policy: CountCyclePolicy,
-    source_cycles: list[str],
-) -> CountsTable:
-    return CountsTable(
-        sample_id=table.sample_id,
-        temperature_C=table.temperature_C,
-        n_total=table.n_total,
-        n_frozen=table.n_frozen,
-        time_s=table.time_s,
-        cycle=table.cycle,
-        observation_id=table.observation_id,
-        metadata=table.metadata,
-        processing_metadata=processing_metadata_for(
-            "read_counts",
-            inputs=(table,),
-            parameters={"cycle_policy": cycle_policy},
-            source_sample_ids=_sample_ids_from_dataframe(table.to_dataframe()),
-            source_cycles=tuple(source_cycles),
-        ),
-    )
+    return grouped
 
 
 def _sample_ids_from_dataframe(df: pd.DataFrame) -> tuple[str, ...]:
@@ -454,7 +374,7 @@ def parse_sync_wide(
             continue
         sample_id = _sample_id_from_header(sample_key)
         records: list[dict[str, Any]] = []
-        for row_index, row in data_rows.iterrows():
+        for row_index, (_, row) in enumerate(data_rows.iterrows()):
             total = _to_float_or_nan(row[columns["total"]])
             frozen = _to_float_or_nan(row[columns["frozen"]])
             if not np.isfinite(total) or not np.isfinite(frozen):
@@ -503,8 +423,8 @@ def _time_seconds(df: pd.DataFrame) -> np.ndarray:
     if "timestamp" not in df:
         return np.arange(len(df), dtype=float)
     timestamp = pd.to_datetime(df["timestamp"], errors="coerce")
-    if timestamp.notna().sum() == 0:
-        return np.arange(len(df), dtype=float)
+    if timestamp.isna().any():
+        raise ValueError("Icescopy timestamps must be valid and non-missing when supplied")
     start = timestamp.dropna().iloc[0]
     elapsed = (timestamp - start).dt.total_seconds()
     return elapsed.fillna(np.nan).to_numpy(dtype=float)
@@ -551,24 +471,6 @@ def _normalize_cycle_key(value: Any) -> str:
 
 def _cycle_keys(df: pd.DataFrame) -> list[str]:
     return [str(value) for value in pd.unique(df["_ufolaf_cycle_key"])]
-
-
-def _selected_cycle_key(cycle_keys: list[str], cycle: Any | None) -> str:
-    if not cycle_keys:
-        raise ValueError("No cycles found")
-    if cycle is None:
-        if len(cycle_keys) == 1:
-            return cycle_keys[0]
-        available = ", ".join(cycle_keys)
-        raise ValueError(
-            "Multiple cycles found. Pass cycle=..., use cycle_policy='pooled', "
-            f"or use cycle_policy='preserve'. Available cycles: {available}"
-        )
-    selected = _normalize_cycle_key(cycle)
-    if selected not in cycle_keys:
-        available = ", ".join(cycle_keys)
-        raise ValueError(f"Requested cycle {selected!r} not found. Available cycles: {available}")
-    return selected
 
 
 def _iter_cycle_dataframes(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
@@ -645,7 +547,7 @@ def _metadata_mapping_from_source(
             return {sample_id: replace(source, sample_id=sample_id) for sample_id in sample_ids}
         return {}
     if isinstance(source, (list, tuple)):
-        metadata_by_sample_id: dict[str, SampleMetadata] = {}
+        metadata_by_sample_id = {}
         for table in source:
             metadata_by_sample_id.update(
                 _metadata_mapping_from_source(getattr(table, "metadata", None))
@@ -689,10 +591,7 @@ def _metadata_mapping_from_record(
     if sample_ids is None:
         sample_id = _metadata_text(values.get("sample_id"))
         return {sample_id: _sample_metadata_from_mapping(values, sample_id)} if sample_id else {}
-    return {
-        sample_id: _sample_metadata_from_mapping(values, sample_id)
-        for sample_id in sample_ids
-    }
+    return {sample_id: _sample_metadata_from_mapping(values, sample_id) for sample_id in sample_ids}
 
 
 def _looks_like_metadata_record(values: dict[Any, Any]) -> bool:

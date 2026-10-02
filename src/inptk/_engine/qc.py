@@ -45,21 +45,24 @@ def enforce_monotonic_vs_temperature(
         if not np.isfinite(values[index]):
             previous_index = index if previous_index is None else previous_index
             continue
-        if previous_index is not None and np.isfinite(values[previous_index]):
-            if values[index] < values[previous_index]:
-                original_value = values[index]
-                values[index] = values[previous_index]
-                flags[index] = 1
-                if upper is not None:
-                    previous_upper = (
-                        upper[previous_index] if np.isfinite(upper[previous_index]) else 0.0
-                    )
-                    current_upper = upper[index] if np.isfinite(upper[index]) else 0.0
-                    upper[index] = np.sqrt(previous_upper**2 + current_upper**2)
-                if lower is not None:
-                    lower[index] = lower[previous_index]
-                if not np.isfinite(original_value):
-                    flags[index] = 2
+        if (
+            previous_index is not None
+            and np.isfinite(values[previous_index])
+            and values[index] < values[previous_index]
+        ):
+            original_value = values[index]
+            values[index] = values[previous_index]
+            flags[index] = 1
+            if upper is not None:
+                previous_upper = (
+                    upper[previous_index] if np.isfinite(upper[previous_index]) else 0.0
+                )
+                current_upper = upper[index] if np.isfinite(upper[index]) else 0.0
+                upper[index] = np.sqrt(previous_upper**2 + current_upper**2)
+            if lower is not None:
+                lower[index] = lower[previous_index]
+            if not np.isfinite(original_value):
+                flags[index] = 2
         previous_index = index
     return values, lower, upper, flags
 

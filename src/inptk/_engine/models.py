@@ -9,7 +9,6 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-
 SampleType = Literal["air", "soil", "other"]
 SAMPLE_TYPES: tuple[str, ...] = ("air", "soil", "other")
 SpectrumBasis = Literal["suspension", "sampled_air", "dry_soil", "other"]
@@ -565,6 +564,9 @@ class TemperatureDependentTable:
         _add_optional_length(lengths, "temperature_bin_right_C", self.temperature_bin_right_C)
         _same_length_or_raise(lengths)
 
+    def to_dataframe(self) -> pd.DataFrame:
+        raise NotImplementedError("A scientific table type must define its columns")
+
     def _temperature_dataframe(self) -> pd.DataFrame:
         data: dict[str, Any] = {
             "sample_id": self.sample_id.copy(),
@@ -909,32 +911,36 @@ def _basis_from_dataframe(
 
 
 def _spectrum_lengths(
-    table: TemperatureDependentTable,
+    table: DifferentialNucleusSpectrumTable
+    | CumulativeNucleusSpectrumTable
+    | NormalizedInpSpectrumTable,
     *,
     extra_names: tuple[str, ...] = (),
 ) -> dict[str, int]:
     lengths = {
         "sample_id": len(table.sample_id),
         "temperature_C": len(table.temperature_C),
-        "value": len(getattr(table, "value")),
+        "value": len(table.value),
     }
     _add_optional_length(lengths, "temperature_bin_left_C", table.temperature_bin_left_C)
     _add_optional_length(lengths, "temperature_bin_right_C", table.temperature_bin_right_C)
-    _add_optional_length(lengths, "value_unit", getattr(table, "value_unit"))
-    _add_optional_length(lengths, "basis", getattr(table, "basis"))
+    _add_optional_length(lengths, "value_unit", table.value_unit)
+    _add_optional_length(lengths, "basis", table.basis)
     for name in ("lower_ci", "upper_ci", "qc_flag", *extra_names):
         _add_optional_length(lengths, name, getattr(table, name))
     return lengths
 
 
 def _spectrum_dataframe(
-    table: TemperatureDependentTable,
+    table: DifferentialNucleusSpectrumTable
+    | CumulativeNucleusSpectrumTable
+    | NormalizedInpSpectrumTable,
     *,
     extra_names: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     data = table._temperature_dataframe()
-    data["value"] = getattr(table, "value").copy()
-    value_unit = getattr(table, "value_unit")
+    data["value"] = table.value.copy()
+    value_unit = table.value_unit
     data["value_unit"] = (
         value_unit.copy() if not isinstance(value_unit, str) else np.repeat(value_unit, len(data))
     )

@@ -3,8 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import ufolaf
-from ufolaf.cli import _resolved_temperature_tolerance_C, build_parser
+from inptk import _engine as ufolaf
 
 
 def _first_freeze_near_threshold_counts() -> ufolaf.CountsTable:
@@ -26,10 +25,10 @@ def _cool_then_warm_counts() -> ufolaf.CountsTable:
     )
 
 
-def test_olaf_fraction_mode_includes_first_frozen_rounded_row() -> None:
+def test_window_max_count_includes_first_frozen_rounded_row() -> None:
     fraction = ufolaf.fraction_frozen(
         _first_freeze_near_threshold_counts(),
-        method="olaf",
+        method="window_max_count",
         step_C=0.5,
         temperature_tolerance_C=0.01,
     ).to_dataframe()
@@ -46,7 +45,7 @@ def test_olaf_fraction_mode_includes_first_frozen_rounded_row() -> None:
     assert exact_band_row["n_frozen"] == 4
 
 
-def test_olaf_fraction_mode_does_not_change_max_threshold_behavior() -> None:
+def test_window_max_count_does_not_change_max_threshold_behavior() -> None:
     max_fraction = ufolaf.fraction_frozen(
         _first_freeze_near_threshold_counts(),
         method="max",
@@ -88,56 +87,10 @@ def test_fraction_can_include_warming_rows_for_legacy_debugging() -> None:
     assert "cooling_only" not in str(threshold_row["temperature_bin_method"])
 
 
-def test_olaf_fraction_mode_rejects_nonpositive_step() -> None:
+def test_window_max_count_rejects_nonpositive_step() -> None:
     with pytest.raises(ValueError, match="step_C must be positive"):
         ufolaf.fraction_frozen(
             _first_freeze_near_threshold_counts(),
-            method="olaf",
+            method="window_max_count",
             step_C=0.0,
         )
-
-
-def test_cli_accepts_olaf_fraction_method() -> None:
-    args = build_parser().parse_args(
-        [
-            "fraction",
-            "counts.ufolaf",
-            "--out",
-            "fraction.ufolaf",
-            "--method",
-            "olaf",
-        ]
-    )
-
-    assert args.method == "olaf"
-    assert _resolved_temperature_tolerance_C(args) == 0.01
-    assert args.cooling_only is True
-
-
-def test_cli_can_include_warming_rows_for_fraction() -> None:
-    args = build_parser().parse_args(
-        [
-            "fraction",
-            "counts.ufolaf",
-            "--out",
-            "fraction.ufolaf",
-            "--include-warming",
-        ]
-    )
-
-    assert args.cooling_only is False
-
-
-def test_cli_keeps_existing_default_tolerance_for_max_fraction_method() -> None:
-    args = build_parser().parse_args(
-        [
-            "fraction",
-            "counts.ufolaf",
-            "--out",
-            "fraction.ufolaf",
-            "--method",
-            "max",
-        ]
-    )
-
-    assert _resolved_temperature_tolerance_C(args) == 0.0
