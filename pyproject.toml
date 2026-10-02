@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inptk"
-version = "0.2.0"
+version = "0.3.0"
 description = "INP-toolkit: workflows for ice nucleating particle freezing assays"
 authors = [
     {name = "INP-toolkit contributors"}

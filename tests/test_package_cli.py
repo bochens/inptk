@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from analysis_checks import all_points, retained, sampled
 
 import inptk
 
@@ -50,15 +51,20 @@ def test_cli_matches_python_and_preserves_cycle_ids(tmp_path, sample_id):
     )
     restored = inptk.load(tmp_path / "result")
     expected = inptk.analyze_concentration(inptk.read_counts(counts, metadata=metadata))
-    pd.testing.assert_frame_equal(restored.final.to_dataframe(), expected.final.to_dataframe())
-    assert set(restored.final.to_dataframe().sample_id) == {sample_id}
-    assert set(restored.final.to_dataframe().group_id) == {f"{sample_id}/1/01", f"{sample_id}/1/02"}
+    pd.testing.assert_frame_equal(
+        retained(restored).to_dataframe(), retained(expected).to_dataframe()
+    )
+    assert set(retained(restored).to_dataframe().sample_id) == {sample_id}
+    assert set(retained(restored).to_dataframe().curve_id) == {
+        f"{sample_id}/1/01",
+        f"{sample_id}/1/02",
+    }
     assert (
         restored.settings["observation_processing"]
         == "native; latest warmer alignment only where required"
     )
     assert restored.settings["output_step_C"] is None
-    assert restored.resampled is None
+    assert sampled(restored) is None
     assert restored.settings["decrease_policy"] == "stop_at_decrease"
     payload = json.loads((tmp_path / "result" / "analysis.json").read_text())
     assert payload["toolkit_version"] == inptk.__version__
@@ -158,10 +164,10 @@ def test_cli_selects_exact_sample_and_cycle_and_saves_selection(
     expected_selection = {"sample_id": ["007"], "cycle_id": ["01"]}
     assert result.experiment.source["selection"] == expected_selection
     assert result.experiment.counts.history[-1] == {"operation": "select", **expected_selection}
-    expected = inptk.analyze_concentration(selection_source).final.select(group_id="007/1/01")
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.to_dataframe())
-    assert set(result.final.to_dataframe().group_id) == {"007/1/01"}
-    assert set(result.final.to_dataframe().sample_id) == {"007"}
+    expected = retained(inptk.analyze_concentration(selection_source)).select(curve_id="007/1/01")
+    pd.testing.assert_frame_equal(retained(result).to_dataframe(), expected.to_dataframe())
+    assert set(retained(result).to_dataframe().curve_id) == {"007/1/01"}
+    assert set(retained(result).to_dataframe().sample_id) == {"007"}
     original = inptk.load(tmp_path / "source.inptk")
     assert len(original.counts) == 27
     assert "selection" not in original.source
@@ -197,7 +203,7 @@ def test_cli_repeatable_selection_keeps_requested_labels_and_deduplicates_proven
     assert set(result.experiment.samples) == {"007", "NA"}
     assert set(result.experiment.measurements) == {"Sample_0", "Sample_2"}
     assert len(result.experiment.counts) == 12
-    assert set(result.final.to_dataframe().group_id) == {
+    assert set(retained(result).to_dataframe().curve_id) == {
         "007/1/01",
         "007/1/02",
         "NA/1/01",
@@ -262,12 +268,14 @@ def test_cli_final_decrease_policy_matches_python_and_keeps_candidates(tmp_path,
     expected = inptk.analyze_concentration(
         inptk.read_counts(counts, metadata=metadata), decrease_policy=effective_policy
     )
-    pd.testing.assert_frame_equal(actual.final.to_dataframe(), expected.final.to_dataframe())
     pd.testing.assert_frame_equal(
-        actual.final_candidates.to_dataframe(), expected.final_candidates.to_dataframe()
+        retained(actual).to_dataframe(), retained(expected).to_dataframe()
     )
-    assert len(actual.final_candidates) == 5
-    assert actual.final.to_dataframe().temperature_C.tolist() == (
+    pd.testing.assert_frame_equal(
+        all_points(actual).to_dataframe(), all_points(expected).to_dataframe()
+    )
+    assert len(all_points(actual)) == 5
+    assert retained(actual).to_dataframe().temperature_C.tolist() == (
         [-5, -6] if effective_policy == "stop_at_decrease" else [-5, -6, -8, -9]
     )
     assert actual.settings["decrease_policy"] == effective_policy

@@ -3,6 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
+from analysis_checks import all_points, fit_estimates, input_spectra, retained
 
 import inptk
 
@@ -41,34 +42,36 @@ def test_one_workflow_handles_single_overlap_and_gaps_with_explicit_sources(meth
         ]
     )
     ranges = {"A": {"min_C": -6}, "B": {"min_C": -6, "max_C": -6}}
-    result = inptk.analyze_concentration(
-        source, method=method, temperature_ranges_C=ranges
-    )
-    combined = result.combined.to_dataframe().sort_values("temperature_C", ascending=False)
+    result = inptk.analyze_concentration(source, method=method, temperature_ranges_C=ranges)
+    combined = fit_estimates(result).to_dataframe().sort_values("temperature_C", ascending=False)
     assert combined.contributor_count.tolist() == [1, 2, 0]
     assert combined.selection_status.tolist() == ["single", "combined", "no_eligible_measurements"]
     assert combined.contributing_measurement_ids.map(json.loads).tolist() == [["A"], ["A", "B"], []]
     assert np.isnan(combined.concentration.iloc[-1])
-    per = result.per_dilution.to_dataframe().set_index(["measurement_id", "temperature_C"])
+    per = input_spectra(result).to_dataframe().set_index(["measurement_id", "temperature_C"])
     for column in ("concentration", "lower_error", "upper_error"):
         assert combined.iloc[0][column] == per.loc[("A", -5), column]
-    excluded = result.per_dilution.to_dataframe().query(
-        "selection_status == 'outside_temperature_range'"
+    excluded = (
+        input_spectra(result)
+        .to_dataframe()
+        .query("selection_status == 'outside_temperature_range'")
     )
     assert excluded.concentration.isna().all()
     assert excluded.n_total.eq(32).all()
     assert len(result.frozen_fraction) == 6
     fractions = inptk.frozen_fraction(source)
-    stepwise = inptk.combine_dilutions(
+    stepwise = inptk.estimate_concentration(
         fractions, experiment=source, method=method, temperature_ranges_C=ranges
     )
-    pd.testing.assert_frame_equal(result.combined.to_dataframe(), stepwise.to_dataframe())
+    pd.testing.assert_frame_equal(fit_estimates(result).to_dataframe(), stepwise.to_dataframe())
 
 
 def test_average_is_equal_weight_concentration_mean_while_mle_uses_counts():
     source = observations([("A", 4, [1], 1, 50), ("B", 32, [20], 1, 50)], (-5,))
-    mean = inptk.analyze_concentration(source, method="average").combined.to_dataframe().iloc[0]
-    mle = inptk.analyze_concentration(source, method="mle").combined.to_dataframe().iloc[0]
+    mean = (
+        fit_estimates(inptk.analyze_concentration(source, method="average")).to_dataframe().iloc[0]
+    )
+    mle = fit_estimates(inptk.analyze_concentration(source, method="mle")).to_dataframe().iloc[0]
     expected_mean = (-np.log(3 / 4) - np.log(12 / 32)) / (2 * 0.05)
     expected_mle = -np.log(15 / 36) / 0.05
     assert mean.concentration == pytest.approx(expected_mean)
@@ -78,8 +81,10 @@ def test_average_is_equal_weight_concentration_mean_while_mle_uses_counts():
 
 def test_saturated_measurements_are_not_silently_discarded():
     source = observations([("A", 4, [4], 1, 50), ("B", 32, [8], 10, 50)], (-5,))
-    mle = inptk.analyze_concentration(source, method="mle").combined.to_dataframe().iloc[0]
-    mean = inptk.analyze_concentration(source, method="average").combined.to_dataframe().iloc[0]
+    mle = fit_estimates(inptk.analyze_concentration(source, method="mle")).to_dataframe().iloc[0]
+    mean = (
+        fit_estimates(inptk.analyze_concentration(source, method="average")).to_dataframe().iloc[0]
+    )
     assert np.isfinite(mle.concentration)
     assert np.isinf(mean.concentration)
     assert mle.contributor_count == mean.contributor_count == 2
@@ -92,8 +97,8 @@ def test_equal_exposure_contributor_change_does_not_create_a_false_decrease():
         result = inptk.analyze_concentration(
             source, method=method, temperature_ranges_C={"B": {"max_C": -6}}
         )
-        assert len(result.final) == 2
-        assert result.final.to_dataframe().concentration.nunique() == 1
+        assert len(retained(result)) == 2
+        assert retained(result).to_dataframe().concentration.nunique() == 1
 
 
 def test_filter_blank_does_not_require_coverage_at_excluded_temperatures():
@@ -116,7 +121,7 @@ def test_filter_blank_does_not_require_coverage_at_excluded_temperatures():
     result = inptk.analyze_concentration(
         source,
         temperature_ranges_C={"A": {"min_C": -6, "max_C": -6}},
-        blank_by_group={"S/R/01": blank},
+        blank_by_curve={"S/R/01": blank},
     )
-    assert result.final.to_dataframe().temperature_C.tolist() == [-6]
-    assert result.final_candidates.to_dataframe().concentration.isna().sum() == 2
+    assert retained(result).to_dataframe().temperature_C.tolist() == [-6]
+    assert all_points(result).to_dataframe().concentration.isna().sum() == 2

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from .tables import CombinedSpectrumTable
+    from .tables import CurveSpectrumTable
 
 
 def _grid(temperatures: pd.Series, step: float) -> list[float]:
@@ -80,7 +80,7 @@ def _record(
 
     record = {
         "sample_id": first.sample_id,
-        "group_id": first.group_id,
+        "curve_id": first.curve_id,
         "point_id": f"resampled:{segment_number}:{point_order}",
         "temperature_C": temperature,
         "concentration": weighted_value("concentration"),
@@ -117,10 +117,10 @@ def _record(
 
 
 def resample_spectrum(
-    spectrum: CombinedSpectrumTable,
+    spectrum: CurveSpectrumTable,
     step_C: float,
     method: Literal["sample", "interpolate"] = "sample",
-) -> CombinedSpectrumTable:
+) -> CurveSpectrumTable:
     """Return a separate final-temperature view without refitting any observations.
 
     Sampling chooses the latest retained warmer state in native point order.
@@ -132,10 +132,10 @@ def resample_spectrum(
     fitted uncertainty. Neither method extends outside a segment or crosses
     excluded rows. Existing source extrapolation flags remain in the output.
     """
-    from .tables import CombinedSpectrumTable
+    from .tables import CurveSpectrumTable
 
-    if not isinstance(spectrum, CombinedSpectrumTable):
-        raise TypeError("spectrum must be a CombinedSpectrumTable")
+    if not isinstance(spectrum, CurveSpectrumTable):
+        raise TypeError("spectrum must be a CurveSpectrumTable")
     if method not in ("sample", "interpolate"):
         raise ValueError("resampling method must be 'sample' or 'interpolate'")
     if isinstance(step_C, bool) or not np.isfinite(step_C) or step_C <= 0:
@@ -146,7 +146,7 @@ def resample_spectrum(
         raise ValueError(f"Resampling requires retained-segment provenance: {sorted(missing)}")
     has_errors = "lower_error" in source and "upper_error" in source
     records = []
-    for _, group in source.groupby("group_id", sort=False):
+    for _, group in source.groupby("curve_id", sort=False):
         point_order = 0
         for segment_number, segment in enumerate(_retained_segments(group)):
             latest = segment.sort_values("point_order", kind="stable")
@@ -199,7 +199,7 @@ def resample_spectrum(
                 point_order += 1
     columns = [
         "sample_id",
-        "group_id",
+        "curve_id",
         "point_id",
         "temperature_C",
         "concentration",
@@ -222,7 +222,7 @@ def resample_spectrum(
     ]
     if has_errors:
         columns.extend(["lower_error", "upper_error"])
-    return CombinedSpectrumTable(
+    return CurveSpectrumTable(
         pd.DataFrame.from_records(records, columns=columns),
         history=spectrum.history
         + [

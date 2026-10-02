@@ -25,8 +25,20 @@ metadata = pd.DataFrame(
     ]
 )
 experiment = inptk.read_counts(pd.DataFrame(observations), metadata=metadata)
-result = inptk.analyze_concentration(experiment)
+result = inptk.analyze_concentration(
+    experiment,
+    curves={
+        "A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"},
+        "A_neat": {"inputs": ["A_neat"], "cycle": "1"},
+        "A_diluted": {"inputs": ["A_diluted"], "cycle": "1"},
+        "A_cycle2": {"inputs": ["A_neat", "A_diluted"], "cycle": "2"},
+    },
+)
 
-print(result.final.select(group_id="A/1/1").to_dataframe())
+print(result.curves["A"].cumulative.to_dataframe())
+print(result.curves["A"].sources)
+# Individual and combined curves use the same interface. They reuse original
+# observations; keeping these outputs does not create more independent droplets.
+print({name: curve.kind for name, curve in result.curves.items()})
 # When ready to save, choose a new destination:
 # result.save("analysis.inptk")

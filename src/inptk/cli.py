@@ -21,7 +21,7 @@ from .experiment import AnalysisResult, Experiment
 from .io import FORMAT_VERSION, _encode, _table_payload
 from .tables import CountsTable
 
-CLI_PROTOCOL_VERSION = 1
+CLI_PROTOCOL_VERSION = 2
 
 
 class _UsageError(Exception):
@@ -61,7 +61,7 @@ def build_parser():
     preview.add_argument("--run-id", default="1")
     _json_flag(preview)
     analyze = commands.add_parser(
-        "analyze", help="Combine original observations into explicit sample groups"
+        "analyze", help="Calculate named concentration curves from original observations"
     )
     _json_flag(analyze)
     analyze.add_argument("input")
@@ -112,8 +112,8 @@ def build_parser():
         "--output-basis", choices=("suspension", "sampled_air", "dry_soil"), default="suspension"
     )
     analyze.add_argument(
-        "--combination-groups",
-        help="JSON object or file mapping group IDs to lists of measurement_id/cycle_id members",
+        "--curves",
+        help="JSON object or file mapping curve names to inputs lists and optional cycle labels",
     )
     analyze.add_argument(
         "--output-step-C",
@@ -129,13 +129,14 @@ def build_parser():
         default="stop_at_decrease",
         help="Select final cumulative points without changing calculated values",
     )
-    export = commands.add_parser(
-        "export-csv", help="Export final concentration rows from a saved analysis"
-    )
+    export = commands.add_parser("export-csv", help="Export a quantity from named saved curves")
     _json_flag(export)
     export.add_argument("input")
     export.add_argument("--out", required=True)
-    export.add_argument("--table", choices=("final", "resampled"), default="final")
+    export.add_argument("--curve", help="Export one exact curve name; otherwise export all curves")
+    export.add_argument(
+        "--table", choices=("cumulative", "resampled", "excluded"), default="cumulative"
+    )
     return parser
 
 
@@ -198,7 +199,16 @@ def _json_object(value, option):
     payload = value
     if not payload.lstrip().startswith(("{", "[")):
         payload = Path(payload).read_text(encoding="utf-8")
-    result = json.loads(payload)
+
+    def unique_keys(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"{option} contains a duplicate name: {key!r}")
+            result[key] = item
+        return result
+
+    result = json.loads(payload, object_pairs_hook=unique_keys)
     if not isinstance(result, dict):
         raise TypeError(f"{option} must contain a JSON object")
     return result
@@ -252,15 +262,13 @@ def _capabilities(parser):
     return _response(
         "capabilities",
         commands=commands,
-        result_tables=[
-            "frozen_fraction",
-            "per_dilution",
-            "combined",
-            "final_candidates",
-            "final",
-            "differential",
-            "resampled",
-        ],
+        observation_tables=["counts", "frozen_fraction"],
+        curve_tables=["cumulative", "excluded", "differential", "resampled"],
+        curve_specification={
+            "inputs": "Nonempty list of input names or measurement_id/cycle_id objects",
+            "cycle": "Optional exact label for input names; required if several cycles exist",
+            "default": "One curve per original sample, run and cycle",
+        },
         json_number_encoding={"nonfinite_key": "$nonfinite", "values": ["nan", "inf", "-inf"]},
         exit_codes={"success": 0, "processing_error": 1, "usage_error": 2, "cancelled": 130},
     )
@@ -393,14 +401,19 @@ def main(argv=None):
             result = load(args.input)
             if not isinstance(result, AnalysisResult):
                 raise TypeError("CSV export requires a saved AnalysisResult")
-            result.export_csv(args.out, table=args.table)
+            result.export_csv(args.out, table=args.table, curve_id=args.curve)
             if json_mode:
                 _print_json(
-                    _response(command, output=str(Path(args.out).resolve()), table=args.table)
+                    _response(
+                        command,
+                        output=str(Path(args.out).resolve()),
+                        table=args.table,
+                        curve_id=args.curve,
+                    )
                 )
             return 0
         temperature_ranges = _json_object(args.temperature_ranges, "--temperature-ranges")
-        combination_groups = _json_object(args.combination_groups, "--combination-groups")
+        curves = _json_object(args.curves, "--curves")
         if args.format == "native":
             if args.sample_map:
                 raise ValueError("--sample-map applies only to Icescopy input")
@@ -441,7 +454,7 @@ def main(argv=None):
             experiment,
             method=args.method,
             temperature_ranges_C=temperature_ranges,
-            combination_groups=combination_groups,
+            curves=curves,
             output_basis=args.output_basis,
             output_step_C=args.output_step_C,
             output_method=args.output_method,
@@ -458,25 +471,38 @@ def main(argv=None):
                     output=str(Path(args.out).resolve()),
                     warnings=result.warnings,
                     settings=result.settings,
-                    tables={
-                        name: {"type": type(table).__name__, "row_count": len(table)}
-                        for name in (
-                            "frozen_fraction",
-                            "per_dilution",
-                            "combined",
-                            "final_candidates",
-                            "final",
-                            "differential",
-                            "resampled",
-                        )
-                        if (table := getattr(result, name)) is not None
+                    observation_tables={
+                        "counts": {"type": "CountsTable", "row_count": len(result.counts)},
+                        "frozen_fraction": {
+                            "type": "FrozenFractionTable",
+                            "row_count": len(result.frozen_fraction),
+                        },
+                    },
+                    curves={
+                        name: {
+                            "curve_id": curve.curve_id,
+                            "kind": curve.kind,
+                            "sources": curve.sources,
+                            "tables": {
+                                quantity: {"type": type(table).__name__, "row_count": len(table)}
+                                for quantity in (
+                                    "cumulative",
+                                    "excluded",
+                                    "differential",
+                                    "resampled",
+                                )
+                                if (table := getattr(curve, quantity)) is not None
+                            },
+                        }
+                        for name, curve in result.curves.items()
                     },
                 )
             )
         else:
             for warning in result.warnings:
                 print(f"Warning: {warning}")
-            print(f"Saved {len(result.final)} concentration rows to {args.out}")
+            count = sum(len(curve.cumulative) for curve in result.curves.values())
+            print(f"Saved {count} concentration rows in {len(result.curves)} curves to {args.out}")
     except _UsageError as error:
         if json_mode:
             _print_json(

@@ -9,23 +9,23 @@ from pathlib import Path
 
 import pandas as pd
 
-from .experiment import AnalysisResult, Experiment, MeasurementMetadata, SampleMetadata
+from .experiment import AnalysisResult, CurveResult, Experiment, MeasurementMetadata, SampleMetadata
 from .tables import (
-    CombinedSpectrumTable,
     CountsTable,
     CumulativeSpectrumTable,
+    CurveSpectrumTable,
     DifferentialSpectrumTable,
     FrozenFractionTable,
 )
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 TABLE_TYPES = {
     cls.__name__: cls
     for cls in (
         CountsTable,
         FrozenFractionTable,
         CumulativeSpectrumTable,
-        CombinedSpectrumTable,
+        CurveSpectrumTable,
         DifferentialSpectrumTable,
     )
 }
@@ -55,6 +55,7 @@ def _table_payload(table):
     return {
         "type": type(table).__name__,
         "columns": list(table.columns),
+        "dtypes": {name: str(dtype) for name, dtype in table.to_dataframe().dtypes.items()},
         "rows": table.to_dataframe().to_dict("records"),
         "history": table.history,
     }
@@ -63,7 +64,8 @@ def _table_payload(table):
 def _table_from_payload(payload):
     cls = TABLE_TYPES[payload["type"]]
     return cls(
-        pd.DataFrame(payload["rows"], columns=payload["columns"]), history=payload["history"]
+        pd.DataFrame(payload["rows"], columns=payload["columns"]).astype(payload["dtypes"]),
+        history=payload["history"],
     )
 
 
@@ -85,7 +87,7 @@ def _experiment_from_payload(payload):
             key: MeasurementMetadata(**value) for key, value in payload["measurements"].items()
         },
         source=payload["source"],
-        water_blank_map=payload.get("water_blank_map", {}),
+        water_blank_map=payload["water_blank_map"],
     )
 
 
@@ -97,18 +99,18 @@ def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
         payload = {
             "kind": "analysis",
             "experiment": _experiment_payload(value.experiment),
-            "tables": {
-                name: _table_payload(getattr(value, name))
-                for name in (
-                    "frozen_fraction",
-                    "per_dilution",
-                    "combined",
-                    "final",
-                    "differential",
-                    "final_candidates",
-                    "resampled",
-                )
-                if getattr(value, name) is not None
+            "frozen_fraction": _table_payload(value.frozen_fraction),
+            "curves": {
+                name: {
+                    "curve_id": curve.curve_id,
+                    "sources": curve.sources,
+                    "tables": {
+                        quantity: _table_payload(table)
+                        for quantity in ("cumulative", "excluded", "differential", "resampled")
+                        if (table := getattr(curve, quantity)) is not None
+                    },
+                }
+                for name, curve in value.curves.items()
             },
             "settings": value.settings,
             "history": value.history,
@@ -134,10 +136,17 @@ def load(path: str | Path) -> Experiment | AnalysisResult:
         return experiment
     if payload["kind"] != "analysis":
         raise ValueError(f"Unknown saved object kind {payload['kind']!r}")
-    tables = {name: _table_from_payload(item) for name, item in payload["tables"].items()}
     return AnalysisResult(
         experiment=experiment,
-        **tables,
+        frozen_fraction=_table_from_payload(payload["frozen_fraction"]),
+        curves={
+            name: CurveResult(
+                curve_id=item["curve_id"],
+                sources=item["sources"],
+                **{key: _table_from_payload(table) for key, table in item["tables"].items()},
+            )
+            for name, item in payload["curves"].items()
+        },
         settings=payload["settings"],
         history=payload["history"],
         warnings=payload["warnings"],

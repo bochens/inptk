@@ -1,4 +1,4 @@
-"""Native-observation concentration workflows with explicit combination groups."""
+"""Native-observation concentration workflows with named output curves."""
 
 from __future__ import annotations
 
@@ -11,18 +11,18 @@ import pandas as pd
 from .alignment import align_observations
 from .experiment import AnalysisResult, Experiment, SampleMetadata
 from .methods import (
-    validate_combination_groups,
+    curve_specifications,
+    resolve_curves,
     validate_combination_method,
     validate_temperature_ranges,
 )
 from .processing import (
-    cumulative_spectrum,
     differential_spectrum,
     frozen_fraction,
     prepare_fraction_analysis,
 )
 from .resampling import resample_spectrum
-from .tables import UNITS, CombinedSpectrumTable, CumulativeSpectrumTable, FrozenFractionTable
+from .tables import UNITS, CumulativeSpectrumTable, CurveSpectrumTable, FrozenFractionTable
 from .water_blank import estimate_point, sample_rows
 
 SpectrumT = TypeVar("SpectrumT", bound=CumulativeSpectrumTable)
@@ -49,8 +49,8 @@ def convert_concentration(spectrum: SpectrumT, samples: dict[str, SampleMetadata
 
 
 def _curve_columns(data: pd.DataFrame) -> list[str]:
-    if "group_id" in data:
-        return ["sample_id", "group_id"]
+    if "curve_id" in data:
+        return ["sample_id", "curve_id"]
     columns = ["run_id", "sample_id", "cycle_id"]
     if "measurement_id" in data:
         columns.append("measurement_id")
@@ -62,12 +62,12 @@ def subtract_blanks(
 ) -> SpectrumT:
     """Subtract explicit, temperature-matched sample/filter blank spectra.
 
-    Map a combined group ID, or an individual spectrum's sample ID, to one
+    Map a named curve ID, or an input spectrum's sample ID, to one
     already aligned blank curve. This is separate from raw assay-blank fitting.
     Opposite error widths use an approximate independent-error propagation.
     """
     data = spectrum.to_dataframe()
-    target_column = "group_id" if isinstance(spectrum, CombinedSpectrumTable) else "sample_id"
+    target_column = "curve_id" if isinstance(spectrum, CurveSpectrumTable) else "sample_id"
     if not data.basis.eq("suspension").all():
         raise ValueError("Blank correction requires suspension concentrations")
     extra = set(blank_by_target) - set(data[target_column])
@@ -166,20 +166,20 @@ def _sources(point) -> list[dict]:
     return records
 
 
-def combine_dilutions(
+def estimate_concentration(
     fractions: FrozenFractionTable,
     *,
     experiment: Experiment,
     method: Literal["mle", "average"] = "mle",
     temperature_ranges_C=None,
-    combination_groups=None,
+    curves=None,
     z: float = 1.96,
     water_blank_correction: bool = True,
-) -> CombinedSpectrumTable:
-    """Combine explicit droplet sets, preserving native states and run backgrounds.
+) -> CurveSpectrumTable:
+    """Estimate named curves, preserving native states and run backgrounds.
 
-    With no group mapping, each sample/run/cycle remains separate. Explicit
-    groups can span runs but select only one cycle from each run. Observations
+    With no curves supplied, each sample/run/cycle remains separate. Explicit
+    curves can span runs but select only one cycle from each run. Observations
     align only where needed, using latest warmer states at observed targets.
     """
     method = validate_combination_method(method)
@@ -196,9 +196,9 @@ def combine_dilutions(
     ranges = validate_temperature_ranges(
         temperature_ranges_C, measurement_ids=set(experiment.measurements) - blank_ids
     )
-    groups = validate_combination_groups(combination_groups, experiment, frame)
+    groups = resolve_curves(curves, experiment, frame)
     records, notices, group_alignment, cache = [], [], {}, {}
-    for group_id, group in groups.items():
+    for curve_id, group in groups.items():
         members = group["members"]
         ids = sorted(member["measurement_id"] for member in members)
         supports = {}
@@ -215,7 +215,7 @@ def combine_dilutions(
             frame, members, water_blank_map=experiment.water_blank_map, temperature_ranges_C=ranges
         )
         empty_count = 0
-        group_alignment[group_id] = sorted({point.alignment for point in points})
+        group_alignment[curve_id] = sorted({point.alignment for point in points})
         for point in points:
             contributors = sorted(point.samples.measurement_id.astype(str).tolist())
             available = sorted(
@@ -223,7 +223,7 @@ def combine_dilutions(
             )
             record = {
                 "sample_id": group["sample_id"],
-                "group_id": group_id,
+                "curve_id": curve_id,
                 "point_id": point.point_id,
                 "point_order": point.point_order,
                 "temperature_C": point.temperature_C,
@@ -282,11 +282,12 @@ def combine_dilutions(
             record["at_zero_boundary"] = record["concentration"] == 0
             records.append(record)
         if empty_count:
-            notices.append(f"Group {group_id!r}: {empty_count} points have no eligible measurement")
+            notices.append(f"Curve {curve_id!r}: {empty_count} points have no eligible input")
     settings = {
-        "operation": "combine_dilutions",
+        "operation": "estimate_concentration",
         "estimation_method": method,
-        "combination_groups": groups,
+        "curves": curve_specifications(groups),
+        "curve_sources": groups,
         "temperature_ranges_C": ranges,
         "range_boundaries": "inclusive; source and target",
         "alignment": group_alignment,
@@ -304,7 +305,7 @@ def combine_dilutions(
         ),
         "warnings": notices,
     }
-    return CombinedSpectrumTable(
+    return CurveSpectrumTable(
         pd.DataFrame.from_records(records), history=fractions.history + [settings]
     )
 
@@ -425,11 +426,11 @@ def analyze_concentration(
     *,
     method: Literal["mle", "average"] = "mle",
     temperature_ranges_C=None,
-    combination_groups=None,
+    curves=None,
     output_basis: str = "suspension",
     z: float = 1.96,
     differential: bool = False,
-    blank_by_group: dict[str, CumulativeSpectrumTable] | None = None,
+    blank_by_curve: dict[str, CumulativeSpectrumTable] | None = None,
     water_blank_correction: bool = True,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = "stop_at_decrease",
     output_step_C: float | None = None,
@@ -448,31 +449,48 @@ def analyze_concentration(
         raise ValueError("output_step_C must be finite and positive")
     source = analysis_experiment(experiment, water_blank_correction=water_blank_correction)
     fractions = frozen_fraction(source)
-    combined = combine_dilutions(
+    observed_fractions = fractions if source is experiment else frozen_fraction(experiment)
+    if differential:
+        requested_curves = resolve_curves(curves, source, fractions.to_dataframe())
+        if any(len(group["members"]) != 1 for group in requested_curves.values()):
+            raise ValueError(
+                "Differential output currently requires individual curves. "
+                "Request one input per curve, or use differential_spectrum separately."
+            )
+        if output_basis != "suspension" or blank_by_curve:
+            raise ValueError(
+                "Differential output currently requires suspension basis without "
+                "an additional sample/filter blank spectrum"
+            )
+    combined = estimate_concentration(
         fractions,
         experiment=experiment,
         method=method,
         temperature_ranges_C=temperature_ranges_C,
-        combination_groups=combination_groups,
+        curves=curves,
         z=z,
         water_blank_correction=water_blank_correction,
     )
     analysis_fractions = fractions
-    if combination_groups is not None:
-        # Explicit output groups also define which individual curves need fits.
-        # Keep the full archived fractions and experiment for inspection; only
-        # this calculation view excludes unrequested measurements and cycles.
-        resolved = combined.history[-1]["combination_groups"]
+    if differential and curves is not None:
+        # Differential fits need only selected input/cycle rows and their blanks.
+        # The archived observations remain complete.
+        resolved = combined.history[-1]["curve_sources"]
         keys = ["measurement_id", "run_id", "cycle_id"]
         members = {
             tuple(str(member[key]) for key in keys)
-            for group in resolved.values() for member in group["members"]
+            for group in resolved.values()
+            for member in group["members"]
         }
-        blanks = {
-            (blank_id, run, cycle)
-            for measurement, run, cycle in members
-            for blank_id in experiment.water_blank_map.get(measurement, [])
-        } if water_blank_correction else set()
+        blanks = (
+            {
+                (blank_id, run, cycle)
+                for measurement, run, cycle in members
+                for blank_id in experiment.water_blank_map.get(measurement, [])
+            }
+            if water_blank_correction
+            else set()
+        )
         requested = members | blanks
         frame = fractions.to_dataframe()
         selected = [
@@ -480,23 +498,19 @@ def analyze_concentration(
         ]
         analysis_fractions = FrozenFractionTable(
             frame.loc[selected],
-            history=fractions.history + [{
-                "operation": "select_combination_members",
-                "combination_group_ids": list(resolved),
-                "members": [dict(zip(keys, member, strict=True)) for member in sorted(members)],
-                "water_blank_context": [
-                    dict(zip(keys, blank, strict=True)) for blank in sorted(blanks)
-                ],
-            }],
+            history=fractions.history
+            + [
+                {
+                    "operation": "select_curve_inputs",
+                    "curve_ids": list(resolved),
+                    "members": [dict(zip(keys, member, strict=True)) for member in sorted(members)],
+                    "water_blank_context": [
+                        dict(zip(keys, blank, strict=True)) for blank in sorted(blanks)
+                    ],
+                }
+            ],
         )
-    individual = cumulative_spectrum(
-        analysis_fractions,
-        experiment=experiment,
-        temperature_ranges_C=temperature_ranges_C,
-        z=z,
-        water_blank_correction=water_blank_correction,
-    )
-    candidates = subtract_blanks(combined, blank_by_group) if blank_by_group else combined
+    candidates = subtract_blanks(combined, blank_by_curve) if blank_by_curve else combined
     if output_basis != "suspension":
         candidates = convert_concentration(candidates, experiment.samples, basis=output_basis)
     final_candidates = _final_candidates(candidates, decrease_policy=decrease_policy)
@@ -519,7 +533,7 @@ def analyze_concentration(
     settings = {
         "estimation_method": method,
         "temperature_ranges_C": combined.history[-1]["temperature_ranges_C"],
-        "combination_groups": combined.history[-1]["combination_groups"],
+        "curves": combined.history[-1]["curves"],
         "observation_processing": "native; latest warmer alignment only where required",
         "output_basis": output_basis,
         "output_step_C": output_step_C,
@@ -540,15 +554,19 @@ def analyze_concentration(
             + (differential_result.warnings if differential_result is not None else [])
         )
     )
+    from .results import assemble_curves
+
     return AnalysisResult(
         experiment=experiment,
-        frozen_fraction=fractions,
-        per_dilution=individual,
-        combined=combined,
-        final=final,
-        differential=differential_result,
-        final_candidates=final_candidates,
-        resampled=sampled,
+        frozen_fraction=observed_fractions,
+        curves=assemble_curves(
+            final,
+            final_candidates,
+            combined.history[-1]["curve_sources"],
+            experiment=experiment,
+            resampled=sampled,
+            differential=differential_result,
+        ),
         settings=settings,
         history=history,
         warnings=warnings,

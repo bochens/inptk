@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from analysis_checks import all_points
 
 import inptk
 
@@ -85,9 +86,11 @@ def test_cli_temperature_ranges_match_python_and_keep_inclusive_boundaries(
     expected = inptk.analyze_concentration(
         range_source, method=method or "mle", temperature_ranges_C=ranges
     )
-    pd.testing.assert_frame_equal(result.combined.to_dataframe(), expected.combined.to_dataframe())
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
-    rows = result.combined.to_dataframe().set_index("temperature_C")
+    pd.testing.assert_frame_equal(
+        all_points(result).to_dataframe(), all_points(expected).to_dataframe()
+    )
+    pd.testing.assert_frame_equal(result.to_dataframe(), expected.to_dataframe())
+    rows = all_points(result).to_dataframe().set_index("temperature_C")
     assert rows.contributor_count.to_dict() == {-5.0: 0, -6.0: 1, -7.0: 2, -8.0: 2, -9.0: 1}
     assert rows.loc[-5, "selection_status"] == "no_eligible_measurements"
     assert rows.loc[-6, "source_measurement_id"] == "001"
@@ -140,7 +143,7 @@ def test_cli_does_not_offer_synthetic_window_counts_for_concentration():
     process = run_cli("analyze", "--help")
     assert process.returncode == 0
     assert "--temperature-ranges" in process.stdout
-    assert "--combination-groups" in process.stdout
+    assert "--curves" in process.stdout
     assert "--output-step-C" in process.stdout
     assert "--output-method {sample,interpolate}" in process.stdout
     assert "--temperature-method" not in process.stdout

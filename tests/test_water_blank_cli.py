@@ -6,6 +6,14 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from analysis_checks import (
+    all_points,
+    fit_estimates,
+    input_spectra,
+    quantity_for_check,
+    retained,
+    sampled,
+)
 
 import inptk
 from inptk.cli import _select_experiment
@@ -124,17 +132,19 @@ def test_cli_raw_blank_analysis_preserves_context_without_outputting_blank_sampl
     assert len(result.experiment.counts) == 20
     assert result.experiment.measurements["W0"].droplet_volume_uL == 20
     assert result.experiment.measurements["W1"].droplet_volume_uL == 50
-    assert set(result.final_candidates.to_dataframe().sample_id) == {"007"}
-    assert set(result.final_candidates.to_dataframe().group_id) == {"007/R1/01"}
-    assert set(result.per_dilution.to_dataframe().measurement_id) == {"M0", "M1"}
+    assert set(all_points(result).to_dataframe().sample_id) == {"007"}
+    assert set(all_points(result).to_dataframe().curve_id) == {"007/R1/01"}
+    assert set(input_spectra(result).to_dataframe().measurement_id) == {"M0", "M1"}
     expected = inptk.analyze_concentration(
         _select_experiment(raw_source, ["007"], ["01"]),
         method=method,
         temperature_ranges_C={"M0": {"max_C": -6}, "M1": {"min_C": -8}},
     )
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
     pd.testing.assert_frame_equal(
-        result.final_candidates.to_dataframe(), expected.final_candidates.to_dataframe()
+        retained(result).to_dataframe(), retained(expected).to_dataframe()
+    )
+    pd.testing.assert_frame_equal(
+        all_points(result).to_dataframe(), all_points(expected).to_dataframe()
     )
 
 
@@ -202,11 +212,13 @@ def test_cli_disabling_water_correction_preserves_blank_context(tmp_path, raw_so
     assert result.experiment.measurements["W1"].droplet_volume_uL == 50
     assert result.settings["water_blank_correction"] is False
     assert result.settings["water_blank_correction_applied"] is False
-    assert set(result.per_dilution.to_dataframe().measurement_id) == {"M0", "M1"}
+    assert set(input_spectra(result).to_dataframe().measurement_id) == {"M0", "M1"}
     expected = inptk.analyze_concentration(
         _select_experiment(raw_source, ["007"], ["01"]), water_blank_correction=False
     )
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
+    pd.testing.assert_frame_equal(
+        retained(result).to_dataframe(), retained(expected).to_dataframe()
+    )
 
 
 @pytest.fixture
@@ -250,10 +262,12 @@ def cross_run_source(tmp_path):
 
 def cross_run_groups():
     return {
-        "mixed": [
-            {"measurement_id": "M0", "cycle_id": "01"},
-            {"measurement_id": "M1", "cycle_id": "02"},
-        ]
+        "mixed": {
+            "inputs": [
+                {"measurement_id": "M0", "cycle_id": "01"},
+                {"measurement_id": "M1", "cycle_id": "02"},
+            ]
+        }
     }
 
 
@@ -275,7 +289,7 @@ def test_cli_cross_run_groups_preserve_own_blanks_and_export_saved_tables(
         "saved",
         "--method",
         method,
-        "--combination-groups",
+        "--curves",
         group_argument,
         "--output-step-C",
         "0.05",
@@ -289,29 +303,28 @@ def test_cli_cross_run_groups_preserve_own_blanks_and_export_saved_tables(
     expected = inptk.analyze_concentration(
         cross_run_source,
         method=method,
-        combination_groups=groups,
+        curves=groups,
         output_step_C=0.05,
         output_method="interpolate",
     )
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
     pd.testing.assert_frame_equal(
-        result.resampled.to_dataframe(), expected.resampled.to_dataframe()
+        retained(result).to_dataframe(), retained(expected).to_dataframe()
     )
+    pd.testing.assert_frame_equal(sampled(result).to_dataframe(), sampled(expected).to_dataframe())
     pd.testing.assert_frame_equal(
         result.experiment.counts.to_dataframe(), cross_run_source.counts.to_dataframe()
     )
     assert result.experiment.water_blank_map == {"M0": ["W0"], "M1": ["W1"]}
-    assert result.settings["combination_groups"] == {
+    assert result.settings["curves"] == {
         "mixed": {
-            "sample_id": "007",
-            "members": [
-                {"measurement_id": "M0", "run_id": "R/1", "cycle_id": "01"},
-                {"measurement_id": "M1", "run_id": "R2", "cycle_id": "02"},
+            "inputs": [
+                {"measurement_id": "M0", "cycle_id": "01"},
+                {"measurement_id": "M1", "cycle_id": "02"},
             ],
         }
     }
-    combined = result.combined.to_dataframe()
-    assert set(combined.group_id) == {"mixed"}
+    combined = fit_estimates(result).to_dataframe()
+    assert set(combined.curve_id) == {"mixed"}
     assert "run_id" not in combined and "cycle_id" not in combined
     contributing = combined.loc[combined.contributor_count.eq(2)]
     assert not contributing.empty
@@ -322,15 +335,15 @@ def test_cli_cross_run_groups_preserve_own_blanks_and_export_saved_tables(
             (item["measurement_id"], item["run_id"], item["cycle_id"]) for item in blank_sources
         } == {("W0", "R/1", "01"), ("W1", "R2", "02")}
     payload = json.loads((output / "analysis.json").read_text())
-    assert payload["format_version"] == 2
+    assert payload["format_version"] == 3
     for table_name in ("final", "resampled"):
         destination = tmp_path / f"{table_name}.csv"
         table_arguments = [] if table_name == "final" else ["--table", "resampled"]
         exported = run_cli("export-csv", output, *table_arguments, "--out", destination)
         assert exported.returncode == 0, exported.stderr
-        assert destination.read_text() == getattr(result, table_name).to_dataframe().to_csv(
-            index=False
-        )
+        assert destination.read_text() == quantity_for_check(
+            result, table_name
+        ).to_dataframe().to_csv(index=False)
 
 
 def test_cli_rejects_group_member_removed_by_cycle_filter(tmp_path, cross_run_source):
@@ -342,13 +355,13 @@ def test_cli_rejects_group_member_removed_by_cycle_filter(tmp_path, cross_run_so
         "saved",
         "--cycle",
         "01",
-        "--combination-groups",
+        "--curves",
         json.dumps(cross_run_groups()),
         "--out",
         output,
     )
     assert process.returncode == 1
-    assert "Unknown or absent combination member" in process.stderr
+    assert "Unknown or absent curve input" in process.stderr
     assert not output.exists()
 
 
@@ -358,7 +371,7 @@ def test_cli_saved_analysis_rerun_uses_original_counts_and_current_settings(
     prior = inptk.analyze_concentration(
         cross_run_source,
         method="average",
-        combination_groups=cross_run_groups(),
+        curves=cross_run_groups(),
         output_step_C=0.05,
         output_method="interpolate",
     )
@@ -370,10 +383,12 @@ def test_cli_saved_analysis_rerun_uses_original_counts_and_current_settings(
     assert process.returncode == 0, process.stderr
     result = inptk.load(output)
     expected = inptk.analyze_concentration(cross_run_source)
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
+    pd.testing.assert_frame_equal(
+        retained(result).to_dataframe(), retained(expected).to_dataframe()
+    )
     assert result.settings["estimation_method"] == "mle"
-    assert result.resampled is None
-    assert set(result.combined.to_dataframe().group_id) == {
+    assert sampled(result) is None
+    assert set(fit_estimates(result).to_dataframe().curve_id) == {
         "007/R%2F1/01",
         "007/R%2F1/02",
         "007/R2/01",

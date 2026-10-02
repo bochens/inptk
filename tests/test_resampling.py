@@ -7,16 +7,16 @@ import pandas as pd
 import pytest
 
 from inptk.resampling import resample_spectrum
-from inptk.tables import CombinedSpectrumTable
+from inptk.tables import CurveSpectrumTable
 
 
 def spectrum(temperatures, values, *, segments=None, kept=None, lower=None, upper=None):
     size = len(temperatures)
-    return CombinedSpectrumTable(
+    return CurveSpectrumTable(
         pd.DataFrame(
             {
                 "sample_id": "A",
-                "group_id": "G",
+                "curve_id": "G",
                 "point_id": [f"native:{i}" for i in range(size)],
                 "temperature_C": temperatures,
                 "concentration": values,
@@ -110,10 +110,10 @@ def test_decimal_grid_edges_do_not_drop_exact_observations():
 
 def test_groups_keep_distinct_point_identity_and_do_not_mix():
     first = spectrum([-5, -7], [10, 20]).to_dataframe()
-    second = spectrum([-5, -7], [100, 200]).to_dataframe().assign(group_id="H", sample_id="B")
-    output = resample_spectrum(CombinedSpectrumTable(pd.concat([first, second])), 1)
+    second = spectrum([-5, -7], [100, 200]).to_dataframe().assign(curve_id="H", sample_id="B")
+    output = resample_spectrum(CurveSpectrumTable(pd.concat([first, second])), 1)
     rows = output.to_dataframe()
-    assert not rows.duplicated(["group_id", "point_id"]).any()
+    assert not rows.duplicated(["curve_id", "point_id"]).any()
     assert rows.groupby("sample_id").concentration.max().to_dict() == {"A": 20, "B": 200}
 
 
@@ -126,7 +126,7 @@ def test_invalid_grid_spacing_is_rejected(step):
 def test_resampling_requires_final_segment_provenance():
     source = spectrum([-5, -6], [1, 2]).to_dataframe().drop(columns="segment_id")
     with pytest.raises(ValueError, match="retained-segment provenance"):
-        resample_spectrum(CombinedSpectrumTable(source), 0.5)
+        resample_spectrum(CurveSpectrumTable(source), 0.5)
     with pytest.raises(ValueError, match="method"):
         resample_spectrum(spectrum([-5, -6], [1, 2]), 0.5, method="nearest")
 
@@ -163,7 +163,7 @@ def test_interpolating_a_repeated_native_state_preserves_its_values_exactly():
 def test_existing_source_extrapolation_flags_are_preserved_without_new_extrapolation(method):
     frame = spectrum([-5, -7], [1, 4]).to_dataframe()
     frame["is_extrapolated"] = [True, False]
-    source = CombinedSpectrumTable(frame)
+    source = CurveSpectrumTable(frame)
     output = resample_spectrum(source, 1, method=method)
     rows = output.to_dataframe()
     assert rows.is_extrapolated.tolist() == [True, True, False]

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from analysis_checks import retained, sampled
 
 import inptk
 from inptk import cli
@@ -26,8 +27,8 @@ def call(*args):
         check=False,
     )
     payload = json.loads(process.stdout)
-    assert payload["protocol_version"] == 1
-    assert payload["saved_format_version"] == 2
+    assert payload["protocol_version"] == 2
+    assert payload["saved_format_version"] == 3
     assert payload["toolkit_version"] == inptk.__version__
     return process, payload
 
@@ -162,7 +163,7 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
     process, preview = call("preview", path, "--metadata", meta_path, "--json")
     assert process.returncode == 0
     assert preview["suspension_metadata"]["valid"]
-    groups = {"A result": [{"measurement_id": "001", "cycle_id": "01"}]}
+    groups = {"A result": {"inputs": [{"measurement_id": "001", "cycle_id": "01"}]}}
     output = tmp_path / "GUI preview.inptk"
     process, reply = call(
         "analyze",
@@ -171,7 +172,7 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
         meta_path,
         "--method",
         method,
-        "--combination-groups",
+        "--curves",
         json.dumps(groups),
         "--output-step-C",
         "0.5",
@@ -185,11 +186,15 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
     expected = inptk.analyze_concentration(
         inptk.read_counts(frame, metadata=metadata),
         method=method,
-        combination_groups=groups,
+        curves=groups,
         output_step_C=0.5,
     )
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
-    assert reply["tables"]["final"]["row_count"] == len(result.final)
+    pd.testing.assert_frame_equal(
+        retained(result).to_dataframe(), retained(expected).to_dataframe()
+    )
+    assert sum(c["tables"]["cumulative"]["row_count"] for c in reply["curves"].values()) == len(
+        retained(result)
+    )
     assert reply["settings"]["estimation_method"] == method
     process, saved_preview = call("preview", output, "--format", "saved", "--json")
     assert process.returncode == 0
@@ -197,7 +202,7 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
     csv = tmp_path / "grid.csv"
     process, exported = call("export-csv", output, "--table", "resampled", "--out", csv, "--json")
     assert process.returncode == 0 and exported["table"] == "resampled"
-    assert len(pd.read_csv(csv)) == len(result.resampled)
+    assert len(pd.read_csv(csv)) == len(sampled(result))
     process, rejected = call("export-csv", output, "--out", csv, "--json")
     assert process.returncode == 1 and rejected["error"]["code"] == "output_exists"
     assert path.read_bytes() == original

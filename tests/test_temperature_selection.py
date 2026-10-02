@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pytest
+from analysis_checks import sampled
 
 import inptk
 
@@ -79,7 +80,7 @@ def test_legacy_synthetic_window_rows_cannot_be_used_as_likelihood_observations(
         "operation": "frozen_fraction", "temperature_method": "window_max_count",
     }])
     for operation in (
-        inptk.cumulative_spectrum, inptk.combine_dilutions, inptk.differential_spectrum,
+        inptk.cumulative_spectrum, inptk.estimate_concentration, inptk.differential_spectrum,
     ):
         with pytest.raises(ValueError, match="synthetic warm zero rows are not raw measurements"):
             operation(fractions, experiment=source)
@@ -107,7 +108,7 @@ def test_stepwise_spectra_reject_wrong_sample_or_run_context():
         )
         for operation in (
             inptk.cumulative_spectrum,
-            inptk.combine_dilutions,
+            inptk.estimate_concentration,
             inptk.differential_spectrum,
         ):
             with pytest.raises(ValueError, match="identities disagree"):
@@ -120,7 +121,7 @@ def test_default_workflow_keeps_native_corrected_states_without_a_grid():
     row = fractions.to_dataframe().set_index("temperature_C").loc[-10]
     assert (row.n_frozen, row.n_total) == (10, 20)
     result = inptk.analyze_concentration(source)
-    assert result.resampled is None
+    assert sampled(result) is None
     assert result.settings["observation_processing"].startswith("native")
     pd.testing.assert_frame_equal(fractions.to_dataframe(), result.frozen_fraction.to_dataframe())
 

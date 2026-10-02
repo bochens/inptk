@@ -47,11 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out", required=True, help="New CSU CSV path; existing files are never replaced"
     )
-    for name in ("sample", "group"):
+    for name in ("sample", "curve"):
         parser.add_argument(
             f"--{name}", help=f"Exact saved {name}_id; required when selection is ambiguous"
         )
-    parser.add_argument("--table", choices=("final", "resampled"), default="final")
+    parser.add_argument("--table", choices=("cumulative", "resampled"), default="cumulative")
     parser.add_argument(
         "--header",
         action="append",
@@ -68,21 +68,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _select_result(result: AnalysisResult, args: argparse.Namespace) -> pd.DataFrame:
-    table = getattr(result, args.table)
-    if table is None:
-        raise ValueError("No saved resampled spectrum is available")
-    frame = table.to_dataframe()
-    for name in ("sample", "group"):
+    frame = result.to_dataframe(table=args.table, curve_id=args.curve)
+    for name in ("sample",):
         requested = getattr(args, name)
         if requested is not None:
             frame = frame.loc[frame[f"{name}_id"].eq(requested)]
     if frame.empty:
-        raise ValueError("No saved rows match the requested sample/group selection")
-    groups = frame[["sample_id", "group_id"]].drop_duplicates()
+        raise ValueError("No saved rows match the requested sample/curve selection")
+    groups = frame[["sample_id", "curve_id"]].drop_duplicates()
     if len(groups) != 1:
         raise ValueError(
-            "Multiple saved groups remain. Select an exact ID with --group. "
-            f"Available groups: {groups.to_dict('records')}"
+            "Multiple saved curves remain. Select an exact ID with --curve. "
+            f"Available curves: {groups.to_dict('records')}"
         )
     if not frame.unit.eq("INP_per_L_air").all() or not frame.basis.eq("sampled_air").all():
         raise ValueError(
@@ -181,7 +178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     with output.open("x", encoding="utf-8", newline="") as handle:
         handle.write(payload)
     print(
-        f"Exported {args.table} group {frame.group_id.iloc[0]!r} "
+        f"Exported {args.table} group {frame.curve_id.iloc[0]!r} "
         f"for sample {frame.sample_id.iloc[0]!r} to {output}"
     )
     return 0

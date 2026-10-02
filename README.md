@@ -47,26 +47,49 @@ import inptk
 experiment = inptk.read_counts("counts.csv", metadata="measurements.csv")
 result = inptk.analyze_concentration(
     experiment,
+    curves={"A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"}},
     method="mle",
     output_basis="sampled_air",
     decrease_policy="stop_at_decrease",
 )
 
-result.final.to_dataframe()                       # final combined concentration
-result.per_dilution.to_dataframe()                # inspect individual dilutions
-result.final_candidates.to_dataframe()           # inspect retained and excluded final points
-result.frozen_fraction.to_dataframe()             # every original observation
-result.final.select(group_id="A/1/2")             # sample A, run 1, cycle 2
-result.save("analysis.inptk")                     # includes original observations
-result.export_csv("final_concentrations.csv")     # includes group and source identities
+curve = result.curves["A"]
+curve.cumulative.to_dataframe()                  # retained concentration and uncertainty
+curve.sources                                    # physical inputs used for this curve
+curve.excluded.to_dataframe()                     # excluded points and their reasons
+result.counts.to_dataframe()                      # every original count observation
+result.frozen_fraction.to_dataframe()             # observed fractions, including blanks
+result.to_dataframe()                             # cumulative rows from all named curves
+result.save("analysis.inptk")                     # original data, choices and named curves
+result.export_csv("A.csv", curve_id="A")          # export one curve
 restored = inptk.load("analysis.inptk")
 ```
+
+You choose output names. A single input produces an individual curve; several
+independent inputs produce a combined curve, with equal or different dilution
+factors. To keep both, request them in the same dictionary:
+
+```python
+curves = {
+    "A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"},
+    "A_neat": {"inputs": ["A_neat"], "cycle": "1"},
+    "A_diluted": {"inputs": ["A_diluted"], "cycle": "1"},
+}
+result = inptk.analyze_concentration(experiment, curves=curves)
+```
+
+The output name is a label, not another sample or another independent observation.
+Cycle can be omitted only when every named input has exactly one observed cycle.
+Otherwise it must be explicit. Omitting `curves` generates names and keeps the
+default separation by original sample, run and cycle. Only requested curves are
+calculated; no redundant combined result is added for a single input.
 
 Existing output paths are not overwritten. Python and command-line analysis use
 the same defaults and calculations:
 
 ```bash
 inptk analyze counts.csv --metadata measurements.csv \
+  --curves '{"A":{"inputs":["A_neat","A_diluted"],"cycle":"1"}}' \
   --output-basis sampled_air --out analysis.inptk
 inptk export-csv analysis.inptk --out final_concentrations.csv
 ```
@@ -76,10 +99,10 @@ sampled-air spectrum:
 
 ```bash
 python scripts/csu_inp_processing.py analysis.inptk --out csu.csv \
-  --sample A --group A/1/1 --allow-missing-header
+  --sample A --curve A --allow-missing-header
 ```
 
-Selection flags can be omitted when only one sample/group remains. Use
+Selection flags can be omitted when only one sample/curve remains. Use
 `--header KEY=VALUE` for CSU header fields; `--allow-missing-header` leaves
 unavailable descriptive fields blank. Recorded normalization metadata cannot be
 changed. The exporter preserves the saved final points and errors without
@@ -91,22 +114,19 @@ accept `--table resampled` when a separate resampled table was requested.
 
 ## Work one step at a time
 
-The full workflow calls these same public functions. You can stop after any step:
+You can run the main calculation as separate steps and stop after any step:
 
 ```python
 ranges = {"A_neat": {"min_C": -15}}
 fractions = inptk.frozen_fraction(experiment)
-individual = inptk.cumulative_spectrum(
-    fractions, experiment=experiment, temperature_ranges_C=ranges
-)
-
-combined = inptk.combine_dilutions(
+estimated = inptk.estimate_concentration(
     fractions,
     experiment=experiment,
+    curves={"A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"}},
     method="mle",
     temperature_ranges_C=ranges,
 )
-converted = inptk.convert_concentration(combined, experiment.samples, basis="sampled_air")
+converted = inptk.convert_concentration(estimated, experiment.samples, basis="sampled_air")
 final = inptk.finalize_spectrum(converted, decrease_policy="stop_at_decrease")
 # Optional display/export grid, after all calculations and final selection:
 sampled = inptk.resample_spectrum(final, step_C=0.5, method="sample")
@@ -120,15 +140,17 @@ estimates and their uncertainty. Each step returns one scientific table.
 `table.history` records its processing steps; `table.warnings` reports unavailable
 results or settings that could not apply.
 
+To calculate separate spectra for all physical inputs, use `cumulative_spectrum`
+with the same fractions, experiment, and temperature ranges.
 For optional differential output, call `differential_spectrum` with the same
 fractions, experiment, and temperature ranges.
-`inptk.subtract_blanks(combined, {"A/1/1": blank_spectrum})` subtracts a calculated
+`inptk.subtract_blanks(estimated, {"A": blank_spectrum})` subtracts a calculated
 sample/filter blank spectrum before unit conversion. `finalize_spectrum`
 then selects the final nondecreasing concentration rows without changing the
 input table, concentrations, or error bounds. It returns one spectrum table.
-The complete workflow also retains every candidate final row in
-`result.final_candidates`, including the reason for each exclusion, and packages
-all stages for saving with `result.save(...)`.
+The complete workflow places retained points in each curve's `cumulative` table
+and excluded points in its `excluded` table, including the exclusion reason.
+It saves these quantities together with original observations and analysis choices.
 
 Differential concentration is the increase between adjacent cooling observations,
 divided by their actual temperature difference. Repeated-temperature and warming
@@ -141,7 +163,7 @@ non-finite results carry flag `1` (flags can combine). Each row stores both inte
 there is no invented interval before the first supplied state. This calculation
 does not establish whether a change caused by lost droplets is unbiased.
 
-## Combine dilutions within explicit temperature ranges
+## Estimate concentration within explicit temperature ranges
 
 Use `method="mle"` (default) or `method="average"` with the same temperature ranges:
 
@@ -151,7 +173,7 @@ Use `method="mle"` (default) or `method="average"` with the same temperature ran
   suspension, then takes their equal-weight arithmetic mean.
 
 By default, measurements of the same original sample, run, and cycle form one
-output group. Explicit groups can combine independent sets from different runs;
+output curve. Explicit curves can combine independent sets from different runs;
 each run keeps its own blank background. With one eligible measurement, both
 methods use that measurement's concentration and uncertainty. With none, neither
 invents a value. There is no separate stitching operation.
@@ -189,7 +211,7 @@ review. To use different ranges for different cycles, analyze those cycles in
 separate jobs.
 
 The same `temperature_ranges_C` keyword is accepted by `cumulative_spectrum`,
-`combine_dilutions`, and `differential_spectrum`. Individual concentration rows
+`estimate_concentration`, and `differential_spectrum`. Individual concentration rows
 outside a range retain their count columns but have missing concentration/error
 values and `selection_status="outside_temperature_range"`. The frozen-fraction
 table remains complete. Missing blank coverage outside a sample's selected range
@@ -198,7 +220,7 @@ does not block analysis; eligible temperatures still require blank coverage.
 The count model assumes independent physical droplet sets across measurements.
 Each temperature is estimated separately: seeing the same droplets at another
 temperature or in another freezing cycle does not create extra independent
-observations. A group cannot contain different cycles of the same run.
+observations. A curve cannot contain different cycles of the same run.
 
 MLE uncertainty uses a profile-likelihood interval: keep concentrations that remain
 sufficiently consistent with the observed counts after allowing any fitted water
@@ -234,11 +256,11 @@ uncertainty. Their intervals are conditional on the supplied adjusted counts.
 
 ### Select the final concentration curve
 
-After dilution combination, any requested blank subtraction, and unit conversion,
-`decrease_policy` selects concentration rows independently for each output group.
+After concentration estimation, any requested blank subtraction, and unit conversion,
+`decrease_policy` selects concentration rows independently for each output curve.
 It follows observation order and compares each finite concentration with the last
 retained value. Native observations use chronological `time_s` with stable ties,
-or retained input order when time is absent. Groups requiring alignment use their
+or retained input order when time is absent. Curves requiring alignment use their
 explicit warm-to-cold target order:
 
 - `"stop_at_decrease"` (default): at the first lower concentration beyond the
@@ -259,11 +281,11 @@ finite concentrations are not clipped; this selection rule alone does not
 establish that they are scientifically usable.
 
 Neither policy raises a concentration to make a plateau or changes error bounds.
-`result.final` contains the retained rows. `result.final_candidates` contains all
-rows after blank correction and unit conversion, with `used_in_final` and
+Each curve's `cumulative` table contains retained rows. Its `excluded` table contains
+excluded rows after blank correction and unit conversion, with `used_in_final` and
 `final_selection_status` to explain selection. Statuses are `kept`, `nonfinite`,
 `decrease`, or `after_decrease`. `segment_id` marks uninterrupted retained portions
-so later resampling cannot bridge exclusions. Earlier tables remain available.
+so later resampling cannot bridge exclusions. Original observations remain available.
 This final selection is separate from alignment and measurement temperature ranges.
 It does not sort native observations by temperature or trim the record at its
 first coldest observation.
@@ -323,24 +345,24 @@ observed temperatures are valid. Missing observation IDs are generated once on
 import. `picture_id`, when supplied, identifies the image and is separate from the
 row identity. Instrument rows without an image remain observations.
 
-Combined curves use `sample_id`, `group_id`, and `point_id`. They do not invent a
+Combined curves use `sample_id`, `curve_id`, and `point_id`. They do not invent a
 single run or cycle identity when several runs contribute. Each point records its
 actual source measurement, run, cycle, observation, temperature, and optional time.
 
-The default groups keep each sample/run/cycle separate. To combine independent
-sets from different runs, provide a dictionary of named groups whose values are
-lists of exact measurement/cycle pairs:
+The default curves keep each sample/run/cycle separate. To combine independent
+inputs from different runs with different cycle labels, specify each input's
+measurement/cycle pair explicitly:
 
 ```python
-groups = {
-    "A_replicates": [
+curves = {
+    "A_replicates": {"inputs": [
         {"measurement_id": "A_run1_neat", "cycle_id": "1"},
         {"measurement_id": "A_run1_diluted", "cycle_id": "1"},
         {"measurement_id": "A_run2_neat", "cycle_id": "2"},
-    ]
+    ]}
 }
-result = inptk.analyze_concentration(experiment, combination_groups=groups)
-selected = result.final.select(group_id="A_replicates")
+result = inptk.analyze_concentration(experiment, curves=curves)
+selected = result.curves["A_replicates"].cumulative
 ```
 
 All members must represent the same original sample, and each group can contain
@@ -349,15 +371,13 @@ Run identity comes from measurement metadata. Duplicate members, unknown IDs,
 blank members, and groups mixing parent samples are rejected. An explicit mapping
 requests only those groups. Repeated freezing of the same droplets never becomes
 additional independent droplets. The same keyword is accepted by
-`combine_dilutions`; the CLI accepts this mapping as JSON or a file through
-`--combination-groups`.
+`estimate_concentration`; the CLI accepts this mapping as JSON or a file through
+`--curves`.
 
-In the full workflow, explicit groups also limit `per_dilution` and optional
-`differential` estimates to the requested measurement/cycle members. Their required
+Named curves request only their selected input/cycle members. Their required
 blank observations are retained for calculation. An unrequested run cannot block
-these fits because it lacks blank coverage. The saved `Experiment` and
-`frozen_fraction` still contain the complete input observations; group selection
-does not erase them. Without explicit groups, the usual full analysis is unchanged.
+a fit because it lacks blank coverage. The saved `Experiment`, `counts` and
+`frozen_fraction` retain the full original observations.
 
 Lists also hold selections, warnings, and ordered processing history. Selecting
 one or many labels returns the same table type. `to_dataframe()` returns a copy,
@@ -487,7 +507,7 @@ information; the number of wells is not a multiplier for the correction.
 
 Temperature ranges select whole count observations; there are no count-rebasing
 or arbitrary contribution-weight settings. This model also differs from the
-optional Python `blank_by_group` operation, which subtracts an already calculated
+optional Python `blank_by_curve` operation, which subtracts an already calculated
 sample/filter blank spectrum later in the workflow.
 
 ### Turn water correction on or off
@@ -499,7 +519,7 @@ Water correction is optional. With a map present, the default
 result = inptk.analyze_concentration(experiment, water_blank_correction=False)
 ```
 
-The same boolean is accepted by `cumulative_spectrum`, `combine_dilutions`, and
+The same boolean is accepted by `cumulative_spectrum`, `estimate_concentration`, and
 `differential_spectrum`. Disabling correction excludes mapped blank sets from
 calculated sample tables and does not require matching blank temperatures. It
 preserves every original raw observation and the map in `result.experiment`.
@@ -585,7 +605,7 @@ plot previews and calculation without importing INP-toolkit into the GUI:
 inptk capabilities
 inptk preview counts.csv --format native --json
 inptk analyze counts.csv --metadata measurements.csv --out preview.inptk --json
-inptk export-csv preview.inptk --table final --out final.csv --json
+inptk export-csv preview.inptk --table cumulative --out final.csv --json
 ```
 
 `capabilities` returns the installed version, saved-format version and actual CLI
@@ -593,9 +613,10 @@ flags, defaults and choices as JSON. Other commands accept `--json` before or
 after the command name. They return one JSON object on standard output, including
 argument and input errors. Human-readable `--help` and `--version` remain unchanged.
 
-Responses contain `protocol_version: 1`, `toolkit_version`, `saved_format_version`,
+Responses contain `protocol_version: 2`, `toolkit_version`, `saved_format_version`,
 `command`, `status` (`ok` or `error`) and `warnings`. On success, `analyze` reports
-the absolute saved-result path, resolved settings and table row counts. `preview`
+the absolute saved-result path, reusable settings, original-table row counts,
+and a `curves` dictionary containing names, sources, kinds and quantity row counts. `preview`
 returns a frozen-fraction table with original counts, temperatures and identities,
 measurement summaries, available metadata and missing suspension metadata. It
 performs no fitting, correction or temperature selection and writes no result
@@ -610,26 +631,28 @@ keep the previous successful result. Always use a new path for each calculation.
 Nonfinite numbers use the same `{"$nonfinite":"inf"}` encoding as saved files.
 
 `--sample-map`, `--water-blank-map`, `--temperature-ranges` and
-`--combination-groups` accept a JSON object directly or a JSON file. Pass them as
+`--curves` accept a JSON object directly or a JSON file. Pass them as
 individual arguments; do not construct a shell command from GUI text. See
 [ICESCOPY_HANDOFF.md](ICESCOPY_HANDOFF.md) for the process and plotting contract.
 
 ## Results and scientific methods
 
 `AnalysisResult` keeps the original `experiment`, `settings`, `history`, and
-`warnings`, alongside these tables:
+`warnings`. Counts and observed fractions belong to physical inputs. Concentration
+outputs belong to named curves; no combined droplet counts or fractions are invented.
 
 | Attribute | Type | Meaning |
 |---|---|---|
-| `frozen_fraction` | `FrozenFractionTable` | Fractions added to the original count observations |
-| `per_dilution` | `CumulativeSpectrumTable` | Each measurement's concentration at its observed temperatures |
-| `combined` | `CombinedSpectrumTable` | Combined suspension concentration, with explicit group and point identities |
-| `final_candidates` | `CombinedSpectrumTable` | All rows after requested blank correction and conversion, with final-selection flags |
-| `final` | `CombinedSpectrumTable` | Retained points; concentration and error bounds are unchanged |
-| `resampled` | `CombinedSpectrumTable` or `None` | Optional temperature-grid view of the final result |
-| `differential` | `DifferentialSpectrumTable` or `None` | Optional per-measurement activity per degree, with interval limits |
+| `result.counts` | `CountsTable` | Original sample and blank observations |
+| `result.frozen_fraction` | `FrozenFractionTable` | Observed fractions added to those original counts |
+| `result.curves[name]` | `CurveResult` | One requested output, individual or combined |
+| `curve.cumulative` | `CurveSpectrumTable` | Retained native concentration points and uncertainty |
+| `curve.sources` | List of records | Selected physical inputs, cycles, dilution, volume and blank assignments |
+| `curve.excluded` | `CurveSpectrumTable` | Excluded native points with selection reasons |
+| `curve.resampled` | `CurveSpectrumTable` or `None` | Optional temperature-grid view |
+| `curve.differential` | `DifferentialSpectrumTable` or `None` | Optional activity per degree for an individual curve |
 
-`combined` records `contributing_measurement_ids`, `contributor_count`, and
+Curve tables record `contributing_measurement_ids`, `contributor_count`, and
 `selection_status` (`single`, `combined`, or `no_eligible_measurements`).
 `available_measurement_ids` lists measurements covering a target before ranges;
 `source_measurement_ids` lists the group's members. ID lists are JSON strings.
@@ -637,7 +660,11 @@ individual arguments; do not construct a shell command from GUI text. See
 `source_observations` records the physical source rows, their roles, observed
 rather than target temperatures, and exact/latest alignment. `point_order` is the
 calculation order. These fields explain missing data without treating them as zero.
-Differential spectra are optional, not a required cumulative-concentration step.
+Differential spectra are optional. In the complete workflow they currently require
+one input per curve, suspension units and no additional sample/filter blank spectrum.
+They include only intervals whose two original observations were retained; gaps
+are not bridged. For individual input calculations outside the complete workflow,
+use `differential_spectrum`. Combined differential spectra are not implemented.
 
 ### Original temperatures, alignment, and optional output grids
 
@@ -672,7 +699,7 @@ result = inptk.analyze_concentration(
     output_step_C=0.5,
     output_method="sample",  # or "interpolate"
 )
-result.resampled.to_dataframe()
+result.to_dataframe(table="resampled")
 result.export_csv("grid.csv", table="resampled")
 ```
 
@@ -688,7 +715,7 @@ status. `endpoint_temperatures_C` separately records the temperatures used to
 construct interpolation endpoints; these can differ from source temperatures.
 Interpolated bounds are not newly fitted confidence intervals. Neither method
 adds extrapolation beyond a retained segment or bridges excluded observations;
-any existing source extrapolation flags remain visible. Native `final` remains
+any existing source extrapolation flags remain visible. Native `curve.cumulative` remains
 unchanged; the optional grid is a separate `resampled` table.
 
 The CLI equivalents are `--output-step-C 0.5 --output-method sample`, followed by
@@ -697,11 +724,11 @@ The CLI equivalents are `--output-step-C 0.5 --output-method sample`, followed b
 Concentration columns are `concentration`, `unit`, and `basis`. `lower_error`
 and `upper_error` are error-bar widths: interval endpoints are concentration
 minus/plus these widths. Their calculation method is recorded. They do not
-include variability across repeated cycles. Non-finite estimates remain in
-candidate and intermediate tables with their quality flags and are excluded from
-`final`; inspect flags before plotting or further analysis.
+include variability across repeated cycles. Non-finite estimates remain in each
+curve's `excluded` table with their quality flags and are excluded from `cumulative`;
+inspect flags before plotting or further analysis.
 
-Optional `blank_by_group={"A/1/1": blank_spectrum}` maps a combined output group
+Optional `blank_by_curve={"A": blank_spectrum}` maps a named output curve
 to one already calculated sample/filter blank curve. Match by exact temperature;
 the blank must have one value per temperature and cover all finite target points.
 Sample that blank explicitly if needed. Missing coverage is an error. Its separate,
@@ -719,13 +746,14 @@ again is rejected.
 src/inptk/
   __init__.py       public imports
   tables.py         scientific table types and identity checks
-  experiment.py     sample/measurement information, Experiment, AnalysisResult
+  experiment.py     sample/measurement information, Experiment, AnalysisResult, CurveResult
   readers.py        native CSV/Python and Icescopy import
-  methods.py        method, group-membership, and temperature-range validation
+  methods.py        method, named-curve inputs, and temperature-range validation
   processing.py     native count-to-fraction and per-measurement spectrum steps
   alignment.py      match original sample/blank observations only where needed
   resampling.py     optional grid views after final concentration selection
-  workflows.py      dilution combination, correction, units, and full workflow
+  workflows.py      concentration estimation, correction, units, and full workflow
+  results.py        assemble named curves with their sources and exclusions
   io.py             versioned saving/loading of complete analyses
   cli.py            command-line arguments calling the same workflow
   __main__.py       python -m inptk
@@ -738,7 +766,7 @@ workflow and scientific tables. New applications should use
 `inptk`'s public imports; they should not import `_engine`. Individual-droplet
 freezing-event analysis and GUI development are not yet implemented.
 
-Saved analyses use format version 2 in `analysis.json`; older formats are rejected. They include the writing
+Saved analyses use format version 3 in `analysis.json`; other versions are rejected. They include the writing
 package version (`toolkit_version`), metadata, identifiers, tables, settings, and
 history; loading does not execute code. Non-finite numbers are explicitly
 encoded, rather than silently changing
