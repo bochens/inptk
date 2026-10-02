@@ -35,7 +35,7 @@ from .models import (
     processing_metadata_for,
 )
 
-TemperatureReductionMethod = Literal["max", "latest", "olaf"]
+TemperatureReductionMethod = Literal["max", "latest", "window_max_count"]
 MleMaskMode = Literal["drop_rows", "rebase_counts"]
 MLE_MASK_MODES = {"drop_rows", "rebase_counts"}
 TableSequence = list[Any] | tuple[Any, ...]
@@ -255,12 +255,16 @@ def counts_to_temperature_frozen_fraction(
     ``-7.5 C``, with ``temperature_tolerance_C`` slack for probe jitter.
     ``method="max"`` uses the highest frozen fraction observed up to each
     threshold while preserving paired n_total/n_frozen counts.
-    ``method="latest"`` uses the first observed row after crossing the threshold
-    and does not force monotonicity.
-    ``method="olaf"`` follows legacy OLAF's frozen-at-temperature table
-    construction: four warmer zero rows, the first observed frozen row rounded
-    to 0.1 C, then regular thresholds using an exact temperature band before
-    carrying forward the warm-side maximum frozen count.
+    ``method="latest"`` uses the last qualifying observation in time order
+    (coldest qualifying observation when time is absent) and allows decreases.
+    ``method="window_max_count"`` chooses the highest frozen count strictly
+    within the target temperature +/- tolerance, falling back to the highest
+    count warmer than target + tolerance when that window is empty. Ties use
+    the last observation, and n_total stays paired with the chosen n_frozen.
+    Its table includes four warmer zero rows and the first freezing observation
+    rounded to 0.1 C, followed by regular thresholds. This adapts original OLAF's
+    SpacedTempCSV.create_temp_csv count-selection rule, independently for each
+    measurement/cycle, rather than reproducing OLAF's full processing workflow.
     By default, only the cooling phase is used: rows after each sample/cycle's
     coldest observed temperature are dropped before threshold reduction, so
     post-run warm-up cannot be re-counted at already-visited temperatures.
@@ -295,8 +299,8 @@ def _counts_to_temperature_frozen_fraction_one(
 ) -> TemperatureFrozenFractionTable:
     if not isinstance(counts, CountsTable):
         raise TypeError("counts must be a CountsTable")
-    if method not in ("max", "latest", "olaf"):
-        raise ValueError("method must be 'max', 'latest', or 'olaf'")
+    if method not in ("max", "latest", "window_max_count"):
+        raise ValueError("method must be 'max', 'latest', or 'window_max_count'")
     if step_C <= 0:
         raise ValueError("step_C must be positive")
     if temperature_tolerance_C < 0:
@@ -492,8 +496,8 @@ def _sample_counts_to_temperature_thresholds(
         sample_df = sample_df.sort_values("temperature_C", ascending=False)
     sample_df = sample_df.reset_index(drop=True)
 
-    if method == "olaf":
-        return _sample_counts_to_olaf_temperature_thresholds(
+    if method == "window_max_count":
+        return _sample_counts_to_window_max_count_thresholds(
             sample_id,
             sample_df,
             step_C=step_C,
@@ -535,7 +539,7 @@ def _sample_counts_to_temperature_thresholds(
     return pd.DataFrame.from_records(rows)
 
 
-def _sample_counts_to_olaf_temperature_thresholds(
+def _sample_counts_to_window_max_count_thresholds(
     sample_id: Any,
     sample_df: pd.DataFrame,
     *,
@@ -550,7 +554,7 @@ def _sample_counts_to_olaf_temperature_thresholds(
 
     positive_positions = np.flatnonzero(n_frozen > 0)
     if positive_positions.size == 0:
-        return _sample_counts_to_olaf_zero_thresholds(
+        return _sample_counts_to_window_max_count_zero_thresholds(
             sample_id,
             temperatures=temperatures,
             n_total=n_total,
@@ -588,7 +592,7 @@ def _sample_counts_to_olaf_temperature_thresholds(
     threshold = first_threshold
     while threshold - step_C > coldest_temperature:
         threshold -= step_C
-        selected_position = _olaf_threshold_position(
+        selected_position = _window_max_count_position(
             temperatures,
             n_frozen,
             threshold=threshold,
@@ -609,7 +613,7 @@ def _sample_counts_to_olaf_temperature_thresholds(
     return pd.DataFrame.from_records(rows)
 
 
-def _sample_counts_to_olaf_zero_thresholds(
+def _sample_counts_to_window_max_count_zero_thresholds(
     sample_id: Any,
     *,
     temperatures: np.ndarray,
@@ -632,7 +636,7 @@ def _sample_counts_to_olaf_zero_thresholds(
     )
 
 
-def _olaf_threshold_position(
+def _window_max_count_position(
     temperatures: np.ndarray,
     n_frozen: np.ndarray,
     *,
@@ -643,15 +647,15 @@ def _olaf_threshold_position(
         (temperatures > threshold - temperature_tolerance_C)
         & (temperatures < threshold + temperature_tolerance_C)
     )
-    selected = _olaf_latest_max_count_position(n_frozen, exact_band_positions)
+    selected = _latest_max_count_position(n_frozen, exact_band_positions)
     if selected is not None:
         return selected
 
     warm_side_positions = np.flatnonzero(temperatures > threshold + temperature_tolerance_C)
-    return _olaf_latest_max_count_position(n_frozen, warm_side_positions)
+    return _latest_max_count_position(n_frozen, warm_side_positions)
 
 
-def _olaf_latest_max_count_position(
+def _latest_max_count_position(
     n_frozen: np.ndarray,
     positions: np.ndarray,
 ) -> int | None:

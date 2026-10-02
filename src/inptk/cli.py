@@ -33,7 +33,9 @@ def build_parser():
         "--output-basis", choices=("suspension", "sampled_air", "dry_soil"), default="suspension"
     )
     analyze.add_argument("--step-C", type=float, default=0.5)
-    analyze.add_argument("--temperature-method", choices=("max", "latest", "olaf"), default="max")
+    analyze.add_argument(
+        "--temperature-method", choices=("max", "latest", "window_max_count"), default="max"
+    )
     analyze.add_argument("--temperature-tolerance-C", type=float)
     analyze.add_argument("--z", type=float, default=1.96)
     analyze.add_argument("--differential", action="store_true")

@@ -304,10 +304,42 @@ Icescopy interface is a separate integration task.
 method. Differential spectra are optional (`differential=True`); they are not an
 intermediate step required for cumulative concentration.
 
-Temperature reduction defaults to a 0.5 degree C grid, the `max` method, cooling
-observations only, and a 0.05 degree C tolerance. The explicit `olaf` reduction
-method defaults to its 0.01 degree C tolerance. A supplied tolerance overrides
-that choice for both Python and command-line use.
+Temperature selection runs separately for each measurement and cycle, using
+observations through the first coldest temperature. Choose one rule with
+`temperature_method`:
+
+| Method | Which observation supplies the frozen and total counts? |
+| --- | --- |
+| `max` | Highest frozen **fraction** among observations at the target temperature or warmer, allowing the tolerance. This carries earlier peaks forward. |
+| `latest` | Latest qualifying observation in time; coldest qualifying observation when timestamps are absent. Decreases remain visible. |
+| `window_max_count` | Highest **frozen count** strictly inside the temperature tolerance window. If the window is empty, use the highest frozen count warmer than its upper edge. |
+
+The selected frozen count and total count stay together. Ties for either maximum
+use the latest qualifying observation. `step_C` sets the output temperature
+spacing; `temperature_tolerance_C` sets the allowance around each target.
+Defaults remain `max`, 0.5 degree C spacing, and 0.05 degree C tolerance.
+`window_max_count` defaults to 0.01 degree C tolerance. An explicit tolerance
+overrides the method default in both Python and the command line.
+
+```python
+fractions = inptk.frozen_fraction(
+    experiment,
+    temperature_method="window_max_count",
+    step_C=0.5,
+    temperature_tolerance_C=0.01,
+)
+```
+
+`window_max_count` adapts the count-selection rule in original OLAF's
+[`SpacedTempCSV.create_temp_csv`](https://github.com/SiGran/OLAF/blob/970896f46e2aa50c1ce57ec38dee3ea3f305a615/olaf/processing/spaced_temp_csv.py).
+It retains the first freezing observation rounded to 0.1 degree C, inserts four
+warmer zero rows, and then advances by `step_C`, stopping before the coldest
+observed temperature. OLAF uses the least-diluted measurement's first freezing
+observation to start a shared table and applies water-background correction
+later. INP-toolkit processes each measurement and cycle separately using the
+counts supplied by the caller, which may already be corrected. This option
+therefore does not reproduce the entire original OLAF workflow. The former
+option name `olaf` has been replaced by `window_max_count`.
 
 Concentration columns are `concentration`, `unit`, and `basis`. `lower_error`
 and `upper_error` are error-bar widths: interval endpoints are concentration

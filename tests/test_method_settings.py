@@ -40,6 +40,33 @@ def experiment(counts=None, scopes=(("R1", "01", 0),)):
     return inptk.read_counts(pd.DataFrame(rows), metadata=metadata)
 
 
+def temperature_selection_experiment():
+    # Count-level blank correction can decrease both frozen and available counts.
+    rows = pd.DataFrame(
+        {
+            "measurement_id": ["M"] * 6,
+            "run_id": ["R1"] * 6,
+            "cycle_id": ["01"] * 6,
+            "time_s": range(6),
+            "temperature_C": [0, -9, -9.994, -10, -10.006, -11.1],
+            "n_total": [32, 32, 31, 20, 19, 18],
+            "n_frozen": [0, 1, 11, 10, 9, 12],
+        }
+    )
+    return inptk.read_counts(
+        rows,
+        metadata=[
+            {
+                "measurement_id": "M",
+                "sample_id": "A",
+                "run_id": "R1",
+                "dilution": 1,
+                "droplet_volume_uL": 50,
+            }
+        ],
+    )
+
+
 def analyze(source, method, **kwargs):
     return inptk.analyze_concentration(
         source, dilution_method=method, step_C=1, temperature_method="latest", **kwargs
@@ -479,6 +506,66 @@ def test_stepwise_calculation_matches_full_workflow(name):
         (final, full.final),
     ):
         pd.testing.assert_frame_equal(step.to_dataframe(), expected.to_dataframe())
+
+
+def test_temperature_methods_select_counts_fraction_or_latest_observation():
+    source = temperature_selection_experiment()
+    expected_counts = {
+        "window_max_count": (11, 31),
+        "max": (10, 20),
+        "latest": (9, 19),
+    }
+    for method, (frozen, total) in expected_counts.items():
+        fractions = (
+            inptk.frozen_fraction(
+                source, step_C=1, temperature_method=method, temperature_tolerance_C=0.01
+            )
+            .to_dataframe()
+            .set_index("temperature_C")
+        )
+        row = fractions.loc[-10]
+        assert (row.n_frozen, row.n_total) == (frozen, total)
+        assert row.fraction_frozen == pytest.approx(frozen / total)
+        if method == "window_max_count":
+            # No observation is near -11 C: use the warmer maximum count,
+            # retaining its paired total rather than the last observed total.
+            fallback = fractions.loc[-11]
+            assert (fallback.n_frozen, fallback.n_total) == (11, 31)
+            assert fallback.fraction_frozen == pytest.approx(11 / 31)
+
+
+def test_window_max_count_cli_roundtrip_matches_stepwise_and_workflow(tmp_path):
+    source = temperature_selection_experiment()
+    source.save(tmp_path / "source")
+    assert (
+        main(
+            [
+                "analyze",
+                str(tmp_path / "source"),
+                "--format",
+                "saved",
+                "--out",
+                str(tmp_path / "result"),
+                "--step-C",
+                "1",
+                "--temperature-method",
+                "window_max_count",
+            ]
+        )
+        == 0
+    )
+    expected = inptk.analyze_concentration(
+        source, step_C=1.0, temperature_method="window_max_count"
+    )
+    fractions = inptk.frozen_fraction(
+        source, step_C=1.0, temperature_method="window_max_count"
+    )
+    actual = inptk.load(tmp_path / "result")
+    pd.testing.assert_frame_equal(actual.frozen_fraction.to_dataframe(), fractions.to_dataframe())
+    pd.testing.assert_frame_equal(actual.final.to_dataframe(), expected.final.to_dataframe())
+    assert actual.settings == expected.settings
+    assert actual.settings["temperature_method"] == "window_max_count"
+    assert actual.settings["temperature_tolerance_C"] == 0.01
 
 
 def test_frozen_fraction_accepts_counts_without_metadata():

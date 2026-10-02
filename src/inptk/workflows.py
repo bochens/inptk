@@ -331,7 +331,7 @@ def analyze_concentration(
     dilution_method: str | DilutionMethod = "stitch",
     output_basis: str = "suspension",
     step_C: float = 0.5,
-    temperature_method: Literal["max", "latest", "olaf"] = "max",
+    temperature_method: Literal["max", "latest", "window_max_count"] = "max",
     temperature_tolerance_C: float | None = None,
     z: float = 1.96,
     differential: bool = False,
@@ -368,7 +368,7 @@ def analyze_concentration(
     )
     tolerance = temperature_tolerance_C
     if tolerance is None:
-        tolerance = 0.01 if temperature_method == "olaf" else 0.05
+        tolerance = 0.01 if temperature_method == "window_max_count" else 0.05
     settings = {
         "dilution_method": method_name(method),
         "method_options": method_options(method, z=z),

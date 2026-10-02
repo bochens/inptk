@@ -102,24 +102,34 @@ def frozen_fraction(
     source: Experiment | CountsTable,
     *,
     step_C: float = 0.5,
-    temperature_method: Literal["max", "latest", "olaf"] = "max",
+    temperature_method: Literal["max", "latest", "window_max_count"] = "max",
     temperature_tolerance_C: float | None = None,
 ) -> FrozenFractionTable:
     """Evaluate frozen fractions at temperature thresholds using counts alone.
 
     Dilution and droplet-volume metadata are unnecessary for this step. Every
     measurement and freezing cycle is reduced separately, using its cooling phase.
+
+    ``max`` selects the highest frozen fraction among observations at or warmer
+    than each target (allowing the tolerance). ``latest`` selects the last such
+    observation. ``window_max_count`` selects the highest frozen count within
+    the temperature tolerance window; if empty, it uses the highest count on
+    the warmer side. The selected frozen and total counts remain paired.
+
+    ``window_max_count`` also retains a first-freeze row rounded to 0.1 C and
+    four warmer zero rows. It adapts original OLAF's table-construction rule.
+    Its default tolerance is 0.01 C; the other methods use 0.05 C.
     """
     counts = source.counts if isinstance(source, Experiment) else source
     if not isinstance(counts, CountsTable):
         raise TypeError("source must be an Experiment or CountsTable")
-    if temperature_method not in ("max", "latest", "olaf"):
-        raise ValueError("temperature_method must be max, latest, or olaf")
+    if temperature_method not in ("max", "latest", "window_max_count"):
+        raise ValueError("temperature_method must be max, latest, or window_max_count")
     if not np.isfinite(step_C) or step_C <= 0:
         raise ValueError("step_C must be finite and positive")
     tolerance = temperature_tolerance_C
     if tolerance is None:
-        tolerance = 0.01 if temperature_method == "olaf" else 0.05
+        tolerance = 0.01 if temperature_method == "window_max_count" else 0.05
     if not np.isfinite(tolerance) or tolerance < 0:
         raise ValueError("temperature_tolerance_C must be finite and nonnegative")
     source_frame = counts.to_dataframe()
