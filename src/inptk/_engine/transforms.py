@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import warnings
 from collections.abc import Mapping
+from numbers import Integral
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -37,7 +38,6 @@ from .models import (
 TemperatureReductionMethod = Literal["max", "latest", "olaf"]
 MleMaskMode = Literal["drop_rows", "rebase_counts"]
 MLE_MASK_MODES = {"drop_rows", "rebase_counts"}
-OLAF_AGRESTI_COULL_UNCERTAIN_VALUES = 2
 TableSequence = list[Any] | tuple[Any, ...]
 TableMapping = dict[str, Any]
 
@@ -949,6 +949,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
     | None = None,
     enforce_monotone: bool = False,
     z: float = 1.96,
+    min_unfrozen: int = 3,
+    overlap_points: int = 4,
 ) -> CumulativeNucleusSpectrumTable | dict[str, Any]:
     """Stitch serial dilutions into one cumulative K(T) spectrum.
 
@@ -958,9 +960,17 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
     dilution-transition behavior: start from the least diluted spectrum, inspect
     the last four valid overlap points before switching dilution, use the same
     confidence-interval decision tree, then use the next dilution for colder
-    temperatures. OLAF's near-saturation pruning is applied with a two-well
-    Agresti-Coull margin.
+    temperatures. min_unfrozen and overlap_points customize the eligibility
+    cutoff and cold-end adjustment window; defaults retain the OLAF rules.
+    overlap_points=0 disables overlap adjustments without changing the handoff.
     """
+
+    for name, value, minimum in (
+        ("min_unfrozen", min_unfrozen, 1),
+        ("overlap_points", overlap_points, 0),
+    ):
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
+            raise ValueError(f"{name} must be a whole number >= {minimum}")
 
     if isinstance(table, dict):
         return _map_merge_shape(
@@ -971,6 +981,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
                 sample_group_by=sample_group_by,
                 enforce_monotone=enforce_monotone,
                 z=z,
+                min_unfrozen=min_unfrozen,
+                overlap_points=overlap_points,
             ),
         )
     if isinstance(table, (list, tuple)):
@@ -1002,6 +1014,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
                     "sample_group_by": _sample_group_by_parameter(sample_group_by),
                     "enforce_monotone": enforce_monotone,
                     "z": z,
+                    "min_unfrozen": min_unfrozen,
+                    "overlap_points": overlap_points,
                 },
             ),
         )
@@ -1033,6 +1047,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
             group_df,
             str(group_id),
             enforce_monotone=enforce_monotone,
+            min_unfrozen=min_unfrozen,
+            overlap_points=overlap_points,
         )
         if not stitched_group.empty:
             frames.append(stitched_group)
@@ -1055,6 +1071,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
                     "sample_group_by": _sample_group_by_parameter(sample_group_by),
                     "enforce_monotone": enforce_monotone,
                     "z": z,
+                    "min_unfrozen": min_unfrozen,
+                    "overlap_points": overlap_points,
                 },
                 source_sample_ids=_table_sample_ids_from_dataframe(source_df),
                 source_dilutions=_metadata_dilutions(metadata_by_sample_id),
@@ -1073,6 +1091,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
                 "sample_group_by": _sample_group_by_parameter(sample_group_by),
                 "enforce_monotone": enforce_monotone,
                 "z": z,
+                "min_unfrozen": min_unfrozen,
+                "overlap_points": overlap_points,
             },
             source_sample_ids=_table_sample_ids_from_dataframe(source_df),
             source_dilutions=_metadata_dilutions(metadata_by_sample_id),
@@ -2026,8 +2046,10 @@ def _stitch_cumulative_group(
     group_id: str,
     *,
     enforce_monotone: bool,
+    min_unfrozen: int = 3,
+    overlap_points: int = 4,
 ) -> pd.DataFrame:
-    group_df = _prepare_olaf_stitch_frame(group_df)
+    group_df = _prepare_olaf_stitch_frame(group_df, min_unfrozen=min_unfrozen)
     if group_df.empty:
         return pd.DataFrame()
 
@@ -2068,8 +2090,9 @@ def _stitch_cumulative_group(
     )
 
     for next_dilution in dilutions[1:]:
-        last_valid_indices = result.index[result["value"].notna()].to_series().tail(4).to_numpy()
-        replacement_start = int(last_valid_indices[-1]) + 1 if len(last_valid_indices) else 0
+        valid_indices = result.index[result["value"].notna()]
+        replacement_start = int(valid_indices[-1]) + 1 if len(valid_indices) else 0
+        last_valid_indices = valid_indices.to_series().tail(overlap_points).to_numpy()
         going_down = False
         for index in last_valid_indices:
             previous_value = _previous_finite_value(result["value"], int(index))
@@ -2108,6 +2131,8 @@ def _stitch_cumulative_group(
 
 def _prepare_olaf_stitch_frame(
     group_df: pd.DataFrame,
+    *,
+    min_unfrozen: int = 3,
 ) -> pd.DataFrame:
     df = group_df.copy()
     df = df[np.isfinite(df["dilution_fold"])].copy()
@@ -2116,7 +2141,7 @@ def _prepare_olaf_stitch_frame(
             df[column] = pd.to_numeric(df[column], errors="coerce")
 
     valid = np.isfinite(df["value"])
-    valid &= df["n_frozen"] < (df["n_total"] - OLAF_AGRESTI_COULL_UNCERTAIN_VALUES)
+    valid &= (df["n_total"] - df["n_frozen"]) >= min_unfrozen
     df.loc[~valid, ["value", "lower_ci", "upper_ci"]] = np.nan
     return df.sort_values(["temperature_C", "dilution_fold"], ascending=[False, True])
 

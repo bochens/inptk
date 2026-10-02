@@ -49,6 +49,11 @@ class ScientificTable:
     def history(self) -> list[dict]:
         return copy.deepcopy(self._history)
 
+    @property
+    def warnings(self) -> list[str]:
+        """Warnings recorded by individual processing steps."""
+        return [str(message) for step in self._history for message in step.get("warnings", [])]
+
     def __len__(self) -> int:
         return len(self._data)
 

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from . import __version__, analyze_concentration, load, read_counts, read_icescopy
+from .methods import resolve_method
 
 
 def build_parser():
@@ -24,7 +25,10 @@ def build_parser():
     )
     analyze.add_argument("--run-id", default="1")
     analyze.add_argument("--out", required=True)
-    analyze.add_argument("--dilution-method", choices=("stitch", "mle"), default="stitch")
+    analyze.add_argument("--dilution-method", choices=("stitch", "manual", "mle"), default="stitch")
+    analyze.add_argument(
+        "--method-options", help="Settings for the chosen dilution method: JSON object or JSON file"
+    )
     analyze.add_argument(
         "--output-basis", choices=("suspension", "sampled_air", "dry_soil"), default="suspension"
     )
@@ -49,6 +53,15 @@ def main(argv=None):
         if args.command == "export-csv":
             load(args.input).export_csv(args.out)
             return 0
+        options = None
+        if args.method_options is not None:
+            payload = args.method_options
+            if not payload.lstrip().startswith("{"):
+                payload = Path(payload).read_text(encoding="utf-8")
+            options = json.loads(payload)
+            if not isinstance(options, dict):
+                raise ValueError("--method-options must contain a JSON object")
+        method = resolve_method(args.dilution_method, options)
         if args.format == "native":
             if args.sample_map:
                 raise ValueError("--sample-map applies only to Icescopy input")
@@ -73,7 +86,7 @@ def main(argv=None):
                 experiment = experiment.experiment
         result = analyze_concentration(
             experiment,
-            dilution_method=args.dilution_method,
+            dilution_method=method,
             output_basis=args.output_basis,
             step_C=args.step_C,
             temperature_method=args.temperature_method,

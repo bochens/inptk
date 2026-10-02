@@ -48,6 +48,144 @@ inptk analyze counts.csv --metadata measurements.csv \
 inptk export-csv analysis.inptk --out final_concentrations.csv
 ```
 
+## Work one step at a time
+
+The full workflow calls these same public functions. You can stop after any step:
+
+```python
+fractions = inptk.frozen_fraction(experiment.counts)
+individual = inptk.cumulative_spectrum(fractions, experiment=experiment)
+
+combined = inptk.combine_dilutions(
+    fractions,
+    experiment=experiment,
+    method=inptk.Stitch(min_unfrozen=3, overlap_points=4),
+)
+final = inptk.convert_concentration(combined, experiment.samples, basis="sampled_air")
+```
+
+Frozen fractions need only the labelled counts table. Concentration calculations
+also need `experiment`, which supplies each measurement's dilution and droplet
+volume. Combining receives the frozen-fraction table because methods such as
+maximum likelihood estimation (MLE) use the observed counts, not just the
+individual concentration curves. Each step returns one scientific table.
+`table.history` records its processing steps; `table.warnings` reports unavailable
+results or settings that could not apply.
+
+`inptk.differential_spectrum(fractions, experiment=experiment)` is an optional
+separate calculation. `inptk.subtract_blanks(combined, {"A": blank_spectrum})`
+applies explicit blank correction before unit conversion. The complete workflow
+still packages all stages for saving with `result.save(...)`.
+
+## Choose how to combine dilutions
+
+Each method has its own settings object. Pass it as `method=` to
+`combine_dilutions`, or as `dilution_method=` to `analyze_concentration`.
+The strings `"stitch"` and `"mle"` remain shortcuts for their default settings.
+Unsupported settings raise an error instead of being ignored.
+
+### Automatic stitching
+
+```python
+method = inptk.Stitch(min_unfrozen=5, overlap_points=6)
+result = inptk.analyze_concentration(experiment, dilution_method=method)
+```
+
+- `min_unfrozen`: require at least this many unfrozen droplets at each eligible
+  point. Default `3` retains the original exclusion of two or fewer unfrozen
+  droplets. It must be a positive whole number. Missing and infinite
+  concentrations are always excluded.
+- `overlap_points`: number of cold-end points considered by the existing overlap
+  adjustment rules. Default `4`. Setting `0` disables those adjustments; the
+  switch still follows the last usable point of the current curve.
+
+The dilution order and remaining overlap decision rules retain the OLAF method.
+A group with only one measurement uses its cumulative spectrum directly, as
+before. There is no dilution join in that case; customized stitching settings
+produce a warning rather than being applied as a general concentration filter.
+
+### Manual stitching
+
+```python
+method = inptk.ManualStitch(switch_temperatures_C=[-12, -18])
+result = inptk.analyze_concentration(experiment, dilution_method=method)
+```
+
+For dilution factors `1`, `10`, and `100`, this selects:
+
+| Temperature | Dilution used |
+|---|---:|
+| Warmer than -12 C | 1 |
+| -18 C < temperature <= -12 C | 10 |
+| Temperature <= -18 C | 100 |
+
+Dilutions are ordered from least to most diluted. Switching temperatures must
+be strictly ordered from warm to cold, with one fewer switch than dilutions.
+At a switching temperature, the next dilution is used. A switch between grid
+points takes effect at the first colder point; there is no interpolation.
+An empty switch list is valid for a single dilution.
+
+One configuration applies to all sample/run/cycle groups. They must have the same
+observed dilution factors, with exactly one measurement at each factor. Missing
+dilutions or duplicate measurements at a selected dilution raise an error; analyze
+groups needing different dilution sets or switching temperatures separately.
+
+Manual stitching applies no automatic unfrozen-droplet cutoff, overlap adjustment,
+or averaging. Missing temperatures or non-finite estimates in the selected curve
+remain missing, with warnings; another dilution is never substituted. Each output
+row records `dilution_fold`, `source_measurement_id`, and `selection_status`.
+`source_measurement_ids` lists all supplied measurements, not just the selected one.
+`enforce_monotone=True` is rejected for manual stitching because it would change
+the selected values. Subsequent requested blank correction or unit conversion
+still acts on the combined spectrum.
+
+### Joint count fitting (MLE)
+
+MLE means maximum likelihood estimation: fit a concentration to the frozen and
+total droplet counts from the different dilutions together.
+
+```python
+method = inptk.MLE(
+    temperature_eligibility_C={100: -15},
+    mask_mode="drop_rows",
+)
+result = inptk.analyze_concentration(experiment, dilution_method=method)
+```
+
+This example allows dilution `100` to contribute only at -15 C and colder.
+All mapping keys are dilution factors, and settings apply across samples/runs/cycles.
+Unknown dilution factors are rejected. Temperature limits require an explicit
+choice of `mask_mode`:
+
+- `"drop_rows"`: omit warmer rows but keep the original cumulative counts at
+  retained temperatures.
+- `"rebase_counts"`: also subtract the warm-side frozen baseline and remove those
+  droplets from the total. This changes the scientific interpretation; select it
+  only when deliberately excluding those warm freezing events.
+
+Other retained MLE controls are `dilution_likelihood_weights` (positive relative
+contributions to the fit), or `dilution_action_counts` with one of
+`action_weight_lambda` or `action_weight_half_life` (an exponential weighting rule
+based on action counts supplied by the caller). These two weighting approaches
+cannot be combined. The package does not infer action counts from cycle numbers.
+`confidence_drop` controls the decrease in log likelihood defining the uncertainty
+interval; its default resolves to `z**2/2`. The effective value is saved.
+
+### Command-line settings
+
+The same settings are accepted as a JSON object or the path to a JSON file:
+
+```bash
+inptk analyze counts.csv --metadata measurements.csv --dilution-method stitch \
+  --method-options '{"min_unfrozen":5,"overlap_points":6}' --out automatic.inptk
+inptk analyze counts.csv --metadata measurements.csv --dilution-method manual \
+  --method-options '{"switch_temperatures_C":[-12,-18]}' --out manual.inptk
+```
+
+Resolved settings are saved in `result.settings["method_options"]` and table
+history. Manual results also record the dilution order. Common temperature-grid,
+output-unit, and error-bar settings remain workflow arguments.
+
 ## Samples, measurements, cycles, dictionaries, and lists
 
 An `Experiment` contains one `CountsTable`, plus two dictionaries:
@@ -188,7 +326,9 @@ src/inptk/
   tables.py         the four scientific table types and their checks
   experiment.py     sample/measurement information, Experiment, AnalysisResult
   readers.py        native CSV/Python and Icescopy import
-  workflows.py      complete concentration analysis and unit conversion
+  methods.py        automatic/manual stitching and MLE settings
+  processing.py     separately callable count-to-fraction and spectrum steps
+  workflows.py      dilution combination, correction, units, and full workflow
   io.py             versioned saving/loading of complete analyses
   cli.py            command-line arguments calling the same workflow
   __main__.py       python -m inptk

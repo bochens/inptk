@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from itertools import pairwise
 from typing import Literal, cast
 
 import numpy as np
@@ -11,45 +11,28 @@ import pandas as pd
 
 from . import _engine as engine
 from .experiment import AnalysisResult, Experiment, SampleMetadata
-from .tables import UNITS, CumulativeSpectrumTable, DifferentialSpectrumTable, FrozenFractionTable
-
-
-def _engine_metadata(experiment, measurement_id):
-    measurement = experiment.measurements[measurement_id]
-    sample = experiment.samples[measurement.sample_id]
-    values = asdict(sample)
-    values.update(
-        sample_id=measurement_id,
-        sample_name=sample.sample_id,
-        sample_long_name=sample.sample_id,
-        well_volume_uL=measurement.droplet_volume_uL,
-        dilution=measurement.dilution,
-    )
-    return engine.SampleMetadata(**values)
-
-
-def _tag(frame, *, run_id, sample_id, cycle_id, measurement_id=None):
-    frame = frame.copy()
-    frame["run_id"] = run_id
-    frame["sample_id"] = sample_id
-    frame["cycle_id"] = cycle_id
-    if measurement_id is not None:
-        frame["measurement_id"] = measurement_id
-    return frame
-
-
-def _public_spectrum(table, **identity):
-    return _tag(
-        table.to_dataframe().rename(
-            columns={
-                "value": "concentration",
-                "value_unit": "unit",
-                "lower_ci": "lower_error",
-                "upper_ci": "upper_error",
-            }
-        ),
-        **identity,
-    )
+from .methods import (
+    MLE,
+    DilutionMethod,
+    ManualStitch,
+    Stitch,
+    method_name,
+    method_options,
+    resolve_method,
+)
+from .processing import (
+    cumulative_spectrum,
+    differential_spectrum,
+    frozen_fraction,
+    validate_fraction_context,
+)
+from .processing import (
+    fraction_inputs as _fraction_inputs,
+)
+from .processing import (
+    public_spectrum as _public_spectrum,
+)
+from .tables import UNITS, CumulativeSpectrumTable, FrozenFractionTable
 
 
 def convert_concentration(
@@ -75,9 +58,13 @@ def convert_concentration(
     )
 
 
-def _subtract_blanks(spectrum, blank_by_sample):
+def subtract_blanks(
+    spectrum: CumulativeSpectrumTable, blank_by_sample: dict[str, CumulativeSpectrumTable]
+) -> CumulativeSpectrumTable:
     """Match blank curves explicitly by target sample, run, cycle and temperature."""
     data = spectrum.to_dataframe()
+    if not data.basis.eq("suspension").all():
+        raise ValueError("Blank correction requires suspension concentrations")
     extra = set(blank_by_sample) - set(data.sample_id)
     if extra:
         raise ValueError(f"Blank mapping names unknown target samples: {sorted(extra)}")
@@ -131,58 +118,147 @@ def _subtract_blanks(spectrum, blank_by_sample):
     )
 
 
-def analyze_concentration(
-    experiment: Experiment,
-    *,
-    dilution_method: str = "stitch",
-    output_basis: str = "suspension",
-    step_C: float = 0.5,
-    temperature_method: Literal["max", "latest", "olaf"] = "max",
-    temperature_tolerance_C: float | None = None,
-    z: float = 1.96,
-    differential: bool = False,
-    blank_by_sample: dict[str, CumulativeSpectrumTable] | None = None,
-    enforce_monotone: bool = False,
-) -> AnalysisResult:
-    """Produce one combined spectrum per original sample, run and cycle.
+def _validate_method_inputs(method, experiment, source) -> list[float]:
+    """Reject unknown dilution settings and ambiguous manual selections up front."""
+    dilutions = sorted(
+        {float(experiment.measurements[key].dilution) for key in source.measurement_id.unique()}
+    )
+    if isinstance(method, MLE):
+        for name in (
+            "temperature_eligibility_C",
+            "dilution_likelihood_weights",
+            "dilution_action_counts",
+        ):
+            mapping = getattr(method, name)
+            if mapping is not None:
+                unknown = [
+                    key
+                    for key in mapping
+                    if not np.isclose(dilutions, key, rtol=0, atol=1e-12).any()
+                ]
+                if unknown:
+                    raise ValueError(f"{name} names unknown dilution factors: {unknown}")
+    if isinstance(method, ManualStitch):
+        if len(method.switch_temperatures_C) != len(dilutions) - 1:
+            raise ValueError(
+                f"Manual stitching with {len(dilutions)} dilutions requires "
+                f"{len(dilutions) - 1} switch temperatures"
+            )
+        for identity, rows in source.groupby(["run_id", "sample_id", "cycle_id"], sort=False):
+            present = sorted(
+                float(experiment.measurements[key].dilution) for key in rows.measurement_id.unique()
+            )
+            if any(np.isclose(a, b, rtol=0, atol=1e-12) for a, b in pairwise(present)):
+                raise ValueError(
+                    f"Manual stitching has multiple measurements at the same dilution in {identity}"
+                )
+            if present != dilutions:
+                raise ValueError(
+                    "Manual stitching requires the same dilution factors "
+                    "in every sample/run/cycle; "
+                    f"{identity} has {present}, expected {dilutions}. "
+                    "Analyze different dilution sets separately."
+                )
+    return dilutions
 
-    Dilution methods are retained: 'stitch' selects portions of per-dilution
-    curves; 'mle' fits the count observations from the dilutions jointly.
-    Different runs and repeated cycles are always kept separate.
+
+def _manual_stitch(data, method: ManualStitch, dilution_order: list[float]):
+    """Pick the requested curve on the union grid, preserving unavailable points."""
+    records = []
+    selected_dilutions = set()
+    for temperature in sorted(data.temperature_C.unique(), reverse=True):
+        position = sum(temperature <= switch for switch in method.switch_temperatures_C)
+        dilution = dilution_order[position]
+        at_temperature = data[data.temperature_C == temperature]
+        candidates = at_temperature[
+            np.isclose(at_temperature.dilution_fold, dilution, rtol=0, atol=1e-12)
+        ]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Manual stitching has multiple measurements for dilution {dilution:g}"
+            )
+        if candidates.empty:
+            row = at_temperature.iloc[0].to_dict()
+            row.update(
+                concentration=np.nan,
+                lower_error=np.nan,
+                upper_error=np.nan,
+                source_measurement_id="",
+                selection_status="temperature_unavailable",
+                qc_flag=1,
+            )
+        else:
+            row = candidates.iloc[0].to_dict()
+            row["source_measurement_id"] = str(row["measurement_id"])
+            row["selection_status"] = "selected"
+            if not np.isfinite(row["concentration"]):
+                row.update(
+                    concentration=np.nan,
+                    lower_error=np.nan,
+                    upper_error=np.nan,
+                    selection_status="nonfinite_concentration",
+                    qc_flag=1,
+                )
+            else:
+                selected_dilutions.add(dilution)
+        row.pop("measurement_id", None)
+        row["dilution_fold"] = dilution
+        records.append(row)
+    frame = pd.DataFrame.from_records(records)
+    notices = []
+    unavailable = frame[frame.selection_status != "selected"]
+    if not unavailable.empty:
+        notices.append(
+            f"Manual stitching left {len(unavailable)} temperatures missing: "
+            f"{', '.join(sorted(unavailable.selection_status.unique()))}; no fallback was used"
+        )
+    unused = set(dilution_order) - selected_dilutions
+    if unused:
+        notices.append(
+            f"No finite points were used for dilution factors {sorted(unused)} "
+            "under the manual switches"
+        )
+    return frame, notices
+
+
+def combine_dilutions(
+    fractions: FrozenFractionTable,
+    *,
+    experiment: Experiment,
+    method: str | DilutionMethod = "stitch",
+    z: float = 1.96,
+    enforce_monotone: bool = False,
+) -> CumulativeSpectrumTable:
+    """Combine dilution measurements separately for each sample, run and cycle.
+
+    The fractions carry observed counts; experiment supplies droplet volume and
+    dilution metadata. Select Stitch, ManualStitch, or MLE settings. Warnings and
+    effective method settings are retained on the returned spectrum.
     """
-    if dilution_method not in ("stitch", "mle"):
-        raise ValueError("dilution_method must be stitch or mle")
-    if output_basis not in UNITS:
-        raise ValueError(f"Unknown output_basis {output_basis!r}")
+    chosen = resolve_method(method)
+    if isinstance(chosen, ManualStitch) and enforce_monotone:
+        raise ValueError("Manual stitching selects curves directly; enforce_monotone must be False")
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
-    if not np.isfinite(step_C) or step_C <= 0:
-        raise ValueError("step_C must be finite and positive")
-    tolerance = temperature_tolerance_C
-    if tolerance is None:
-        tolerance = 0.01 if temperature_method == "olaf" else 0.05
-    if not np.isfinite(tolerance) or tolerance < 0:
-        raise ValueError("temperature_tolerance_C must be finite and nonnegative")
+    validate_fraction_context(fractions, experiment)
+    source = fractions.to_dataframe()
+    dilution_order = _validate_method_inputs(chosen, experiment, source)
+    options = method_options(chosen, z=z)
     settings = {
-        "dilution_method": dilution_method,
-        "output_basis": output_basis,
-        "step_C": step_C,
-        "temperature_method": temperature_method,
-        "temperature_tolerance_C": tolerance,
+        "operation": "combine_dilutions",
+        "dilution_method": method_name(chosen),
+        "method_options": options,
         "z": z,
-        "differential": differential,
         "enforce_monotone": enforce_monotone,
     }
-    source = experiment.counts.to_dataframe()
-    if source.empty:
-        raise ValueError("Cannot analyze an experiment with no observations")
-    fraction_frames, per_frames, combined_frames, differential_frames = [], [], [], []
-    notices = []
+    if isinstance(chosen, ManualStitch):
+        settings["manual_dilution_order"] = dilution_order
+        individual = cumulative_spectrum(fractions, experiment=experiment, z=z).to_dataframe()
+    frames, notices = [], []
     for (run_id, sample_id, cycle_id), group in source.groupby(
         ["run_id", "sample_id", "cycle_id"], sort=False
     ):
         run_id, sample_id, cycle_id = str(run_id), str(sample_id), str(cycle_id)
-        fraction_inputs = []
         identity = {"run_id": run_id, "sample_id": sample_id, "cycle_id": cycle_id}
         measurement_ids = list(group.measurement_id.unique())
         expected = {
@@ -196,89 +272,124 @@ def analyze_concentration(
                 f"{sample_id}, run {run_id}, cycle {cycle_id}: "
                 f"absent measurements {sorted(missing)}"
             )
-        for measurement_id, rows in group.groupby("measurement_id", sort=False):
-            measurement_id = str(measurement_id)
-            frame = rows.copy()
-            frame["sample_id"] = measurement_id
-            frame["cycle"] = cycle_id
-            metadata = _engine_metadata(experiment, measurement_id)
-            counts = engine.CountsTable.from_dataframe(frame, metadata=metadata)
-            fraction = cast(
-                engine.TemperatureFrozenFractionTable,
-                engine.fraction_frozen(
-                    counts,
-                    step_C=step_C,
-                    method=temperature_method,
-                    temperature_tolerance_C=tolerance,
-                    cooling_only=True,
-                ),
+        if isinstance(chosen, ManualStitch):
+            selected = individual[
+                (individual.run_id == run_id)
+                & (individual.sample_id == sample_id)
+                & (individual.cycle_id == cycle_id)
+            ]
+            frame, manual_notices = _manual_stitch(selected, chosen, dilution_order)
+            notices.extend(
+                f"{sample_id}, run {run_id}, cycle {cycle_id}: {notice}"
+                for notice in manual_notices
             )
-            fraction_inputs.append(fraction)
-            fraction_frames.append(
-                _tag(fraction.to_dataframe(), **identity, measurement_id=measurement_id)
-            )
-            per_frames.append(
-                _public_spectrum(
-                    engine.cumulative_spec(fraction, z=z), **identity, measurement_id=measurement_id
-                )
-            )
-            if differential:
-                differential_frames.append(
-                    _public_spectrum(
-                        engine.differential_spec(fraction),
-                        **identity,
-                        measurement_id=measurement_id,
-                    )
-                )
-        if len(fraction_inputs) == 1 and dilution_method == "stitch":
-            engine_combined = engine.cumulative_spec(fraction_inputs[0], z=z)
             uncertainty_method = "OLAF_Agresti_Coull_error_width"
-        elif dilution_method == "stitch":
-            engine_combined = engine.cumulative_spec_stitch(
-                fraction_inputs,
-                sample_group_by={key: sample_id for key in measurement_ids},
-                enforce_monotone=enforce_monotone,
-                z=z,
-            )
-            uncertainty_method = "OLAF_stitched_error_width"
         else:
-            engine_combined = engine.cumulative_spec_mle(
-                fraction_inputs,
-                sample_group_by={key: sample_id for key in measurement_ids},
-                enforce_monotone=enforce_monotone,
-                confidence_drop=z**2 / 2,
+            inputs = _fraction_inputs(group, experiment)
+            if isinstance(chosen, Stitch):
+                if len(inputs) == 1:
+                    if chosen != Stitch() or enforce_monotone:
+                        notices.append(
+                            f"{sample_id}, run {run_id}, cycle {cycle_id}: only one measurement; "
+                            "automatic stitching settings are not applied"
+                        )
+                    combined = engine.cumulative_spec(inputs[0], z=z)
+                    uncertainty_method = "OLAF_Agresti_Coull_error_width"
+                else:
+                    combined = engine.cumulative_spec_stitch(
+                        inputs,
+                        sample_group_by={key: sample_id for key in measurement_ids},
+                        enforce_monotone=enforce_monotone,
+                        z=z,
+                        min_unfrozen=chosen.min_unfrozen,
+                        overlap_points=chosen.overlap_points,
+                    )
+                    uncertainty_method = "OLAF_stitched_error_width"
+            else:
+                combined = engine.cumulative_spec_mle(
+                    inputs,
+                    sample_group_by={key: sample_id for key in measurement_ids},
+                    enforce_monotone=enforce_monotone,
+                    **options,
+                )
+                uncertainty_method = "binomial_Poisson_profile_likelihood"
+            frame = _public_spectrum(
+                cast(engine.CumulativeNucleusSpectrumTable, combined), **identity
             )
-            uncertainty_method = "binomial_Poisson_profile_likelihood"
-        frame = _public_spectrum(engine_combined, **identity)
         frame["source_measurement_ids"] = json.dumps(measurement_ids)
         frame["uncertainty_method"] = uncertainty_method
-        combined_frames.append(frame)
-    history = [{"operation": "analyze_concentration", **settings}]
-    fractions = FrozenFractionTable(pd.concat(fraction_frames, ignore_index=True), history=history)
-    per_frame = pd.concat(per_frames, ignore_index=True)
-    per_frame["uncertainty_method"] = "OLAF_Agresti_Coull_error_width"
-    per = CumulativeSpectrumTable(per_frame, history=history)
-    combined = CumulativeSpectrumTable(
-        pd.concat(combined_frames, ignore_index=True), history=history
+        frames.append(frame)
+    settings["warnings"] = notices
+    return CumulativeSpectrumTable(
+        pd.concat(frames, ignore_index=True), history=fractions.history + [settings]
     )
-    final = _subtract_blanks(combined, blank_by_sample) if blank_by_sample else combined
+
+
+def analyze_concentration(
+    experiment: Experiment,
+    *,
+    dilution_method: str | DilutionMethod = "stitch",
+    output_basis: str = "suspension",
+    step_C: float = 0.5,
+    temperature_method: Literal["max", "latest", "olaf"] = "max",
+    temperature_tolerance_C: float | None = None,
+    z: float = 1.96,
+    differential: bool = False,
+    blank_by_sample: dict[str, CumulativeSpectrumTable] | None = None,
+    enforce_monotone: bool = False,
+) -> AnalysisResult:
+    """Run the separately callable processing steps and retain all their results."""
+    method = resolve_method(dilution_method)
+    if output_basis not in UNITS:
+        raise ValueError(f"Unknown output_basis {output_basis!r}")
+    if not np.isfinite(z) or z <= 0:
+        raise ValueError("z must be finite and positive")
+    if isinstance(method, ManualStitch) and enforce_monotone:
+        raise ValueError("Manual stitching selects curves directly; enforce_monotone must be False")
+    source = experiment.counts.to_dataframe()
+    if source.empty:
+        raise ValueError("Cannot analyze an experiment with no observations")
+    dilution_order = _validate_method_inputs(method, experiment, source)
+    fractions = frozen_fraction(
+        experiment,
+        step_C=step_C,
+        temperature_method=temperature_method,
+        temperature_tolerance_C=temperature_tolerance_C,
+    )
+    per_dilution = cumulative_spectrum(fractions, experiment=experiment, z=z)
+    combined = combine_dilutions(
+        fractions, experiment=experiment, method=method, z=z, enforce_monotone=enforce_monotone
+    )
+    final = subtract_blanks(combined, blank_by_sample) if blank_by_sample else combined
     if output_basis != "suspension":
         final = convert_concentration(final, experiment.samples, basis=output_basis)
     differential_result = (
-        DifferentialSpectrumTable(
-            pd.concat(differential_frames, ignore_index=True), history=history
-        )
-        if differential
-        else None
+        differential_spectrum(fractions, experiment=experiment) if differential else None
     )
+    tolerance = temperature_tolerance_C
+    if tolerance is None:
+        tolerance = 0.01 if temperature_method == "olaf" else 0.05
+    settings = {
+        "dilution_method": method_name(method),
+        "method_options": method_options(method, z=z),
+        "output_basis": output_basis,
+        "step_C": step_C,
+        "temperature_method": temperature_method,
+        "temperature_tolerance_C": tolerance,
+        "z": z,
+        "differential": differential,
+        "enforce_monotone": enforce_monotone,
+    }
+    if isinstance(method, ManualStitch):
+        settings["manual_dilution_order"] = dilution_order
     return AnalysisResult(
         experiment,
         fractions,
-        per,
+        per_dilution,
         combined,
         final,
         differential_result,
         settings=settings,
         history=final.history,
-        warnings=notices,
+        warnings=final.warnings,
     )
