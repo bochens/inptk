@@ -111,7 +111,32 @@ observations, shared across selected cycles. MLE fits all eligible histories
 together; Average combines eligible estimates at each temperature. Zero
 contributors leave a gap. There is no
 separate stitching control, temperature-selection mode or tolerance control.
-Any future automatic range suggestion should fill these same editable controls.
+Automatic Average suggestions fill these same editable controls; MLE limits
+remain manually chosen.
+
+The **Suggest Average limits** action now calls `inptk suggest-ranges`, using the
+same native/saved/Icescopy input arguments and curve/cycle selection as analysis.
+Its two settings are `--min-frozen` and `--min-unfrozen`, both initially 3. Put these
+in the process dialog; Preferences may supply starting values. They are adjustable
+count cutoffs, not confidence thresholds. The action returns JSON and writes no
+files. Applying it fills the existing range handles; manual edits stay possible.
+
+Use `inputs` to show each proposed interval, cycle, cutoff reasons and counts of
+retained/excluded observations. Use `table` to overlay eligibility and blank flags
+on the original observations. `not_distinguished_from_blank` means the individual
+corrected concentration interval reaches zero; display it without dropping that
+point. `uncertainty_unavailable` needs attention but is not another hidden cutoff.
+Missing blank coverage is an eligibility failure when correction is enabled.
+
+If `complete=false`, the combined `temperature_ranges_C` field is null. Do not
+pass it to analysis, where null means unrestricted: require the user to resolve
+inputs with `status="no_usable_range"`, adjust thresholds, or change the selected
+inputs and request suggestions again. The valid individual proposals remain
+visible. One cycle per measurement is required; request other cycles separately.
+Keep the suggestion report in the session alongside any subsequent manual edits;
+the saved analysis records the applied ranges, not the discarded suggestions.
+Suggestions use count thresholds, not corrected-concentration peaks. They cannot
+guarantee a monotone Average curve when contributors change.
 
 Use original counts and temperatures. Matching observations retain their native
 sequence. Alignment uses the latest observation at or warmer than the target

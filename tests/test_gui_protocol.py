@@ -66,7 +66,9 @@ def test_capabilities_describe_live_arguments_and_methods():
     process, reply = call("capabilities")
     assert process.returncode == 0
     assert not process.stderr
-    assert set(reply["commands"]) == {"capabilities", "preview", "analyze", "export-csv"}
+    assert set(reply["commands"]) == {
+        "capabilities", "preview", "suggest-ranges", "analyze", "export-csv"
+    }
     analyze = {item["name"]: item for item in reply["commands"]["analyze"]["options"]}
     assert analyze["method"]["choices"] == ["mle", "average"]
     assert analyze["method"]["default"] == "mle"

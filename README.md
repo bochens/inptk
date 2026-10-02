@@ -209,10 +209,74 @@ sample name assigned by `sample_map`.
   events from the remaining cumulative counts. Unknown IDs and reversed limits
   raise errors.
 
-No hidden minimum-unfrozen-droplet cutoff or automatic range selection is applied.
-Future tools may suggest ranges, but should return this same explicit mapping for
-review. To use different ranges for different cycles, analyze those cycles in
-separate jobs.
+No hidden count cutoff or automatic range selection is applied by analysis.
+To use different ranges for different cycles, analyze those cycles in separate jobs.
+
+### Suggest ranges for Average
+
+`suggest_temperature_ranges()` chooses editable limits from the original well
+counts for Average. MLE ranges remain manually chosen. Analysis uses the suggestions
+only when explicitly passed as `temperature_ranges_C`:
+
+```python
+curves = {"Sample A": {"inputs": ["Sample_0", "Sample_1"], "cycle": "1"}}
+suggestions = inptk.suggest_temperature_ranges(
+    experiment, curves=curves, min_frozen=3, min_unfrozen=3,
+)
+print(suggestions.inputs)  # Limits, selected cycle, and reasons for each cutoff.
+ranges = suggestions.temperature_ranges_C  # A copy; edit limits here if needed.
+result = inptk.analyze_concentration(
+    experiment, curves=curves, method="average", temperature_ranges_C=ranges,
+)
+```
+
+The two thresholds are positive integer well counts. Their defaults of three are
+editable starting values, not a validated confidence criterion. For 32 wells,
+these defaults allow 3–29 frozen wells, including both endpoints. Assigned blanks
+must cover the selected temperatures when correction is enabled. The thresholds
+apply to sample wells, not blank wells.
+
+Suggestions contain one contiguous observed-temperature interval for each named
+input. If eligible observations form separate intervals, choose the largest
+temperature span; ties choose the warmer interval. Never bridge a failing
+temperature. Every observation at a repeated temperature must pass, because a
+temperature range cannot distinguish those images. Inputs with no usable interval
+remain in `suggestions.inputs` with `status="no_usable_range"`; accessing
+`suggestions.temperature_ranges_C` then raises an error instead of silently using
+the unrestricted input. Review thresholds or remove that input from `curves` and
+request suggestions again. Select one cycle per input; use the same curve/cycle
+selection when applying its ranges.
+
+`suggestions.observations` keeps the selected inputs' original counts and frozen
+fractions, with eligibility, exclusion reasons and blank checks. Within each
+proposed interval, `blank_status="not_distinguished_from_blank"` means the
+individual blank-corrected concentration interval reaches zero. Such points stay
+in the range. `uncertainty_unavailable` flags a failed finite estimate or interval;
+it also does not silently change the range. Diagnostic concentrations and error
+widths are per mL of original suspension. No blank fit is performed when correction
+is disabled or no map exists. Settings and proposals are recorded in the suggestion
+table's history. Save the suggestion report alongside the analysis if you need
+threshold and diagnostic provenance; analysis records the applied temperature limits.
+
+Suggestions do not search for peaks or remove concentration decreases. Average can
+still decrease when contributors change, so its final stop/skip policy remains
+separate. Reported intervals do not include uncertainty from choosing the ranges.
+
+Icescopy and other applications can request the same report without creating a
+saved result:
+
+```bash
+inptk suggest-ranges observations.csv --metadata metadata.csv \
+  --curves curves.json --water-blank-map blanks.json \
+  --min-frozen 3 --min-unfrozen 3 --json
+```
+
+The response includes `inputs`, `settings`, an observation `table`, and
+`temperature_ranges_C`. If any input has no usable interval, `complete` is false
+and the overall mapping is null. Do not pass that null mapping to analysis: resolve
+the incomplete proposals first. Individual valid proposals remain visible in `inputs`.
+
+### Apply ranges and interpret uncertainty
 
 The same `temperature_ranges_C` keyword is accepted by `cumulative_spectrum`,
 `estimate_concentration`, and `differential_spectrum`. Individual concentration rows
@@ -780,6 +844,7 @@ src/inptk/
   methods.py        method, named-curve inputs, and temperature-range validation
   processing.py     native count-to-fraction and per-measurement spectrum steps
   alignment.py      match original sample/blank observations only where needed
+  ranges.py         reviewable Average range suggestions and blank diagnostics
   curve_fit.py      prepare selected physical well histories for the joint curve fit
   resampling.py     optional grid views after final concentration selection
   workflows.py      concentration estimation, correction, units, and full workflow

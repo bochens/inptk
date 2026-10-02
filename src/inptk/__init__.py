@@ -3,6 +3,7 @@
 from .experiment import AnalysisResult, CurveResult, Experiment, MeasurementMetadata, SampleMetadata
 from .io import load, save
 from .processing import cumulative_spectrum, differential_spectrum, frozen_fraction
+from .ranges import RangeSuggestions, suggest_temperature_ranges
 from .readers import read_counts, read_icescopy, read_observations
 from .resampling import resample_spectrum
 from .tables import (
@@ -31,6 +32,7 @@ __all__ = [
     "Experiment",
     "FrozenFractionTable",
     "MeasurementMetadata",
+    "RangeSuggestions",
     "SampleMetadata",
     "analyze_concentration",
     "convert_concentration",
@@ -46,4 +48,5 @@ __all__ = [
     "resample_spectrum",
     "save",
     "subtract_blanks",
+    "suggest_temperature_ranges",
 ]

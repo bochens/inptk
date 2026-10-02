@@ -16,6 +16,7 @@ from . import (
     read_counts,
     read_icescopy,
     read_observations,
+    suggest_temperature_ranges,
 )
 from .experiment import AnalysisResult, Experiment
 from .io import FORMAT_VERSION, _encode, _table_payload
@@ -42,6 +43,42 @@ def _json_flag(parser):
     )
 
 
+def _analysis_input_arguments(parser):
+    parser.add_argument("input")
+    parser.add_argument("--metadata", help="Native metadata or Icescopy metadata overrides")
+    parser.add_argument(
+        "--format",
+        choices=("native", "icescopy", "saved"),
+        default="native",
+        help=(
+            "Saved analyses reuse original observations; processing settings use "
+            "this command's arguments, not prior settings"
+        ),
+    )
+    parser.add_argument(
+        "--sample-map",
+        help="JSON object or file mapping Icescopy measurement names to parent samples",
+    )
+    parser.add_argument(
+        "--water-blank-map",
+        help="JSON object or file mapping native measurements to lists of blank measurements",
+    )
+    parser.add_argument(
+        "--no-water-blank-correction",
+        action="store_true",
+        help="Analyze sample counts without water correction while retaining raw blank context",
+    )
+    parser.add_argument("--run-id", default="1")
+    parser.add_argument(
+        "--sample",
+        action="append",
+        help="Exact parent sample ID to analyze; repeat to select several",
+    )
+    parser.add_argument(
+        "--cycle", action="append", help="Exact cycle ID to analyze; repeat to select several"
+    )
+
+
 def build_parser():
     parser = _Parser(prog="inptk", description="INP-toolkit droplet-freezing analysis")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -64,39 +101,7 @@ def build_parser():
         "analyze", help="Calculate named concentration curves from original observations"
     )
     _json_flag(analyze)
-    analyze.add_argument("input")
-    analyze.add_argument("--metadata", help="Native metadata or Icescopy metadata overrides")
-    analyze.add_argument(
-        "--format",
-        choices=("native", "icescopy", "saved"),
-        default="native",
-        help=(
-            "Saved analyses reuse original observations; processing settings use "
-            "this command's arguments, not prior settings"
-        ),
-    )
-    analyze.add_argument(
-        "--sample-map",
-        help="JSON object or file mapping Icescopy measurement names to parent samples",
-    )
-    analyze.add_argument(
-        "--water-blank-map",
-        help="JSON object or file mapping native measurements to lists of blank measurements",
-    )
-    analyze.add_argument(
-        "--no-water-blank-correction",
-        action="store_true",
-        help="Analyze sample counts without water correction while retaining raw blank context",
-    )
-    analyze.add_argument("--run-id", default="1")
-    analyze.add_argument(
-        "--sample",
-        action="append",
-        help="Exact parent sample ID to analyze; repeat to select several",
-    )
-    analyze.add_argument(
-        "--cycle", action="append", help="Exact cycle ID to analyze; repeat to select several"
-    )
+    _analysis_input_arguments(analyze)
     analyze.add_argument("--out", required=True)
     analyze.add_argument(
         "--method",
@@ -129,6 +134,17 @@ def build_parser():
         default="stop_at_decrease",
         help="Select final cumulative points without changing calculated values",
     )
+    suggest = commands.add_parser(
+        "suggest-ranges", help="Suggest Average ranges and flag weak blank-corrected signals"
+    )
+    _json_flag(suggest)
+    _analysis_input_arguments(suggest)
+    suggest.add_argument("--curves", help="JSON object or file selecting named curves and cycles")
+    suggest.add_argument("--min-frozen", type=int, default=3,
+                         help="Minimum frozen sample wells (default: 3)")
+    suggest.add_argument("--min-unfrozen", type=int, default=3,
+                         help="Minimum liquid sample wells (default: 3)")
+    suggest.add_argument("--z", type=float, default=1.96)
     export = commands.add_parser("export-csv", help="Export a quantity from named saved curves")
     _json_flag(export)
     export.add_argument("input")
@@ -376,6 +392,45 @@ def _error_code(error):
     return "invalid_input"
 
 
+def _read_analysis_input(args):
+    if args.format == "native":
+        if args.sample_map:
+            raise ValueError("--sample-map applies only to Icescopy input")
+        if not args.metadata:
+            raise ValueError("Native input requires --metadata")
+        water_blank_map = _json_object(args.water_blank_map, "--water-blank-map")
+        experiment = read_counts(
+            args.input,
+            metadata=args.metadata,
+            run_id=args.run_id,
+            water_blank_map=water_blank_map,
+        )
+    elif args.format == "icescopy":
+        if args.water_blank_map:
+            raise ValueError(
+                "The Icescopy CSV adapter does not include raw blank context. "
+                "--water-blank-map requires raw sample and blank counts in --format native."
+            )
+        mapping = _json_object(args.sample_map, "--sample-map")
+        overrides = None
+        if args.metadata:
+            from .readers import _frame
+
+            overrides = _frame(args.metadata)
+        experiment = read_icescopy(
+            args.input, sample_map=mapping, metadata=overrides, run_id=args.run_id
+        )
+    else:
+        if args.water_blank_map:
+            raise ValueError("Saved input already contains its water-blank mapping")
+        if args.metadata or args.sample_map:
+            raise ValueError("Saved input already contains its metadata and sample mapping")
+        experiment = load(args.input)
+        if isinstance(experiment, AnalysisResult):
+            experiment = experiment.experiment
+    return _select_experiment(experiment, args.sample, args.cycle)
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -407,6 +462,23 @@ def main(argv=None):
                     )
                 print("No concentrations calculated. Use --json for plot data and metadata.")
             return 0
+        if command == "suggest-ranges":
+            proposal = suggest_temperature_ranges(
+                _read_analysis_input(args), curves=_json_object(args.curves, "--curves"),
+                min_frozen=args.min_frozen, min_unfrozen=args.min_unfrozen, z=args.z,
+                water_blank_correction=not args.no_water_blank_correction,
+            )
+            complete = all(item["range_C"] is not None for item in proposal.inputs.values())
+            _print_json(_response(
+                command, complete=complete,
+                temperature_ranges_C=proposal.temperature_ranges_C if complete else None,
+                inputs=proposal.inputs, settings=proposal.settings,
+                table=_table_payload(proposal.observations),
+                warnings=[] if complete else [
+                    "Some inputs have no usable range. Review thresholds or selected inputs."
+                ],
+            ))
+            return 0
         if Path(args.out).exists():
             raise FileExistsError(f"Output already exists: {args.out}")
         if command == "export-csv":
@@ -426,42 +498,7 @@ def main(argv=None):
             return 0
         temperature_ranges = _json_object(args.temperature_ranges, "--temperature-ranges")
         curves = _json_object(args.curves, "--curves")
-        if args.format == "native":
-            if args.sample_map:
-                raise ValueError("--sample-map applies only to Icescopy input")
-            if not args.metadata:
-                raise ValueError("Native input requires --metadata")
-            water_blank_map = _json_object(args.water_blank_map, "--water-blank-map")
-            experiment = read_counts(
-                args.input,
-                metadata=args.metadata,
-                run_id=args.run_id,
-                water_blank_map=water_blank_map,
-            )
-        elif args.format == "icescopy":
-            if args.water_blank_map:
-                raise ValueError(
-                    "The Icescopy CSV adapter does not include raw blank context. "
-                    "--water-blank-map requires raw sample and blank counts in --format native."
-                )
-            mapping = _json_object(args.sample_map, "--sample-map")
-            overrides = None
-            if args.metadata:
-                from .readers import _frame
-
-                overrides = _frame(args.metadata)
-            experiment = read_icescopy(
-                args.input, sample_map=mapping, metadata=overrides, run_id=args.run_id
-            )
-        else:
-            if args.water_blank_map:
-                raise ValueError("Saved input already contains its water-blank mapping")
-            if args.metadata or args.sample_map:
-                raise ValueError("Saved input already contains its metadata and sample mapping")
-            experiment = load(args.input)
-            if isinstance(experiment, AnalysisResult):
-                experiment = experiment.experiment
-        experiment = _select_experiment(experiment, args.sample, args.cycle)
+        experiment = _read_analysis_input(args)
         result = analyze_concentration(
             experiment,
             method=args.method,
