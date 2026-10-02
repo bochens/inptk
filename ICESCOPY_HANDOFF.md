@@ -26,17 +26,18 @@ its relevant controls.
 | `temperature_tolerance_C` | Advanced temperature allowance | Default 0°C for `latest`; `window_max_count` uses 0.01°C and `max` uses 0.05°C when omitted |
 | `z` | Advanced uncertainty setting | Default 1.96, for nominal 95% bounds |
 | `differential` | Request additional concentration-per-degree output | Optional starting checkbox; default off |
-| `blank_by_sample` | Sample-to-blank assignment; currently Python-only, so do not enable in the CLI dialog | Never store sample names globally |
+| `water_blank_map` | Assign one or more raw water-blank droplet sets to each sample measurement | Never store measurement names globally |
+| `water_blank_correction` | Visible Apply water-blank correction checkbox; retain assignments when off | Initial value on; no map means no correction is applied |
+| `blank_by_sample` | Separate subtraction of a calculated sample/filter blank spectrum; currently Python-only | Never store sample names globally |
 | `decrease_policy` | Visible final-curve choice: stop at first decrease, or skip decreases and allow recovery | Default `stop_at_decrease`; allow per-analysis override |
 | `min_unfrozen` | Automatic stitching: minimum unfrozen droplets | Default 3 |
-| `overlap_points` | Automatic stitching: points examined near a dilution transition | Default 4 |
 | `switch_temperatures_C` | Manual stitching: draggable switches and numerical values | Never store run-specific switches globally |
 | `temperature_eligibility_C` | MLE: warm cutoff for each measurement name | Never store measurement cutoffs globally |
-| `mask_mode` | Explicit choice with MLE cutoffs: exclude warmer rows, or also remove their frozen baseline | Do not silently reuse a baseline interpretation |
-| `likelihood_weights` | Advanced MLE contribution weights by measurement name | No global measurement map |
-| `action_counts` | Advanced MLE handling-action counts by measurement name | No global measurement map |
-| `action_weight_lambda` | Advanced decrease in weight per action; alternative to half-life | No universal scientific default |
-| `action_weight_half_life` | Advanced number of actions that halves the weight; alternative to decay rate | No universal scientific default |
+| `mask_mode` | Raw-blank MLE uses `drop_rows`; the older corrected-input route also permits explicit baseline removal | Do not silently reuse a baseline interpretation |
+| `likelihood_weights` | MLE without raw water correction; unavailable while correction is enabled | No global measurement map |
+| `action_counts` | MLE without raw water correction; unavailable while correction is enabled | No global measurement map |
+| `action_weight_lambda` | MLE without raw water correction; unavailable while correction is enabled | No universal scientific default |
+| `action_weight_half_life` | MLE without raw water correction; unavailable while correction is enabled | No universal scientific default |
 | `confidence_drop` | Expert MLE uncertainty override; normally use the value derived from `z` | Avoid a second competing uncertainty default |
 
 Direct weights and action-based weights are alternatives. Decay rate and half-life
@@ -52,8 +53,23 @@ belong to the same original sample.
 
 ## Process dialog and plots
 
+Temperature import attaches temperatures and times to observations. The new INP
+processing dialog owns water-blank assignment, metadata review, dilution grouping,
+stitching, MLE exclusions, and final-curve selection. Preserve raw session counts
+before any correction; do not make temperature import irreversibly subtract a
+blank or choose the INP analysis settings.
+
 - Select the parent sample, run, and cycle. Preserve every cycle separately; do
   not pool repeated freezing cycles as independent droplets.
+- Make water-blank correction optional with a visible checkbox. Turning it off
+  keeps raw blank observations and assignments but excludes them from calculated
+  sample tables. Show the returned `water_blank_correction_applied` state; an
+  enabled checkbox without a map does not mean correction occurred.
+- Select the water-blank droplet sets explicitly, with one or more names per
+  sample measurement. Show their measured counts and individual curves. Require
+  each set's known droplet volume, which may differ between samples and blanks.
+  State the supported common background per volume and same prepared-water
+  protocol beside this assignment; there is no automatic protocol detection.
 - Use plots as the main view: counts, frozen fractions, individual dilution
   concentrations, combined concentration, and optional differential results.
   Keep tables available for inspection and export.
@@ -61,6 +77,11 @@ belong to the same original sample.
   Plot sorting must not change the calculation order or saved observations.
 - Keep measurement colors consistent. Label curves with measurement name and
   dilution factor. Show excluded observations faintly instead of deleting them.
+- Automatic stitching has only the minimum-unfrozen-droplet setting. It keeps
+  the current dilution through its coldest eligible point, then switches to the
+  next dilution for colder temperatures. Gaps do not trigger early switching.
+  Each selected concentration and its error bounds remain unchanged; there is no
+  overlap setting, averaging, or refitting between curves.
 - For manual stitching, display draggable switch lines and numerical entries.
   Highlight the selected curve segments and show the combined preview.
 - For MLE, display a warm cutoff for each measurement and the fitted curve.
@@ -74,9 +95,10 @@ belong to the same original sample.
 
 The current MLE control supports one warm cutoff per measurement. It does not
 support arbitrary excluded intervals or individual-point exclusions. Do not offer
-an unrestricted exclusion brush. `drop_rows` only omits warmer rows from fitting;
-`rebase_counts` also subtracts the warm frozen baseline and its droplets. These
-have different scientific meanings and must be labeled explicitly.
+an unrestricted exclusion brush. `drop_rows` omits warmer sample rows from fitting
+and is the supported cutoff mode while raw water correction is enabled. On the older corrected-input
+route, `rebase_counts` additionally subtracts the warm frozen baseline and its
+droplets. Do not expose that operation or contribution weights in raw-blank mode.
 
 Use one CLI job per selected sample/cycle when switches or cutoffs differ between
 groups. Manual stitching requires the same dilution-factor set in all groups
@@ -100,25 +122,49 @@ observations were selected or which measurements entered an MLE fit.
 ## CLI and saved-result contract
 
 Use Qt's separate-process support with an executable path and argument list;
-do not build a shell command. Export input using Icescopy's existing
-`build_freeze_count_timeseries_csv_text` helper. Keep the original export unchanged.
-Write sample grouping and method options as JSON files alongside the job inputs.
-For example, `sample-map.json` can contain:
+do not build a shell command. For new analyses, export **raw sample and raw blank
+counts** to native long CSV from the Icescopy session. The existing
+`build_freeze_count_timeseries_csv_text` output may already be corrected and is
+not the raw contract. Preserve it as an existing result; do not reverse its
+correction to reconstruct observations.
+
+`raw-counts.csv` needs `measurement_id`, `cycle_id`, `temperature_C`, `n_total`,
+and `n_frozen`, plus `time_s` when available. Each physical sample or blank droplet
+set keeps its own name. Do not duplicate a blank's rows for each sample that uses
+it. Provide one metadata row per set, for example:
+
+```csv
+measurement_id,sample_id,run_id,dilution,droplet_volume_uL,sample_type,air_volume_L,suspension_volume_mL,filter_fraction_used
+Sample_0,Sample_A,run-01,1,50,air,100,5,1
+Sample_1,Sample_A,run-01,10,50,air,100,5,1
+Water_1,water1,run-01,1,20,other,,,
+Water_2,water2,run-01,1,50,other,,,
+```
+
+These volumes are examples; use the actual recorded values. Native input groups
+sample measurements through `sample_id` in this metadata, without `--sample-map`.
+Blank sets must have dilution 1 and the same run as the assigned sample sets.
+Save `water-blank-map.json` as a mapping to lists, including single-blank lists:
 
 ```json
-{"Sample_0": "Sample_A", "Sample_1": "Sample_A", "Sample_2": "Sample_A"}
+{"Sample_0": ["Water_1", "Water_2"], "Sample_1": ["Water_1", "Water_2"]}
 ```
+
+Assign every nonblank measurement. Dilutions of one original sample/run must use
+the same set of blanks; their order in the list is irrelevant. Different original
+samples can choose different groups. Counts and droplet volumes can differ across
+physical sets. Each sample/blank assignment needs matching cycle and temperature
+observations. Repeated cycles never become extra independent blank droplets.
 
 An MLE `method-options.json` can contain:
 
 ```json
-{"temperature_eligibility_C": {"Sample_2": -15}, "mask_mode": "drop_rows"}
+{"temperature_eligibility_C": {"Sample_1": -15}, "mask_mode": "drop_rows"}
 ```
 
 ```sh
-inptk analyze freeze_count_timeseries.csv \
-  --format icescopy --sample-map sample-map.json \
-  --sample Sample_A --cycle 0 \
+inptk analyze raw-counts.csv --format native --metadata measurements.csv \
+  --water-blank-map water-blank-map.json --sample Sample_A --cycle 0 \
   --dilution-method mle --method-options method-options.json \
   --output-basis sampled_air --step-C 0.5 \
   --temperature-method latest --temperature-tolerance-C 0 \
@@ -126,23 +172,33 @@ inptk analyze freeze_count_timeseries.csv \
 ```
 
 `--sample` selects exact parent sample IDs; `--cycle` selects exact cycle IDs.
-Both can be repeated. `--run-id` labels imported native/Icescopy data; it is not a
-run filter for a saved analysis. Unknown selections fail. For manual stitching,
-use `--dilution-method manual` and, for three dilution levels:
+Both can be repeated. Selection retains associated blank counts once per physical
+set and selected run/cycle, together with required metadata. Blank-only parent
+samples cannot be selected as analysis samples. The saved `source.selection`
+records the user selection, not the added blank context. `--run-id` labels imports;
+it is not a run filter for saved input. Unknown selections fail.
+
+For manual stitching, use `--dilution-method manual` and, for three dilution levels:
 
 ```json
 {"switch_temperatures_C": [-12, -16]}
 ```
 
-Missing header metadata can be supplied with `--metadata overrides.json` using
-an array of records, for example:
+Saved experiments retain `water_blank_map`; `--format saved` uses it directly and
+rejects a replacement map. The existing `--format icescopy` route still accepts
+corrected exports with an explicit `--sample-map` JSON object, but rejects
+`--water-blank-map`. Its metadata overrides use Icescopy measurement labels as
+`sample_id` and `well_volume_uL` for volume, for example
+`[{"sample_id":"Sample_0","well_volume_uL":50}]`. Native metadata instead uses
+`measurement_id` for the physical set and `droplet_volume_uL` for its volume.
 
-```json
-[{"sample_id": "Sample_0", "well_volume_uL": 50}]
-```
-
-Here `sample_id` is the Icescopy measurement name. Only supplied, nonmissing
-fields replace header values; the remaining header metadata is retained.
+Add `--no-water-blank-correction` to analyze the sample counts without correction.
+The saved original experiment still includes its raw blanks and assignment map;
+calculated tables exclude blank sets, and blank temperature coverage is not
+required. The same choice is `water_blank_correction=False` in the full Python
+workflow and its cumulative, differential, and dilution-combination steps. With
+no blank map, both settings use the ordinary sample-only calculation. Neither
+choice reverses correction already present in an imported count table.
 
 Read the result only after the process exits successfully. Capture standard output,
 standard error, and exit status; report failures without replacing a previous
@@ -152,8 +208,9 @@ Remove disposable previews when they are no longer needed.
 
 `analysis.inptk` is a directory containing `analysis.json`, not a binary archive.
 Check `format == "inptk"` and `format_version == 1`. The payload records
-`toolkit_version`, original counts and metadata, result tables, resolved settings,
-history, and warnings. Tables contain columns and row records. Nonfinite values
+`toolkit_version`, original counts, each set's volume metadata, `water_blank_map`,
+result tables, resolved settings, history, and warnings. Settings include requested
+`water_blank_correction` and effective `water_blank_correction_applied`. Tables contain columns and row records. Nonfinite values
 use explicit objects such as `{"$nonfinite": "inf"}`; decode them for display,
 retain their quality flags, and do not draw them as finite concentrations.
 
@@ -166,8 +223,10 @@ new full-workflow results include it. `final` contains only retained rows.
 `lower_error` and `upper_error` are widths, so
 bounds are concentration minus/plus those widths. They are not interval endpoints.
 `source_measurement_ids` lists candidate measurements, not proof that every one
-contributed at every temperature. Manual results additionally report
-`source_measurement_id` and `selection_status`.
+contributed at every temperature. Automatic and manual stitching identify each
+selected point with `source_measurement_id`; an empty value means unavailable.
+Each point uses one measurement, with its concentration and bounds unchanged.
+Manual results additionally report `selection_status`.
 
 Save the input identity, executable/version, requested options, and returned
 resolved settings with the Icescopy analysis. Do not parse human-readable progress
@@ -179,11 +238,31 @@ Any exclusion of invalid source rows must be an explicit, recorded decision.
 
 ## Scientific boundaries to retain
 
-- Icescopy counts may already contain matched, per-picture water correction. Do
-  not subtract that blank a second time. Both OLAF count-based error bounds and
-  MLE bounds change when the frozen/total counts are corrected, but neither
-  separately propagates uncertainty in the measured water blank or correlations
-  from sharing a blank across measurements.
+- Raw-blank analysis assumes one common background concentration per volume at
+  each temperature for the assigned sets, using the same prepared-water protocol.
+  Its Poisson model describes randomly distributed ice-active contributions per
+  volume. It does not model a separate well-surface-area contribution or establish
+  that different preparation protocols share a background.
+- Each sample and blank set retains its own positive known droplet volume and
+  observed count total. Unequal volumes enter separate probabilities; do not pool
+  unequal-volume counts into one frozen fraction for calculation.
+- Individual dilution spectra and MLE use the same joint sample/blank model.
+  Joint fitting means estimating sample concentration and background from their
+  counts together. The common blank group contributes once per temperature to a
+  multi-dilution MLE fit. Stitching copies one dilution's fitted concentration and
+  uncertainty bounds at each temperature without combining the uncertainty from
+  multiple curves or fitting an overlap region.
+- While raw water correction is enabled, use `latest` or `max` temperature
+  selection. `window_max_count` is rejected because its synthetic warm zero rows
+  are not observed droplets. Its legacy behavior remains available with correction
+  disabled or no blank map.
+- Raw-blank MLE accepts `drop_rows` temperature cutoffs and rejects `rebase_counts`,
+  direct likelihood weights, and action-based weights. Confidence settings remain
+  explicit; background uncertainty must be included when calculating bounds.
+- Existing corrected Icescopy exports retain their earlier approximate
+  count-based processing. Those adjusted counts alone cannot recover the measured
+  blank's uncertainty or the dependence introduced by a shared blank. Do not
+  subtract again or reconstruct supposedly raw counts from an inverse correction.
 - MLE fits temperatures separately; observations of the same droplets at other
   temperatures are not additional independent droplets. Cycles also remain
   separate. There is no public `enforce_monotone` option; final-decrease selection
@@ -204,7 +283,8 @@ In the **Icescopy repository**:
   and the existing ML page's Browse layout.
 - `src/icescopy_paths.py`: user-preferences location and atomic saving.
 - `src/Icescopy.py`: loading/applying preferences and registering analysis actions.
-- `src/icescopy_session_io.py`: CSV export helper and session persistence.
+- `src/icescopy_session_io.py`: session persistence and the existing corrected
+  CSV export; add a separate raw native export for the new INP dialog.
 - `src/icescopy_plot.py`: existing PyQtGraph integration.
 - `resources/preferences.xml`: bundled initial preference values.
 
@@ -218,6 +298,18 @@ CLI contracts rather than the private `_engine` modules.
 
 ## Verification before handoff
 
-Validation of the final-decrease selection change is pending. Record the final
-test, notebook, and installed-CLI checks here after they complete. Icescopy
-integration is specified here but has not been implemented or tested.
+- 305 automated tests passed, with one existing pandas warning in the deliberately
+  invalid-timestamp test.
+- Ruff checks, mypy checks of 19 source files, and Bandit checks passed.
+- Verification includes numerical and regression checks for raw sample/blank
+  fitting, known unequal volumes, optional correction, physical blank assignments,
+  separate cycles, CLI and saved-result parity, final-point selection, and copying
+  one dilution's concentration and bounds per stitched point.
+- These checks verify the implemented calculations and software behavior. They
+  do not establish uncertainty-interval coverage across all experimental
+  conditions or verify that a particular set of experimental blanks shares the
+  assumed common background.
+- Notebook execution and installed-CLI checks are pending completion. The old
+  corrected-input notebook is not validation of the new raw-blank model.
+- No Icescopy GUI files have been changed; its integration remains to be
+  implemented and tested.

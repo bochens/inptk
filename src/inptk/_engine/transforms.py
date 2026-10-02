@@ -949,30 +949,19 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
     sample_group_by: Literal["sample_id", "sample_name", "sample_long_name"]
     | dict[str, str]
     | None = None,
-    enforce_monotone: bool = False,
     z: float = 1.96,
     min_unfrozen: int = 3,
-    overlap_points: int = 4,
 ) -> CumulativeNucleusSpectrumTable | dict[str, Any]:
-    """Stitch serial dilutions into one cumulative K(T) spectrum.
+    """Select disjoint dilution ranges for one cumulative K(T) spectrum.
 
-    When ``sample_group_by`` is omitted, groups are inferred from
-    ``sample_long_name``/``sample_name`` by stripping one trailing numeric token,
-    falling back to ``sample_id``. The stitching logic follows OLAF's
-    dilution-transition behavior: start from the least diluted spectrum, inspect
-    the last four valid overlap points before switching dilution, use the same
-    confidence-interval decision tree, then use the next dilution for colder
-    temperatures. min_unfrozen and overlap_points customize the eligibility
-    cutoff and cold-end adjustment window; defaults retain the OLAF rules.
-    overlap_points=0 disables overlap adjustments without changing the handoff.
+    Start with the least diluted curve and retain it through its coldest finite
+    point with at least min_unfrozen unfrozen droplets. Use the next dilution
+    only at colder temperatures. Missing points within a selected range stay
+    missing; overlapping curves are never averaged or fitted together.
     """
 
-    for name, value, minimum in (
-        ("min_unfrozen", min_unfrozen, 1),
-        ("overlap_points", overlap_points, 0),
-    ):
-        if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
-            raise ValueError(f"{name} must be a whole number >= {minimum}")
+    if isinstance(min_unfrozen, bool) or not isinstance(min_unfrozen, Integral) or min_unfrozen < 1:
+        raise ValueError("min_unfrozen must be a whole number >= 1")
 
     if isinstance(table, dict):
         return _map_merge_shape(
@@ -981,10 +970,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
                 nested,
                 metadata_by_sample_id,
                 sample_group_by=sample_group_by,
-                enforce_monotone=enforce_monotone,
                 z=z,
                 min_unfrozen=min_unfrozen,
-                overlap_points=overlap_points,
             ),
         )
     if isinstance(table, (list, tuple)):
@@ -1014,10 +1001,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
                 inputs=(table,),
                 parameters={
                     "sample_group_by": _sample_group_by_parameter(sample_group_by),
-                    "enforce_monotone": enforce_monotone,
                     "z": z,
                     "min_unfrozen": min_unfrozen,
-                    "overlap_points": overlap_points,
                 },
             ),
         )
@@ -1048,9 +1033,7 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
         stitched_group = _stitch_cumulative_group(
             group_df,
             str(group_id),
-            enforce_monotone=enforce_monotone,
             min_unfrozen=min_unfrozen,
-            overlap_points=overlap_points,
         )
         if not stitched_group.empty:
             frames.append(stitched_group)
@@ -1071,10 +1054,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
                 inputs=(table,),
                 parameters={
                     "sample_group_by": _sample_group_by_parameter(sample_group_by),
-                    "enforce_monotone": enforce_monotone,
                     "z": z,
                     "min_unfrozen": min_unfrozen,
-                    "overlap_points": overlap_points,
                 },
                 source_sample_ids=_table_sample_ids_from_dataframe(source_df),
                 source_dilutions=_metadata_dilutions(metadata_by_sample_id),
@@ -1091,10 +1072,8 @@ def temperature_frozen_fraction_to_stitched_cumulative_spectrum(
             inputs=(table,),
             parameters={
                 "sample_group_by": _sample_group_by_parameter(sample_group_by),
-                "enforce_monotone": enforce_monotone,
                 "z": z,
                 "min_unfrozen": min_unfrozen,
-                "overlap_points": overlap_points,
             },
             source_sample_ids=_table_sample_ids_from_dataframe(source_df),
             source_dilutions=_metadata_dilutions(metadata_by_sample_id),
@@ -1907,88 +1886,61 @@ def _stitch_cumulative_group(
     group_df: pd.DataFrame,
     group_id: str,
     *,
-    enforce_monotone: bool,
     min_unfrozen: int = 3,
-    overlap_points: int = 4,
 ) -> pd.DataFrame:
+    """Select one dilution per temperature using the coldest eligible handoff.
+
+    Concentrations and error widths are copied from the selected curve. A gap
+    does not cause an early switch, and later dilutions never replace warmer
+    selected ranges. Final decrease handling is a separate workflow step.
+    """
     group_df = _prepare_olaf_stitch_frame(group_df, min_unfrozen=min_unfrozen)
     if group_df.empty:
         return pd.DataFrame()
-
-    temperatures = np.array(sorted(group_df["temperature_C"].unique(), reverse=True), dtype=float)
-    dilutions = np.array(sorted(group_df["dilution_fold"].dropna().unique()), dtype=float)
-    if len(dilutions) == 0:
-        return pd.DataFrame.from_records(
-            [
-                _empty_stitch_row(group_id, float(temperature), group_df)
-                for temperature in temperatures
-            ]
-        )
+    if "source_sample_id" not in group_df:
+        raise ValueError("Stitching requires source_sample_id for every input row")
+    sources = group_df.loc[np.isfinite(group_df["value"]), "source_sample_id"]
+    if not sources.map(lambda value: isinstance(value, str) and bool(value.strip())).all():
+        raise ValueError("Finite stitch rows require nonempty source_sample_id names")
     if group_df.duplicated(["temperature_C", "dilution_fold"]).any():
         examples = _duplicate_key_examples(group_df, ["temperature_C", "dilution_fold"])
         raise ValueError(
             f"Stitch group {group_id!r} contains repeated temperature/dilution rows: "
-            f"{examples}. UFOLAF currently expects at most one row for each temperature "
-            "and dilution in a stitch group. This usually means the same physical sample "
-            "and dilution were measured in multiple experiments. Aggregate those replicate "
-            "experiments before stitching, run them separately, or use MLE if independent "
-            "well counts should be fitted together."
+            f"{examples}. Stitching requires at most one measurement at each "
+            "temperature and dilution; analyze repeated measurements separately "
+            "or use MLE for independent droplet sets."
         )
 
-    value_matrix = _stitch_matrix(group_df, "value", temperatures, dilutions)
-    lower_matrix = _stitch_matrix(group_df, "lower_ci", temperatures, dilutions)
-    upper_matrix = _stitch_matrix(group_df, "upper_ci", temperatures, dilutions)
-
-    first_dilution = dilutions[0]
-    result = pd.DataFrame(
-        {
-            "temperature_C": temperatures,
-            "dilution_fold": first_dilution,
-            "value": value_matrix[first_dilution].to_numpy(dtype=float, copy=True),
-            "lower_ci": lower_matrix[first_dilution].to_numpy(dtype=float, copy=True),
-            "upper_ci": upper_matrix[first_dilution].to_numpy(dtype=float, copy=True),
-            "qc_flag": 0,
-        }
-    )
-
-    for next_dilution in dilutions[1:]:
+    temperatures = np.array(sorted(group_df["temperature_C"].unique(), reverse=True), dtype=float)
+    dilutions = np.array(sorted(group_df["dilution_fold"].unique()), dtype=float)
+    matrices = {
+        name: _stitch_matrix(group_df, name, temperatures, dilutions)
+        for name in ("value", "lower_ci", "upper_ci")
+    }
+    result = pd.DataFrame({
+        "temperature_C": temperatures,
+        "dilution_fold": dilutions[0],
+        **{
+            name: matrix[dilutions[0]].to_numpy(dtype=float, copy=True)
+            for name, matrix in matrices.items()
+        },
+    })
+    for dilution in dilutions[1:]:
         valid_indices = result.index[result["value"].notna()]
-        replacement_start = int(valid_indices[-1]) + 1 if len(valid_indices) else 0
-        last_valid_indices = valid_indices.to_series().tail(overlap_points).to_numpy()
-        going_down = False
-        for index in last_valid_indices:
-            previous_value = _previous_finite_value(result["value"], int(index))
-            current_value = cast(float, result.at[int(index), "value"])
-            current_is_going_down = (
-                previous_value is not None
-                and np.isfinite(current_value)
-                and current_value < previous_value
+        start_index = int(valid_indices[-1]) + 1 if len(valid_indices) else 0
+        if start_index >= len(result):
+            continue
+        result.loc[start_index:, "dilution_fold"] = dilution
+        for name, matrix in matrices.items():
+            result.loc[start_index:, name] = matrix[dilution].iloc[start_index:].to_numpy(
+                dtype=float, copy=True
             )
-            _apply_olaf_overlap_decision(
-                result,
-                int(index),
-                next_dilution,
-                value_matrix[next_dilution],
-                lower_matrix[next_dilution],
-                upper_matrix[next_dilution],
-                going_down=going_down,
-            )
-            going_down = bool(going_down or current_is_going_down)
-
-        _replace_with_next_dilution(
-            result,
-            replacement_start,
-            next_dilution,
-            value_matrix[next_dilution],
-            lower_matrix[next_dilution],
-            upper_matrix[next_dilution],
-        )
-
-    if enforce_monotone:
-        _enforce_monotone_stitch_result(result)
-
-    rows = [_stitch_row_from_result(group_id, row, group_df) for _, row in result.iterrows()]
-    return pd.DataFrame.from_records(rows)
+    result["qc_flag"] = np.where(
+        np.isfinite(result[["value", "lower_ci", "upper_ci"]]).all(axis=1), 0, 1
+    )
+    return pd.DataFrame.from_records([
+        _stitch_row_from_result(group_id, row, group_df) for _, row in result.iterrows()
+    ])
 
 
 def _prepare_olaf_stitch_frame(
@@ -2001,10 +1953,14 @@ def _prepare_olaf_stitch_frame(
     for column in ("value", "lower_ci", "upper_ci", "n_frozen", "n_total"):
         if column in df:
             df[column] = pd.to_numeric(df[column], errors="coerce")
-
-    valid = np.isfinite(df["value"])
-    valid &= (df["n_total"] - df["n_frozen"]) >= min_unfrozen
-    df.loc[~valid, ["value", "lower_ci", "upper_ci"]] = np.nan
+    finite = np.isfinite(df["value"])
+    enough_unfrozen = (df["n_total"] - df["n_frozen"]) >= min_unfrozen
+    df["stitch_selection_status"] = np.select(
+        [~finite, ~enough_unfrozen],
+        ["nonfinite_concentration", "insufficient_unfrozen"],
+        default="selected",
+    )
+    df.loc[~(finite & enough_unfrozen), ["value", "lower_ci", "upper_ci"]] = np.nan
     return df.sort_values(["temperature_C", "dilution_fold"], ascending=[False, True])
 
 
@@ -2021,196 +1977,30 @@ def _stitch_matrix(
     )
 
 
-def _apply_olaf_overlap_decision(
-    result: pd.DataFrame,
-    index: int,
-    next_dilution: float,
-    next_value: pd.Series,
-    next_lower_ci: pd.Series,
-    next_upper_ci: pd.Series,
-    *,
-    going_down: bool,
-) -> None:
-    previous_value = _previous_finite_value(result["value"], index)
-    current_value = cast(float, result.at[index, "value"])
-    if previous_value is None or not np.isfinite(current_value):
-        return
-    if not (current_value < previous_value or going_down):
-        return
-
-    previous_lower_limit = previous_value - _finite_or_zero(result.at[index, "lower_ci"])
-    next_candidate = float(next_value.iloc[index])
-    current_below_limit = current_value < previous_lower_limit
-    next_below_limit = np.isfinite(next_candidate) and next_candidate < previous_lower_limit
-    if current_below_limit and next_below_limit:
-        result.loc[index, ["dilution_fold", "value", "lower_ci", "upper_ci"]] = np.nan
-        result.at[index, "qc_flag"] = int(cast(int, result.at[index, "qc_flag"])) | 1
-        return
-    if (
-        current_value > previous_value
-        and np.isfinite(next_candidate)
-        and next_candidate > previous_value
-    ):
-        _select_overlap_by_olaf_error_logic(
-            result,
-            index,
-            next_dilution,
-            next_value,
-            next_lower_ci,
-            next_upper_ci,
-        )
-        return
-    if current_value >= previous_lower_limit:
-        return
-    if np.isfinite(next_candidate) and next_candidate >= previous_lower_limit:
-        _set_result_row_from_next(
-            result,
-            index,
-            next_dilution,
-            next_value,
-            next_lower_ci,
-            next_upper_ci,
-        )
-
-
-def _select_overlap_by_olaf_error_logic(
-    result: pd.DataFrame,
-    index: int,
-    next_dilution: float,
-    next_value: pd.Series,
-    next_lower_ci: pd.Series,
-    next_upper_ci: pd.Series,
-) -> None:
-    previous_value = _previous_finite_value(result["value"], index)
-    if previous_value is None:
-        return
-    previous_upper_error = _previous_finite_value(result["upper_ci"], index)
-    if previous_upper_error is None:
-        previous_upper_error = 0.0
-
-    current_value = cast(float, result.at[index, "value"])
-    next_candidate = float(next_value.iloc[index])
-    current_within_previous = previous_value + previous_upper_error > current_value
-    next_within_previous = (
-        np.isfinite(next_candidate) and previous_value + previous_upper_error > next_candidate
-    )
-    if current_within_previous and next_within_previous:
-        current_upper_error = _finite_or_inf(result.at[index, "upper_ci"])
-        next_upper_error = _finite_or_inf(next_upper_ci.iloc[index])
-        if current_upper_error >= next_upper_error:
-            _set_result_row_from_next(
-                result,
-                index,
-                next_dilution,
-                next_value,
-                next_lower_ci,
-                next_upper_ci,
-            )
-    elif current_within_previous:
-        return
-    elif next_within_previous:
-        _set_result_row_from_next(
-            result,
-            index,
-            next_dilution,
-            next_value,
-            next_lower_ci,
-            next_upper_ci,
-        )
-    elif np.isfinite(next_candidate):
-        result.at[index, "dilution_fold"] = next_dilution
-        result.at[index, "value"] = (current_value + next_candidate) / 2.0
-        result.at[index, "lower_ci"] = _rms_pair(
-            result.at[index, "lower_ci"],
-            next_lower_ci.iloc[index],
-        )
-        result.at[index, "upper_ci"] = _rms_pair(
-            result.at[index, "upper_ci"],
-            next_upper_ci.iloc[index],
-        )
-
-
-def _replace_with_next_dilution(
-    result: pd.DataFrame,
-    start_index: int,
-    next_dilution: float,
-    next_value: pd.Series,
-    next_lower_ci: pd.Series,
-    next_upper_ci: pd.Series,
-) -> None:
-    if start_index >= len(result):
-        return
-    target = result.index[start_index:]
-    result.loc[target, "dilution_fold"] = next_dilution
-    result.loc[target, "value"] = next_value.iloc[start_index:].to_numpy(dtype=float, copy=True)
-    result.loc[target, "lower_ci"] = next_lower_ci.iloc[start_index:].to_numpy(
-        dtype=float,
-        copy=True,
-    )
-    result.loc[target, "upper_ci"] = next_upper_ci.iloc[start_index:].to_numpy(
-        dtype=float,
-        copy=True,
-    )
-    result.loc[target, "qc_flag"] = np.where(np.isfinite(result.loc[target, "value"]), 0, 1)
-
-
-def _set_result_row_from_next(
-    result: pd.DataFrame,
-    index: int,
-    next_dilution: float,
-    next_value: pd.Series,
-    next_lower_ci: pd.Series,
-    next_upper_ci: pd.Series,
-) -> None:
-    result.at[index, "dilution_fold"] = next_dilution
-    result.at[index, "value"] = float(next_value.iloc[index])
-    result.at[index, "lower_ci"] = float(next_lower_ci.iloc[index])
-    result.at[index, "upper_ci"] = float(next_upper_ci.iloc[index])
-    result.at[index, "qc_flag"] = 0 if np.isfinite(cast(float, result.at[index, "value"])) else 1
-
-
-def _previous_finite_value(series: pd.Series, index: int) -> float | None:
-    previous = series.iloc[:index].dropna()
-    if previous.empty:
-        return None
-    value = float(previous.iloc[-1])
-    return value if np.isfinite(value) else None
-
-
-def _finite_or_zero(value: Any) -> float:
-    converted = float(value)
-    return converted if np.isfinite(converted) else 0.0
-
-
-def _finite_or_inf(value: Any) -> float:
-    converted = float(value)
-    return converted if np.isfinite(converted) else np.inf
-
-
-def _enforce_monotone_stitch_result(result: pd.DataFrame) -> None:
-    previous_value = np.nan
-    previous_upper_ci = np.nan
-    for index in result.index:
-        value = cast(float, result.at[index, "value"])
-        if not np.isfinite(value):
-            continue
-        if np.isfinite(previous_value) and value < previous_value:
-            current_upper_ci = cast(float, result.at[index, "upper_ci"])
-            result.at[index, "value"] = previous_value
-            result.at[index, "upper_ci"] = _rms_pair(current_upper_ci, previous_upper_ci)
-            result.at[index, "qc_flag"] = int(cast(int, result.at[index, "qc_flag"])) | 2
-        previous_value = cast(float, result.at[index, "value"])
-        previous_upper_ci = cast(float, result.at[index, "upper_ci"])
-
-
 def _stitch_row_from_result(
     group_id: str,
     row: pd.Series,
     group_df: pd.DataFrame,
 ) -> dict[str, Any]:
     temperature_C = float(row["temperature_C"])
-    selected_dilution = row["dilution_fold"]
+    selected_dilution = float(row["dilution_fold"])
     source_row = _source_row_for_stitch_result(group_df, temperature_C, selected_dilution)
+    exact_source = (
+        float(source_row["temperature_C"]) == temperature_C
+        and float(source_row["dilution_fold"]) == selected_dilution
+    )
+    selected_id = (
+        str(source_row["source_sample_id"])
+        if exact_source and np.isfinite(row["value"])
+        else ""
+    )
+    status = (
+        str(source_row["stitch_selection_status"])
+        if exact_source else "temperature_unavailable"
+    )
+    qc_flag = int(row["qc_flag"])
+    if exact_source and pd.notna(source_row.get("qc_flag")):
+        qc_flag |= int(source_row["qc_flag"])
     out = {
         "sample_id": group_id,
         "temperature_C": temperature_C,
@@ -2219,8 +2009,11 @@ def _stitch_row_from_result(
         "basis": str(source_row.get("basis", "suspension")),
         "lower_ci": float(row["lower_ci"]) if pd.notna(row["lower_ci"]) else np.nan,
         "upper_ci": float(row["upper_ci"]) if pd.notna(row["upper_ci"]) else np.nan,
-        "dilution_fold": float(selected_dilution) if pd.notna(selected_dilution) else np.nan,
-        "qc_flag": int(row["qc_flag"]) if pd.notna(row["qc_flag"]) else 0,
+        "dilution_fold": selected_dilution,
+        "qc_flag": qc_flag,
+        "source_measurement_id": selected_id,
+        "contributing_measurement_ids": [selected_id] if selected_id else [],
+        "selection_status": status,
     }
     _copy_temperature_row_metadata(source_row, out)
     return out
@@ -2241,27 +2034,6 @@ def _source_row_for_stitch_result(
     return group_df.iloc[0]
 
 
-def _empty_stitch_row(
-    group_id: str,
-    temperature_C: float,
-    temp_df: pd.DataFrame,
-) -> dict[str, Any]:
-    out = {
-        "sample_id": group_id,
-        "temperature_C": temperature_C,
-        "value": np.nan,
-        "value_unit": "INP_per_mL_suspension",
-        "basis": "suspension",
-        "lower_ci": np.nan,
-        "upper_ci": np.nan,
-        "dilution_fold": np.nan,
-        "qc_flag": 1,
-    }
-    if not temp_df.empty:
-        _copy_temperature_row_metadata(temp_df.iloc[0], out)
-    return out
-
-
 def _copy_temperature_row_metadata(row: pd.Series, out: dict[str, Any]) -> None:
     for column in (
         "temperature_bin_width_C",
@@ -2271,14 +2043,6 @@ def _copy_temperature_row_metadata(row: pd.Series, out: dict[str, Any]) -> None:
     ):
         if column in row and pd.notna(row[column]):
             out[column] = row[column]
-
-
-def _rms_pair(left: Any, right: Any) -> float:
-    values = np.array([left, right], dtype=float)
-    values = values[np.isfinite(values)]
-    if len(values) == 0:
-        return np.nan
-    return float(np.sqrt(np.mean(values**2)))
 
 
 def _sample_group_id(

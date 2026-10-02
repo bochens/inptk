@@ -92,30 +92,34 @@ def test_default_config_matches_string_method(name):
 
 def test_minimum_unfrozen_count_moves_the_join_at_the_count_boundary():
     source = experiment()
-    usual = spectrum(analyze(source, inptk.Stitch(overlap_points=0)))
-    stricter = spectrum(analyze(source, inptk.Stitch(min_unfrozen=4, overlap_points=0)))
+    usual = spectrum(analyze(source, inptk.Stitch()))
+    stricter = spectrum(analyze(source, inptk.Stitch(min_unfrozen=4)))
     assert usual.loc[-7, "dilution_fold"] == 1  # Exactly three unfrozen droplets.
     assert stricter.loc[-7, "dilution_fold"] == 10
     assert usual.loc[-8, "dilution_fold"] == stricter.loc[-8, "dilution_fold"] == 10
     assert usual.loc[-6, "concentration"] == stricter.loc[-6, "concentration"]
 
 
-def test_zero_overlap_disables_correction_but_preserves_the_main_switch():
+def test_automatic_stitch_copies_one_source_even_when_curves_overlap_or_decrease():
     source = experiment({1: [1, 12, 1, 19], 10: [0, 1, 4, 7]})
-    usual = spectrum(analyze(source, inptk.Stitch()))
-    unadjusted_result = analyze(source, inptk.Stitch(overlap_points=0))
-    unadjusted = spectrum(unadjusted_result)
-    per_neat = unadjusted_result.per_dilution.select(measurement_id="R1_1").to_dataframe()
-    per_neat = per_neat.set_index("temperature_C")
-    assert unadjusted.loc[-7, "concentration"] == per_neat.loc[-7, "concentration"]
-    assert usual.loc[-7, "dilution_fold"] == 10
-    assert unadjusted.loc[-7, "dilution_fold"] == 1
-    assert usual.loc[-8, "dilution_fold"] == unadjusted.loc[-8, "dilution_fold"] == 10
+    result = analyze(source, inptk.Stitch())
+    joined = spectrum(result)
+    per = result.per_dilution.to_dataframe().set_index(["measurement_id", "temperature_C"])
+    assert joined.loc[[-5, -6, -7, -8], "dilution_fold"].tolist() == [1, 1, 1, 10]
+    for temperature, row in joined.iterrows():
+        measurement = f"R1_{int(row.dilution_fold)}"
+        np.testing.assert_allclose(
+            row[["concentration", "lower_error", "upper_error"]].to_numpy(dtype=float),
+            per.loc[
+                (measurement, temperature), ["concentration", "lower_error", "upper_error"]
+            ].to_numpy(dtype=float),
+        )
+    assert -7 not in set(result.final.to_dataframe().temperature_C)
 
 
 def test_single_dilution_bypasses_automatic_stitch_cutoff():
     source = experiment({1: [1, 8, 17, 19]})
-    result = analyze(source, inptk.Stitch(min_unfrozen=20, overlap_points=0))
+    result = analyze(source, inptk.Stitch(min_unfrozen=20))
     per = result.per_dilution.to_dataframe().set_index("temperature_C")
     pd.testing.assert_frame_equal(
         spectrum(result)[["concentration", "lower_error", "upper_error"]],
@@ -367,8 +371,8 @@ def test_mle_numeric_string_key_is_valid_only_as_an_actual_measurement_name():
     [
         ("Stitch", {"min_unfrozen": -1}),
         ("Stitch", {"min_unfrozen": 2.5}),
-        ("Stitch", {"overlap_points": -1}),
-        ("Stitch", {"overlap_points": True}),
+        ("Stitch", {"min_unfrozen": True}),
+        ("Stitch", {"overlap_points": 4}),
         ("MLE", {"mask_mode": "ignore"}),
         ("MLE", {"temperature_eligibility_C": {"R1_10": -6}}),
         ("MLE", {"mask_mode": "drop_rows"}),
@@ -398,7 +402,7 @@ def test_invalid_method_choice_is_rejected(method):
 @pytest.mark.parametrize(
     "name, options",
     [
-        ("stitch", {"min_unfrozen": 4, "overlap_points": 0}),
+        ("stitch", {"min_unfrozen": 4}),
         ("mle", {"likelihood_weights": {"R1_10": 0.25}, "confidence_drop": 1.1}),
         ("manual", {"switch_temperatures_C": [-7]}),
     ],
@@ -477,7 +481,7 @@ def test_stepwise_calculation_matches_full_workflow(name):
     ]
     source = inptk.read_counts(source.counts.to_dataframe(), metadata=metadata)
     method = {
-        "stitch": inptk.Stitch(min_unfrozen=4, overlap_points=0),
+        "stitch": inptk.Stitch(min_unfrozen=4),
         "mle": inptk.MLE(likelihood_weights={"R1_10": 0.25}),
         "manual": inptk.ManualStitch(switch_temperatures_C=[-7]),
     }[name]

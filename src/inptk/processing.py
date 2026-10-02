@@ -76,6 +76,40 @@ def validate_fraction_context(
     return frame
 
 
+def prepare_fraction_analysis(
+    fractions: FrozenFractionTable, experiment: Experiment, *, water_blank_correction: bool
+) -> tuple[FrozenFractionTable, Experiment]:
+    """Validate identities and remove blank context only from a disabled analysis view."""
+    from .water_blank import analysis_experiment, sample_rows
+
+    validate_fraction_context(fractions, experiment)
+    view = analysis_experiment(experiment, water_blank_correction=water_blank_correction)
+    frame = fractions.to_dataframe()
+    if view.water_blank_map and (
+        any(
+            step.get("operation") == "frozen_fraction"
+            and step.get("temperature_method") == "window_max_count"
+            for step in fractions.history
+        )
+        or (
+            "temperature_bin_method" in frame
+            and frame.temperature_bin_method.astype(str)
+            .str.contains("window_max_count", regex=False)
+            .any()
+        )
+    ):
+        raise ValueError(
+            "Raw water-blank correction does not support window_max_count: its synthetic "
+            "warm zero rows are not raw measurements; use latest or max"
+        )
+    if view is not experiment:
+        rows = sample_rows(fractions.to_dataframe(), experiment)
+        if rows.empty:
+            raise ValueError("No sample observations remain after excluding water-blank sets")
+        fractions = FrozenFractionTable(rows, history=fractions.history)
+    return fractions, view
+
+
 def fraction_inputs(
     rows: pd.DataFrame, experiment: Experiment
 ) -> list[engine.TemperatureFrozenFractionTable]:
@@ -194,12 +228,23 @@ def _grouped_fractions(
 
 
 def cumulative_spectrum(
-    fractions: FrozenFractionTable, *, experiment: Experiment, z: float = 1.96
+    fractions: FrozenFractionTable,
+    *,
+    experiment: Experiment,
+    z: float = 1.96,
+    water_blank_correction: bool = True,
 ) -> CumulativeSpectrumTable:
     """Calculate concentration for each measurement, preserving every cycle."""
-    frame = validate_fraction_context(fractions, experiment)
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
+    fractions, experiment = prepare_fraction_analysis(
+        fractions, experiment, water_blank_correction=water_blank_correction
+    )
+    frame = fractions.to_dataframe()
+    if experiment.water_blank_map:
+        from .water_blank import cumulative_with_water_blank
+
+        return cumulative_with_water_blank(fractions, experiment, z=z)
     frames = []
     for identity, fraction in _grouped_fractions(frame, experiment):
         calculated = cast(
@@ -210,12 +255,23 @@ def cumulative_spectrum(
     result["uncertainty_method"] = "OLAF_Agresti_Coull_error_width"
     return CumulativeSpectrumTable(
         result,
-        history=fractions.history + [{"operation": "cumulative_spectrum", "z": float(z)}],
+        history=fractions.history
+        + [
+            {
+                "operation": "cumulative_spectrum",
+                "z": float(z),
+                "water_blank_correction": water_blank_correction,
+                "water_blank_correction_applied": False,
+            }
+        ],
     )
 
 
 def differential_spectrum(
-    fractions: FrozenFractionTable, *, experiment: Experiment
+    fractions: FrozenFractionTable,
+    *,
+    experiment: Experiment,
+    water_blank_correction: bool = True,
 ) -> DifferentialSpectrumTable:
     """Calculate adjacent concentration changes per degree for each droplet set.
 
@@ -225,7 +281,42 @@ def differential_spectrum(
     with quality flag 2; nonfinite values carry flag 1. This arithmetic does not
     establish that arbitrary droplet loss is a valid background correction.
     """
-    frame = validate_fraction_context(fractions, experiment)
+    fractions, experiment = prepare_fraction_analysis(
+        fractions, experiment, water_blank_correction=water_blank_correction
+    )
+    frame = fractions.to_dataframe()
+    if experiment.water_blank_map:
+        cumulative = cumulative_spectrum(
+            fractions, experiment=experiment, water_blank_correction=water_blank_correction
+        )
+        intervals = []
+        for _, group in cumulative.to_dataframe().groupby(
+            ["run_id", "sample_id", "cycle_id", "measurement_id"], sort=False
+        ):
+            group = group.sort_values("temperature_C", ascending=False)
+            temperatures = group.temperature_C.to_numpy(dtype=float)
+            out = group.iloc[:-1][["run_id", "sample_id", "cycle_id", "measurement_id"]].copy()
+            out["temperature_C"] = temperatures[:-1]
+            out["temperature_bin_left_C"] = temperatures[1:]
+            out["temperature_bin_right_C"] = temperatures[:-1]
+            with np.errstate(invalid="ignore"):
+                out["concentration"] = np.diff(group.concentration) / -np.diff(temperatures)
+            out["unit"] = "INP_per_mL_suspension_per_C"
+            out["basis"] = "suspension"
+            out["qc_flag"] = np.where(np.isfinite(out.concentration), 0, 1) | np.where(
+                out.concentration < 0, 2, 0
+            )
+            intervals.append(out)
+        return DifferentialSpectrumTable(
+            pd.concat(intervals, ignore_index=True),
+            history=cumulative.history
+            + [
+                {
+                    "operation": "differential_spectrum",
+                    "water_blank_correction": water_blank_correction,
+                }
+            ],
+        )
     frames = []
     for identity, fraction in _grouped_fractions(frame, experiment):
         calculated = cast(
@@ -234,5 +325,11 @@ def differential_spectrum(
         frames.append(public_spectrum(calculated, **identity))
     return DifferentialSpectrumTable(
         pd.concat(frames, ignore_index=True),
-        history=fractions.history + [{"operation": "differential_spectrum"}],
+        history=fractions.history
+        + [
+            {
+                "operation": "differential_spectrum",
+                "water_blank_correction": water_blank_correction,
+            }
+        ],
     )

@@ -44,23 +44,22 @@ def _measurement_values(values, name: str, *, minimum=None, strict=False):
 
 @dataclass(frozen=True)
 class Stitch:
-    """Automatic OLAF stitching, applied when a group has multiple measurements.
+    """Select one dilution at each temperature, proceeding from least to most diluted.
 
     min_unfrozen is the minimum number of unfrozen droplets at an eligible point.
-    overlap_points is the number of cold-end points checked for overlap adjustments;
-    zero disables those adjustments while retaining the ordinary dilution handoff.
-    Missing and infinite concentrations are always excluded.
+    Retain the current dilution through its coldest eligible point, then select
+    the next dilution at colder temperatures. Missing and infinite concentrations
+    are excluded. Values and uncertainty bounds are copied, never averaged.
+    A group with only one measurement bypasses the automatic cutoff.
     """
 
     min_unfrozen: int = 3
-    overlap_points: int = 4
 
     def __post_init__(self):
-        for name, minimum in (("min_unfrozen", 1), ("overlap_points", 0)):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
-                raise ValueError(f"{name} must be a whole number >= {minimum}")
-            object.__setattr__(self, name, int(value))
+        value = self.min_unfrozen
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+            raise ValueError("min_unfrozen must be a whole number >= 1")
+        object.__setattr__(self, "min_unfrozen", int(value))
 
 
 @dataclass(frozen=True)
@@ -69,7 +68,7 @@ class ManualStitch:
 
     Dilutions are ordered from least to most diluted. At each switch temperature
     and colder, the next dilution is selected. A group with N dilutions requires
-    N-1 switches. No automatic droplet cutoff or overlap adjustment is applied.
+    N-1 switches. No automatic droplet cutoff is applied.
     Missing selected observations remain missing; another dilution is never used
     as a fallback. All sample/run/cycle groups must have the same dilution factors.
     """

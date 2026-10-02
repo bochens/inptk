@@ -24,7 +24,7 @@ from .processing import (
     cumulative_spectrum,
     differential_spectrum,
     frozen_fraction,
-    validate_fraction_context,
+    prepare_fraction_analysis,
 )
 from .processing import (
     fraction_inputs as _fraction_inputs,
@@ -94,7 +94,8 @@ def subtract_blanks(
             rows.concentration.to_numpy() - aligned.concentration.to_numpy()
         )
         for column, blank_column in (
-            ("lower_error", "upper_error"), ("upper_error", "lower_error")
+            ("lower_error", "upper_error"),
+            ("upper_error", "lower_error"),
         ):
             if column in rows and blank_column in aligned:
                 data.loc[rows.index, column] = np.sqrt(
@@ -126,8 +127,110 @@ def subtract_blanks(
     )
 
 
+def _combine_with_water_blank(fractions, experiment, method, z, dilution_order, settings):
+    from ._engine.transforms import _stitch_cumulative_group
+    from .water_blank import corrected_frame, mle_group, sample_rows, validate_raw_mle
+
+    source = sample_rows(fractions.to_dataframe(), experiment)
+    individual = None
+    if isinstance(method, MLE):
+        validate_raw_mle(method)
+    else:
+        individual = corrected_frame(fractions, experiment, z=z)
+    frames, notices = [], []
+    for (run_id, sample_id, cycle_id), group in source.groupby(
+        ["run_id", "sample_id", "cycle_id"], sort=False
+    ):
+        identity = {"run_id": str(run_id), "sample_id": str(sample_id), "cycle_id": str(cycle_id)}
+        measurement_ids = group.measurement_id.astype(str).unique().tolist()
+        expected = {
+            key
+            for key in experiment.water_blank_map
+            if experiment.measurements[key].sample_id == sample_id
+            and experiment.measurements[key].run_id == run_id
+        }
+        if expected - set(measurement_ids):
+            notices.append(
+                f"{identity}: absent measurements {sorted(expected - set(measurement_ids))}"
+            )
+        if isinstance(method, MLE):
+            frame = mle_group(
+                group,
+                fractions.to_dataframe(),
+                experiment,
+                method,
+                confidence_drop=method_options(method, z=z)["confidence_drop"],
+            )
+            uncertainty_method = "joint_sample_water_blank_profile_likelihood"
+        else:
+            selected = individual.loc[
+                (individual.run_id == run_id)
+                & (individual.sample_id == sample_id)
+                & (individual.cycle_id == cycle_id)
+            ].copy()
+            if isinstance(method, ManualStitch):
+                frame, messages = _manual_stitch(selected, method, dilution_order)
+                notices.extend(f"{identity}: {message}" for message in messages)
+            elif len(measurement_ids) == 1:
+                frame = selected.copy()
+                frame["source_measurement_id"] = frame.measurement_id
+                if method != Stitch():
+                    notices.append(
+                        f"{identity}: only one measurement; automatic settings not applied"
+                    )
+            else:
+                internal = selected.rename(
+                    columns={
+                        "concentration": "value",
+                        "unit": "value_unit",
+                        "lower_error": "lower_ci",
+                        "upper_error": "upper_ci",
+                    }
+                ).assign(source_sample_id=selected.measurement_id)
+                frame = _stitch_cumulative_group(
+                    internal,
+                    str(sample_id),
+                    min_unfrozen=method.min_unfrozen,
+                ).rename(
+                    columns={
+                        "value": "concentration",
+                        "value_unit": "unit",
+                        "lower_ci": "lower_error",
+                        "upper_ci": "upper_error",
+                    }
+                )
+            uncertainty_method = "joint_sample_water_blank_profile_likelihood"
+        frame = frame.drop(
+            columns=[
+                "measurement_id",
+                "n_frozen",
+                "n_total",
+                "fraction_frozen",
+                "time_s",
+                "error_components",
+            ],
+            errors="ignore",
+        ).assign(**identity)
+        frame["source_measurement_ids"] = json.dumps(measurement_ids)
+        frame["uncertainty_method"] = uncertainty_method
+        frame["correction_state"] = "water_blank_corrected"
+        frame["qc_flag"] = frame.qc_flag.astype(int) | np.where(frame.concentration < 0, 2, 0)
+        frames.append(frame)
+    settings.update(
+        water_blank_map=dict(experiment.water_blank_map),
+        water_blank_matching="exact_run_cycle_temperature",
+        warnings=notices,
+    )
+    return CumulativeSpectrumTable(
+        pd.concat(frames, ignore_index=True), history=fractions.history + [settings]
+    )
+
+
 def _validate_method_inputs(method, experiment, source) -> list[float]:
     """Reject unknown measurement settings and ambiguous manual selections up front."""
+    from .water_blank import sample_rows
+
+    source = sample_rows(source, experiment)
     dilutions = sorted(
         {float(experiment.measurements[key].dilution) for key in source.measurement_id.unique()}
     )
@@ -235,6 +338,7 @@ def combine_dilutions(
     experiment: Experiment,
     method: str | DilutionMethod = "stitch",
     z: float = 1.96,
+    water_blank_correction: bool = True,
 ) -> CumulativeSpectrumTable:
     """Combine dilution measurements separately for each sample, run and cycle.
 
@@ -245,18 +349,25 @@ def combine_dilutions(
     chosen = resolve_method(method)
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
-    validate_fraction_context(fractions, experiment)
+    fractions, experiment = prepare_fraction_analysis(
+        fractions, experiment, water_blank_correction=water_blank_correction
+    )
     source = fractions.to_dataframe()
     dilution_order = _validate_method_inputs(chosen, experiment, source)
     options = method_options(chosen, z=z)
     settings = {
         "operation": "combine_dilutions",
+        "water_blank_correction": water_blank_correction,
+        "water_blank_correction_applied": bool(experiment.water_blank_map),
         "dilution_method": method_name(chosen),
         "method_options": options,
         "z": z,
     }
     if isinstance(chosen, ManualStitch):
         settings["manual_dilution_order"] = dilution_order
+    if experiment.water_blank_map:
+        return _combine_with_water_blank(fractions, experiment, chosen, z, dilution_order, settings)
+    if isinstance(chosen, ManualStitch):
         individual = cumulative_spectrum(fractions, experiment=experiment, z=z).to_dataframe()
     frames, notices = [], []
     for (run_id, sample_id, cycle_id), group in source.groupby(
@@ -303,12 +414,10 @@ def combine_dilutions(
                     combined = engine.cumulative_spec_stitch(
                         inputs,
                         sample_group_by={key: sample_id for key in measurement_ids},
-                        enforce_monotone=False,
                         z=z,
                         min_unfrozen=chosen.min_unfrozen,
-                        overlap_points=chosen.overlap_points,
                     )
-                    uncertainty_method = "OLAF_stitched_error_width"
+                    uncertainty_method = "OLAF_Agresti_Coull_error_width"
             else:
                 combined = engine.cumulative_spec_mle(
                     inputs,
@@ -320,6 +429,19 @@ def combine_dilutions(
             frame = _public_spectrum(
                 cast(engine.CumulativeNucleusSpectrumTable, combined), **identity
             )
+            if isinstance(chosen, Stitch):
+                sources = {
+                    float(experiment.measurements[key].dilution): str(key)
+                    for key in measurement_ids
+                }
+                frame["source_measurement_id"] = (
+                    frame.dilution_fold.map(sources)
+                    .fillna("")
+                    .where(np.isfinite(frame.concentration), "")
+                )
+                frame["selection_status"] = np.where(
+                    frame.source_measurement_id.ne(""), "selected", "nonfinite_concentration"
+                )
         frame["source_measurement_ids"] = json.dumps(measurement_ids)
         frame["uncertainty_method"] = uncertainty_method
         frames.append(frame)
@@ -377,13 +499,15 @@ def _final_candidates(
                 previous_temperature = temperature
                 previous_concentration = concentration
             else:
-                excluded.append({
-                    "temperature_C": temperature,
-                    "concentration": concentration,
-                    "reason": status,
-                    "reference_temperature_C": previous_temperature,
-                    "reference_concentration": previous_concentration,
-                })
+                excluded.append(
+                    {
+                        "temperature_C": temperature,
+                        "concentration": concentration,
+                        "reason": status,
+                        "reference_temperature_C": previous_temperature,
+                        "reference_concentration": previous_concentration,
+                    }
+                )
         group.update(
             first_decrease_temperature_C=first_decrease_temperature,
             retained_count=retained_count,
@@ -403,13 +527,16 @@ def _final_candidates(
             )
     return CumulativeSpectrumTable(
         data,
-        history=spectrum.history + [{
-            "operation": "finalize_spectrum",
-            "decrease_policy": decrease_policy,
-            "comparison_order": "warm_to_cold",
-            "groups": groups,
-            "warnings": notices,
-        }],
+        history=spectrum.history
+        + [
+            {
+                "operation": "finalize_spectrum",
+                "decrease_policy": decrease_policy,
+                "comparison_order": "warm_to_cold",
+                "groups": groups,
+                "warnings": notices,
+            }
+        ],
     )
 
 
@@ -441,28 +568,43 @@ def analyze_concentration(
     z: float = 1.96,
     differential: bool = False,
     blank_by_sample: dict[str, CumulativeSpectrumTable] | None = None,
+    water_blank_correction: bool = True,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = "stop_at_decrease",
 ) -> AnalysisResult:
     """Run the separately callable processing steps and retain all their results."""
+    from .water_blank import analysis_experiment
+
     _validate_decrease_policy(decrease_policy)
+    analysis_source = analysis_experiment(experiment, water_blank_correction=water_blank_correction)
+    if analysis_source.water_blank_map and temperature_method == "window_max_count":
+        raise ValueError(
+            "Raw water-blank correction does not support window_max_count: its synthetic "
+            "warm zero rows are not raw measurements; use latest or max"
+        )
     method = resolve_method(dilution_method)
     if output_basis not in UNITS:
         raise ValueError(f"Unknown output_basis {output_basis!r}")
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
-    source = experiment.counts.to_dataframe()
+    source = analysis_source.counts.to_dataframe()
     if source.empty:
         raise ValueError("Cannot analyze an experiment with no observations")
-    dilution_order = _validate_method_inputs(method, experiment, source)
+    dilution_order = _validate_method_inputs(method, analysis_source, source)
     fractions = frozen_fraction(
-        experiment,
+        analysis_source,
         step_C=step_C,
         temperature_method=temperature_method,
         temperature_tolerance_C=temperature_tolerance_C,
     )
-    per_dilution = cumulative_spectrum(fractions, experiment=experiment, z=z)
+    per_dilution = cumulative_spectrum(
+        fractions, experiment=experiment, z=z, water_blank_correction=water_blank_correction
+    )
     combined = combine_dilutions(
-        fractions, experiment=experiment, method=method, z=z
+        fractions,
+        experiment=experiment,
+        method=method,
+        z=z,
+        water_blank_correction=water_blank_correction,
     )
     candidates = subtract_blanks(combined, blank_by_sample) if blank_by_sample else combined
     if output_basis != "suspension":
@@ -470,7 +612,11 @@ def analyze_concentration(
     final_candidates = _final_candidates(candidates, decrease_policy=decrease_policy)
     final = final_candidates.select(used_in_final=True)
     differential_result = (
-        differential_spectrum(fractions, experiment=experiment) if differential else None
+        differential_spectrum(
+            fractions, experiment=experiment, water_blank_correction=water_blank_correction
+        )
+        if differential
+        else None
     )
     tolerance = temperature_tolerance_C
     if tolerance is None:
@@ -484,6 +630,9 @@ def analyze_concentration(
         "temperature_tolerance_C": tolerance,
         "z": z,
         "differential": differential,
+        "water_blank_correction": water_blank_correction,
+        "water_blank_correction_applied": water_blank_correction
+        and bool(experiment.water_blank_map),
         "decrease_policy": decrease_policy,
     }
     if isinstance(method, ManualStitch):

@@ -69,7 +69,13 @@ def _metadata(records: pd.DataFrame, run_id: str):
     return samples, measurements
 
 
-def read_counts(source, *, metadata, run_id: str = "1") -> Experiment:
+def read_counts(
+    source,
+    *,
+    metadata,
+    run_id: str = "1",
+    water_blank_map: dict[str, list[str]] | None = None,
+) -> Experiment:
     """Read native counts and measurement metadata from CSV or pandas tables.
 
     Native counts need measurement_id, temperature_C, n_total, and n_frozen.
@@ -77,6 +83,12 @@ def read_counts(source, *, metadata, run_id: str = "1") -> Experiment:
     input describes one cycle, labelled '1'; cycles are never detected or pooled.
     Metadata has one row per measurement with sample_id, measurement_id,
     dilution, droplet_volume_uL and any sample normalization inputs.
+    With water_blank_map, supply raw counts for samples and water blanks. Map
+    each sample measurement name to a list of blank measurement names; import preserves
+    the observations unchanged. Do not map counts already corrected by Icescopy.
+    The map declares a common water-background concentration per volume from the
+    same prepared-water protocol. Each sample and blank set needs its own known
+    positive droplet_volume_uL; their volumes and droplet counts may differ.
     """
     data = _frame(source)
     records = _frame(metadata)
@@ -112,6 +124,7 @@ def read_counts(source, *, metadata, run_id: str = "1") -> Experiment:
             "format": "native",
             "path": str(source) if isinstance(source, (str, Path)) else None,
         },
+        water_blank_map={} if water_blank_map is None else water_blank_map,
     )
 
 

@@ -71,6 +71,7 @@ def _experiment_payload(experiment):
         "samples": {key: asdict(value) for key, value in experiment.samples.items()},
         "measurements": {key: asdict(value) for key, value in experiment.measurements.items()},
         "source": experiment.source,
+        "water_blank_map": experiment.water_blank_map,
     }
 
 
@@ -82,6 +83,7 @@ def _experiment_from_payload(payload):
             key: MeasurementMetadata(**value) for key, value in payload["measurements"].items()
         },
         source=payload["source"],
+        water_blank_map=payload.get("water_blank_map", {}),
     )
 
 

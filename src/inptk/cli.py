@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+import pandas as pd
+
 from . import __version__, analyze_concentration, load, read_counts, read_icescopy
 from .experiment import Experiment
 from .methods import resolve_method
@@ -24,6 +26,15 @@ def build_parser():
     analyze.add_argument("--format", choices=("native", "icescopy", "saved"), default="native")
     analyze.add_argument(
         "--sample-map", help="JSON file mapping Icescopy measurement names to parent samples"
+    )
+    analyze.add_argument(
+        "--water-blank-map",
+        help="JSON file mapping native sample measurements to lists of water-blank measurements",
+    )
+    analyze.add_argument(
+        "--no-water-blank-correction",
+        action="store_true",
+        help="Analyze sample counts without water correction while retaining raw blank context",
     )
     analyze.add_argument("--run-id", default="1")
     analyze.add_argument(
@@ -66,28 +77,53 @@ def build_parser():
 def _select_experiment(experiment, sample_ids, cycle_ids):
     if sample_ids is None and cycle_ids is None:
         return experiment
-    frame = experiment.counts.to_dataframe()
+    original = experiment.counts.to_dataframe()
+    blank_ids = {name for assigned in experiment.water_blank_map.values() for name in assigned}
+    frame = original.loc[~original.measurement_id.isin(blank_ids)]
     selection = {}
     for column, values in (("sample_id", sample_ids), ("cycle_id", cycle_ids)):
         if values is None:
             continue
         unknown = set(values) - set(frame[column])
         if unknown:
+            blank_only = unknown & set(
+                original.loc[original.measurement_id.isin(blank_ids), column]
+            )
+            if column == "sample_id" and blank_only:
+                raise ValueError(
+                    "Water-blank parent samples cannot be selected as analysis samples: "
+                    f"{sorted(blank_only)}"
+                )
             raise ValueError(f"Unknown {column} selection: {sorted(unknown)}")
         frame = frame.loc[frame[column].isin(values)]
         selection[column] = list(dict.fromkeys(values))
+    measurement_ids = set(frame.measurement_id)
+    water_blank_map = {
+        key: value for key, value in experiment.water_blank_map.items() if key in measurement_ids
+    }
+    if water_blank_map:
+        keys = ["measurement_id", "run_id", "cycle_id"]
+        required = frame[keys].drop_duplicates().copy()
+        required["measurement_id"] = required.measurement_id.map(water_blank_map)
+        required = required.explode("measurement_id").drop_duplicates()
+        blank_rows = pd.MultiIndex.from_frame(original[keys]).isin(
+            pd.MultiIndex.from_frame(required.drop_duplicates())
+        )
+        frame = original.loc[original.index.isin(frame.index) | blank_rows]
+        measurement_ids.update(name for assigned in water_blank_map.values() for name in assigned)
+    measurements = {
+        key: value for key, value in experiment.measurements.items() if key in measurement_ids
+    }
+    retained_samples = {value.sample_id for value in measurements.values()}
     counts = CountsTable(
         frame, history=experiment.counts.history + [{"operation": "select", **selection}]
     )
     return Experiment(
         counts,
-        {key: value for key, value in experiment.samples.items() if key in set(frame.sample_id)},
-        {
-            key: value
-            for key, value in experiment.measurements.items()
-            if key in set(frame.measurement_id)
-        },
+        {key: value for key, value in experiment.samples.items() if key in retained_samples},
+        measurements,
         source={**experiment.source, "selection": selection},
+        water_blank_map=water_blank_map,
     )
 
 
@@ -112,8 +148,23 @@ def main(argv=None):
                 raise ValueError("--sample-map applies only to Icescopy input")
             if not args.metadata:
                 raise ValueError("Native input requires --metadata")
-            experiment = read_counts(args.input, metadata=args.metadata, run_id=args.run_id)
+            water_blank_map = (
+                json.loads(Path(args.water_blank_map).read_text(encoding="utf-8"))
+                if args.water_blank_map
+                else None
+            )
+            experiment = read_counts(
+                args.input,
+                metadata=args.metadata,
+                run_id=args.run_id,
+                water_blank_map=water_blank_map,
+            )
         elif args.format == "icescopy":
+            if args.water_blank_map:
+                raise ValueError(
+                    "Icescopy input contains corrected counts. --water-blank-map requires "
+                    "raw sample and blank counts in --format native."
+                )
             mapping = json.loads(Path(args.sample_map).read_text()) if args.sample_map else None
             overrides = None
             if args.metadata:
@@ -124,6 +175,8 @@ def main(argv=None):
                 args.input, sample_map=mapping, metadata=overrides, run_id=args.run_id
             )
         else:
+            if args.water_blank_map:
+                raise ValueError("Saved input already contains its water-blank mapping")
             if args.metadata or args.sample_map:
                 raise ValueError("Saved input already contains its metadata and sample mapping")
             experiment = load(args.input)
@@ -139,6 +192,7 @@ def main(argv=None):
             temperature_tolerance_C=args.temperature_tolerance_C,
             z=args.z,
             differential=args.differential,
+            water_blank_correction=not args.no_water_blank_correction,
             decrease_policy=args.decrease_policy,
         )
         result.save(args.out)

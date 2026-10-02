@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,10 +84,19 @@ class MeasurementMetadata:
 
 @dataclass(frozen=True)
 class Experiment:
+    """Observations and explicit relationships between physical droplet sets.
+
+    A water_blank_map declares raw sample and blank observations under one common
+    water-background concentration per volume for each assigned group. This assumes
+    the same prepared-water protocol. Every set needs its own known droplet volume;
+    sample and blank volumes may differ. Repeated cycles remain separate.
+    """
+
     counts: CountsTable
     samples: dict[str, SampleMetadata]
     measurements: dict[str, MeasurementMetadata]
     source: dict = field(default_factory=dict)
+    water_blank_map: dict[str, list[str]] = field(default_factory=dict)
 
     def __post_init__(self):
         for key, sample in self.samples.items():
@@ -108,6 +118,59 @@ class Experiment:
                 raise ValueError(
                     f"Count identities disagree with metadata for {row.measurement_id!r}"
                 )
+        self._validate_water_blank_map()
+
+    def _validate_water_blank_map(self) -> None:
+        if not isinstance(self.water_blank_map, Mapping):
+            raise TypeError(
+                "water_blank_map must map measurement names to lists of water-blank names"
+            )
+        mapping = {}
+        for sample_id, assigned in self.water_blank_map.items():
+            if not isinstance(sample_id, str) or not sample_id.strip():
+                raise ValueError("water_blank_map must contain non-empty measurement names")
+            if not isinstance(assigned, list) or not assigned:
+                raise ValueError(
+                    "water_blank_map values must be non-empty lists of water-blank names"
+                )
+            if any(not isinstance(name, str) or not name.strip() for name in assigned):
+                raise ValueError("water_blank_map must contain non-empty measurement names")
+            if len(set(assigned)) != len(assigned):
+                raise ValueError(f"Duplicate water-blank names for measurement {sample_id!r}")
+            mapping[sample_id] = list(assigned)
+        sample_ids = set(mapping)
+        blank_ids = {name for assigned in mapping.values() for name in assigned}
+        unknown = (sample_ids | blank_ids) - set(self.measurements)
+        if unknown:
+            raise ValueError(f"Unknown measurements in water_blank_map: {sorted(unknown)}")
+        if sample_ids & blank_ids:
+            raise ValueError("Water-blank measurements cannot also be sample measurements")
+        if mapping:
+            unassigned = set(self.measurements) - sample_ids - blank_ids
+            if unassigned:
+                raise ValueError(
+                    f"water_blank_map must assign every nonblank measurement: {sorted(unassigned)}"
+                )
+        backgrounds: dict[tuple[str, str], frozenset[str]] = {}
+        for sample_id, assigned in mapping.items():
+            sample = self.measurements[sample_id]
+            group = (sample.sample_id, sample.run_id)
+            blank_group = frozenset(assigned)
+            if group in backgrounds and backgrounds[group] != blank_group:
+                raise ValueError(
+                    "Measurements of the same sample and run must use the same set of water blanks"
+                )
+            backgrounds[group] = blank_group
+            for blank_id in assigned:
+                blank = self.measurements[blank_id]
+                if blank.dilution != 1:
+                    raise ValueError(f"Water-blank measurement {blank_id!r} must have dilution=1")
+                if sample.run_id != blank.run_id:
+                    raise ValueError(
+                        f"Measurement {sample_id!r} and water blank {blank_id!r} "
+                        "must use the same run"
+                    )
+        object.__setattr__(self, "water_blank_map", mapping)
 
     def save(self, path: str | Path) -> None:
         from .io import save

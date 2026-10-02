@@ -65,7 +65,7 @@ individual = inptk.cumulative_spectrum(fractions, experiment=experiment)
 combined = inptk.combine_dilutions(
     fractions,
     experiment=experiment,
-    method=inptk.Stitch(min_unfrozen=3, overlap_points=4),
+    method=inptk.Stitch(min_unfrozen=3),
 )
 converted = inptk.convert_concentration(combined, experiment.samples, basis="sampled_air")
 final = inptk.finalize_spectrum(converted, decrease_policy="stop_at_decrease")
@@ -106,7 +106,7 @@ Unsupported settings raise an error instead of being ignored.
 ### Automatic stitching
 
 ```python
-method = inptk.Stitch(min_unfrozen=5, overlap_points=6)
+method = inptk.Stitch(min_unfrozen=5)
 result = inptk.analyze_concentration(experiment, dilution_method=method)
 ```
 
@@ -114,14 +114,20 @@ result = inptk.analyze_concentration(experiment, dilution_method=method)
   point. Default `3` retains the original exclusion of two or fewer unfrozen
   droplets. It must be a positive whole number. Missing and infinite
   concentrations are always excluded.
-- `overlap_points`: number of cold-end points considered by the existing overlap
-  adjustment rules. Default `4`. Setting `0` disables those adjustments; the
-  switch still follows the last usable point of the current curve.
 
-The dilution order and remaining overlap decision rules retain the OLAF method.
-A group with only one measurement uses its cumulative spectrum directly, as
-before. There is no dilution join in that case; customized stitching settings
-produce a warning rather than being applied as a general concentration filter.
+Automatic stitching orders curves from least to most diluted. It keeps the
+current curve through its coldest eligible temperature and uses the next dilution
+only at colder output temperatures. A missing point inside the current range does
+not trigger an early switch or get filled from another curve.
+
+Every retained temperature uses **one dilution's existing concentration and error
+bounds unchanged**. There is no overlap setting, averaging, or joint refit during
+stitching. `source_measurement_id` identifies the selected measurement; unavailable
+points have an empty source. Final handling of decreases is a separate step.
+
+A group with only one measurement uses its cumulative spectrum directly. There
+is no dilution join in that case; customized stitching settings produce a warning
+rather than being applied as a general concentration filter.
 
 ### Manual stitching
 
@@ -149,7 +155,7 @@ observed dilution factors, with exactly one measurement at each factor. Missing
 dilutions or duplicate measurements at a selected dilution raise an error; analyze
 groups needing different dilution sets or switching temperatures separately.
 
-Manual stitching applies no automatic unfrozen-droplet cutoff, overlap adjustment,
+Manual stitching applies no automatic unfrozen-droplet cutoff,
 or averaging. Missing temperatures or non-finite estimates in the selected curve
 remain missing, with warnings; another dilution is never substituted. Each output
 row records `dilution_fold`, `source_measurement_id`, and `selection_status`.
@@ -199,8 +205,10 @@ temperatures are not treated as additional independent observations. Final
 selection uses `decrease_policy`; it does not refit concentrations or narrow their
 uncertainty bounds. There is no public `enforce_monotone` option.
 
-MLE assumes independent droplet sets across its dilution inputs. Repeated cycles
-remain separate. With counts already corrected for a water blank, both the
+MLE assumes independent physical droplet sets across its dilution inputs.
+[Raw water-blank input](#raw-sample-and-water-blank-observations) fits the shared
+background directly and restricts the weighting and masking controls accordingly.
+Repeated cycles remain separate. With counts already corrected for a water blank, both the
 retained OLAF count-based intervals and MLE intervals change because they use the
 adjusted frozen and total counts. Neither separately propagates uncertainty in
 the measured water blank or correlations introduced by a shared blank. Relative
@@ -244,7 +252,7 @@ The same settings are accepted as a JSON object or the path to a JSON file:
 
 ```bash
 inptk analyze counts.csv --metadata measurements.csv --dilution-method stitch \
-  --method-options '{"min_unfrozen":5,"overlap_points":6}' --out automatic.inptk
+  --method-options '{"min_unfrozen":5}' --out automatic.inptk
 inptk analyze counts.csv --metadata measurements.csv --dilution-method manual \
   --method-options '{"switch_temperatures_C":[-12,-18]}' --out manual.inptk
 ```
@@ -260,12 +268,14 @@ and the retained source metadata are recorded in the saved experiment.
 
 ## Samples, measurements, cycles, dictionaries, and lists
 
-An `Experiment` contains one `CountsTable`, plus two dictionaries:
+An `Experiment` contains one `CountsTable`, sample and measurement dictionaries,
+and an optional explicit water-blank assignment:
 
 ```python
 experiment.samples["A"]                  # original sample and normalization inputs
 experiment.measurements["A_neat"]        # physical droplet set and dilution
 experiment.counts.select(sample_id="A")  # selected rows, still a CountsTable
+experiment.water_blank_map               # raw sample measurement -> list of blank measurements
 ```
 
 - `sample_id` identifies the original sampled material.
@@ -321,7 +331,135 @@ Both reader arguments also accept pandas DataFrames. Direct construction with
 `CountsTable`, `SampleMetadata`, `MeasurementMetadata`, and `Experiment` is
 available for Python callers.
 
+## Raw sample and water-blank observations
+
+To include uncertainty in the water blank, provide **raw counts for both sample
+and blank droplet sets** through native input. Each physical set has a separate
+`measurement_id`, including each independent blank set. Counts may differ between
+sets. Each set must have a known positive `droplet_volume_uL`; those volumes may
+also differ. Do not recover raw counts by reversing an earlier correction.
+
+Assign blanks explicitly; their names have no special meaning:
+
+```python
+experiment = inptk.read_counts(
+    "raw_counts.csv",
+    metadata="measurements.csv",
+    water_blank_map={
+        "A_neat": ["Water_1", "Water_2"],
+        "A_diluted": ["Water_1", "Water_2"],
+    },
+)
+result = inptk.analyze_concentration(experiment, dilution_method="mle")
+```
+
+The map always uses lists, even for one blank. It must assign every nonblank
+measurement. Blank measurements have `dilution=1` and cannot also be sample
+measurements. Assigned sets must belong to the same run. Dilutions of one original
+sample in one run must use the same set of blanks; list order does not matter.
+Different original samples may use different blank groups. Matching cycle and
+temperature observations are required; cycles are never pooled.
+
+For example, the corresponding measurement metadata can be:
+
+```csv
+measurement_id,sample_id,run_id,dilution,droplet_volume_uL
+A_neat,A,1,1,50
+A_diluted,A,1,10,50
+Water_1,water1,1,1,20
+Water_2,water2,1,1,50
+```
+
+`raw_counts.csv` contains each of these measurement names with its own
+`cycle_id`, `temperature_C`, `n_total`, and `n_frozen`. Additional sample metadata
+is required when converting suspension concentrations to air or soil units.
+
+### The background model
+
+The assigned sample and blank sets are assumed to share **one water-background
+concentration per unit volume** at each temperature, from the same prepared-water
+protocol. A larger droplet has a larger expected background contribution. This
+is an explicit model assumption, not something the software can establish from
+a blank name or droplet volume.
+
+The fitted frozen probabilities are:
+
+- Sample: `1 - exp[-V_sample * (C / dilution + B)]`.
+- Blank set: `1 - exp[-V_blank * B]`.
+
+Here `C` is concentration in the original sample suspension, `B` is the common
+water-background concentration, both per mL, and each `V` is that set's droplet
+volume in mL. The model describes randomly distributed ice-active contributions
+per volume. It does not represent an additional background caused by well surface
+area or differing preparation protocols.
+
+When correction is enabled, individual dilution spectra fit the sample and its
+assigned blanks together. Stitching selects one of those spectra at each
+temperature, copying its concentration and uncertainty bounds unchanged. MLE fits
+all eligible dilution counts and their common blank group together. In that joint fit, each independent blank set contributes once at a
+temperature, regardless of how many dilutions reference it. Distinct volumes
+remain in the probability model; unequal-volume blank counts are not collapsed
+into one frozen fraction for calculation. Repeated cycles remain separate.
+
+With raw water correction enabled, MLE supports temperature cutoffs with
+`mask_mode="drop_rows"`. `temperature_method="latest"` or `"max"` is required;
+`window_max_count` adds synthetic warm zero rows and cannot supply raw observations
+for this fit. The window method remains available when correction is disabled or
+no raw blank map is supplied.
+It rejects `rebase_counts`, direct likelihood weights, and action-based weights:
+those alter the raw-count interpretation used by this joint model. This route
+also differs from the optional Python `blank_by_sample` operation, which subtracts
+an already calculated sample/filter blank spectrum later in the workflow.
+
+### Turn water correction on or off
+
+Water correction is optional. With a map present, the default
+`water_blank_correction=True` enables it. To analyze only the sample observations:
+
+```python
+result = inptk.analyze_concentration(experiment, water_blank_correction=False)
+```
+
+The same boolean is accepted by `cumulative_spectrum`, `combine_dilutions`, and
+`differential_spectrum`. Disabling correction excludes mapped blank sets from
+calculated sample tables and does not require matching blank temperatures. It
+preserves every original raw observation and the map in `result.experiment`.
+Saved settings record both the requested `water_blank_correction` value and
+`water_blank_correction_applied`. Without a map, no water correction is applied.
+This option does not reverse correction already present in imported counts.
+
+Use `--no-water-blank-correction` for the same choice on the command line.
+
+For CLI use, save the assignment as `water-blank-map.json`:
+
+```json
+{"A_neat": ["Water_1", "Water_2"], "A_diluted": ["Water_1", "Water_2"]}
+```
+
+```bash
+inptk analyze raw_counts.csv --format native --metadata measurements.csv \
+  --water-blank-map water-blank-map.json --sample A --cycle 1 \
+  --dilution-method mle --out analysis.inptk
+```
+
+Sample/cycle selection retains the associated blank observations and metadata
+without producing blank samples as analysis results. Saved experiments preserve
+the assignment, so `--format saved` uses it directly and rejects an override.
+The current `--format icescopy` path accepts already corrected exports and rejects
+`--water-blank-map`; use raw native input for the joint model.
+
+Numerical and regression checks cover the raw-blank calculations, optional
+correction, saved results, and CLI behavior. These checks verify the implemented
+model and software; they do not establish the frequency with which its uncertainty
+intervals contain the true concentration across all experimental conditions.
+
 ## Icescopy integration
+
+The following importer reads the existing count export, which may already contain
+water correction. Its retained count-based uncertainty is an approximation; it
+does not reconstruct raw sample/blank counts or infer blank uncertainty. For the
+new Icescopy analysis dialog, pass raw session counts through the native contract
+above and make the water-blank assignment in that dialog.
 
 ```python
 experiment = inptk.read_icescopy(
@@ -373,7 +511,8 @@ placement, plots, and remaining integration work.
 | `final` | `CumulativeSpectrumTable` | Rows retained under `decrease_policy`; concentrations and error bounds are unchanged |
 | `differential` | `DifferentialSpectrumTable` or `None` | Optional per-measurement activity per degree, with interval limits |
 
-`dilution_method="stitch"` retains OLAF's dilution-transition calculation.
+`dilution_method="stitch"` selects one dilution per output temperature using the
+coldest eligible handoff described above.
 `"mle"` fits the count observations jointly using the retained binomial-Poisson
 method. Differential spectra are optional (`differential=True`); they are not an
 intermediate step required for cumulative concentration.
