@@ -14,9 +14,13 @@ inptk --help
 
 The distribution, Python import, and command are named `inptk`. There is no
 `ufolaf` compatibility package. Historical workflows remain in Git history.
-The existing `notebook/icescopy_freeze_count_to_air_inp_demo.ipynb` documents the
-old UFOLAF interface and is not a runnable INP-toolkit example. Start with
-`examples/standard_workflow.py` for the current interface.
+Start with `examples/standard_workflow.py` for a small synthetic example.
+The [Icescopy-to-air-concentration notebook](notebook/icescopy_freeze_count_to_air_inp_demo.ipynb)
+shows the current API step by step on the M1 dataset, including explicit sample
+mapping, input checks, automatic stitching, MLE, air normalization, and an OLAF
+comparison. It requires Jupyter, the `plot` extra, and the local source data at the
+paths configured near the top. Its dataset-specific settings are documented there;
+external result export is off by default.
 
 ## A standard analysis
 
