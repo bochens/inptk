@@ -1,0 +1,34 @@
+INP-toolkit stopping point — 2026-10-02
+Goal: compare MLE fits, use 0.5 C fitting/output grids, test raw Icescopy blank input.
+User is heading home and explicitly requested a stopping point. Do not keep running work.
+Repo: /Users/C832577250/Project/inptk; branch codex/measurement-results.
+Current notebook: notebook/icescopy_freeze_count_to_air_inp_demo.ipynb.
+Experimental sample and blank fit use monotone cumulative curves linear between 0.5 C knots.
+Trial output estimates AND profile bounds are evaluated directly at 0.5 C temperatures.
+Raw observations are retained; counts are not interpolated, rounded or thinned.
+Original MLE remains a reference, sampled at 0.5 C for comparison. Public defaults unchanged.
+Standard output_step_C is now 0.5; diagnostic raw-observation plots remain native.
+Core adapter src/inptk/curve_fit.py now supports internal output_step_C separately from fit_step_C.
+Engine src/inptk/_engine/curve_likelihood.py gained experimental fitting grid in dc7ae75.
+Current adapter checks: 22 joint-curve tests passed; Ruff and git diff --check passed.
+Notebook executed without errors; original project and CSV checksum checks pass.
+No package builds, full-suite rerun, push or merge in this stopping turn.
+Next requested input: /Volumes/Hailstone Data/Mentor data from Carson/(M1) 08.12.25 base rerun/freeze_count_timeseries.csv
+Use that CSV directly, as the user's latest input choice.
+Adjacent test_261002.icescopy was inspected read-only to confirm metadata and raw counts.
+Sample_5 is explicitly labelled water blank; all six inputs have 32 wells and 50 uL volumes.
+Sample_0..4 dilutions are 1,13,169,2197,28561; map these to one parent sample.
+Blank metadata mistakenly also says dilution 28561; assigned blank role must not apply sample dilution.
+Raw export totals stay 32 and counts at 482 image rows exactly match saved first-freezing events.
+8881 export rows include temperature-only rows; use actual image rows for observed freezing histories.
+Saved freezing events equal the prior M1 project's events; this is not independent validation data.
+CSV lacks air volume, suspension volume and filter fraction; matching OLAF reference supplies 17829.1 L,10 mL,1.
+Next: create a separate raw-CSV analysis notebook comparing blank-corrected and uncorrected fits at 0.5 C.
+That comparison has NOT been started. Do not overwrite original external inputs or results.
+Earlier simulations: /private/tmp/inptk-mle-assessment; they used coarsened count observations, not linear-knot fitting.
+Grid-model bias/interval coverage remains unvalidated; do not claim 0.5 C is optimal or MLE superior.
+Vali2019 gives no universal resolution; 0.5 C example had 507 droplets and concerned differential bins.
+Use Research/bin/python with PYTHONDONTWRITEBYTECODE=1, PYTHONPATH=src; BLAS threads=1 for notebook execution.
+QA Ruff path: /private/tmp/inptk-release-soxonxxd/quality/bin/ruff; use --no-cache.
+Do not reread full notebook outputs, grayscale arrays, or session JSON dumps; relevant facts are above.
+No live notebook/analysis jobs should remain after this checkpoint.
