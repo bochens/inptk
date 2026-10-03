@@ -146,19 +146,30 @@ remain manually chosen.
 
 The **Suggest Average limits** action now calls `inptk suggest-ranges`, using the
 same native/saved/Icescopy input arguments and curve/cycle selection as analysis.
-Its two settings are `--min-frozen` and `--min-unfrozen`, both initially 3. Put these
-in the process dialog; Preferences may supply starting values. They are adjustable
-count cutoffs, not confidence thresholds. The action returns JSON and writes no
+Its count thresholds are `--min-frozen` and `--min-unfrozen`, both initially 3.
+Pass the same `--temperature-step-C`, optional start/end, method and window
+settings used for analysis; suggestions now accept those same flags. Put the
+thresholds in the process dialog; Preferences may supply starting values. They
+are adjustable count cutoffs, not confidence thresholds. The action returns JSON and writes no
 files. Applying it fills the existing range handles; manual edits stay possible.
 
 Suggestions exhaust each dilution before switching to the next, from least to
 most diluted. The first dilution keeps its initial observations, including zero
 frozen wells; `min_frozen` applies only to later dilutions. `min_unfrozen` applies
 to all. Later dilutions start strictly colder than the preceding stage's cold
-limit. Equal-dilution inputs may overlap and be averaged; switch only after all
-inputs at that dilution end. Use the first eligible contiguous interval, without
+limit. All automatic intervals are nonoverlapping; equal-dilution ties follow the
+curve input order. Use the first eligible contiguous interval, without
 bridging failing temperatures. This is a selection rule for Average, not MLE.
-`previous_dilution_active` explains usable points held back until that switch.
+A range ends before a decrease in blank-corrected concentration. The next input
+must start at or above the preceding retained concentration. Shorten the preceding
+range if necessary to enable the switch; otherwise stop and report no continuation.
+No output value is adjusted. These are the default automatic Average limits.
+`concentration_decrease`, `below_previous_concentration`,
+`shortened_for_monotone_handoff` and `no_monotone_continuation` explain these cuts.
+`previous_dilution_active` explains usable points held back until a switch.
+The resulting finite curve is monotone with the same analysis settings, before
+any additional filter-blank spectrum subtraction; its intervals do not account
+for selecting limits based on concentrations.
 Requests sharing an input across different curve input sets must be made
 separately, because their switching limits can differ. Manual overlap is allowed.
 

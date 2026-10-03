@@ -1,4 +1,4 @@
-"""Reviewable count-based temperature ranges for the Average workflow."""
+"""Reviewable monotone temperature ranges for the Average workflow."""
 
 from __future__ import annotations
 
@@ -13,7 +13,10 @@ from .alignment import align_observations
 from .experiment import Experiment
 from .methods import CombinationMember, resolve_curves
 from .processing import frozen_fraction
+from .range_selection import RangePlanner
+from .settings import DEFAULTS
 from .tables import FrozenFractionTable
+from .temperature_selection import validate_temperature_selection
 from .water_blank import analysis_experiment, estimate_point
 
 
@@ -48,7 +51,7 @@ def _positive_count(value, name):
     return int(value)
 
 
-def _choose_block(rows):
+def _eligible_blocks(rows):
     # A single temperature limit cannot select different images at the same T.
     # Require every row at that T to pass. Never bridge an ineligible temperature.
     states = rows.groupby("temperature_C", sort=True).range_eligible.all().iloc[::-1]
@@ -61,25 +64,20 @@ def _choose_block(rows):
             active = []
     if active:
         blocks.append(active)
-    if not blocks:
-        return None
-    # Start at the warm end and stop at the first failing temperature.
-    # Never abandon the initial block for a longer, colder block.
-    block = blocks[0]
-    return {"min_C": block[-1], "max_C": block[0]}
+    return [{"min_C": block[-1], "max_C": block[0]} for block in blocks]
 
 
-def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen):
-    """Exhaust each dilution before admitting a more dilute input.
-
-    Equal-dilution inputs share a stage and may overlap. Different dilution
-    stages never overlap, including at a shared boundary temperature.
-    """
+def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, grid, z):
+    """Build count-eligible blocks, then choose monotone nonoverlapping ranges."""
     plans, membership = {}, {}
     for group in groups.values():
-        signature = frozenset(member["measurement_id"] for member in group["members"])
-        stages = {}
-        for member in group["members"]:
+        signature = tuple(member["measurement_id"] for member in group["members"])
+        members = sorted(
+            group["members"], key=lambda m: experiment.measurements[m["measurement_id"]].dilution
+        )
+        bases, rows_by_name = {}, {}
+        first_dilution = min(experiment.measurements[m["measurement_id"]].dilution for m in members)
+        for member in members:
             name = member["measurement_id"]
             if name in membership and membership[name] != signature:
                 raise ValueError(
@@ -87,45 +85,53 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen):
                     "range suggestions separately for each set; their switch points may differ."
                 )
             membership[name] = signature
-            stages.setdefault(experiment.measurements[name].dilution, []).append(member)
-        previous_cold = None
-        for stage, dilution in enumerate(sorted(stages)):
-            cold_limits = []
-            for member in stages[dilution]:
-                name = member["measurement_id"]
-                rows = frame.loc[
-                    frame.measurement_id.eq(name) & frame.run_id.eq(member["run_id"])
+            rows = frame.loc[
+                frame.measurement_id.eq(name) & frame.run_id.eq(member["run_id"])
+                & frame.cycle_id.eq(member["cycle_id"])
+            ].copy()
+            first = experiment.measurements[name].dilution == first_dilution
+            rows["too_few_frozen"] = (rows.n_frozen < min_frozen) & (not first)
+            rows["too_few_liquid"] = rows.n_total - rows.n_frozen < min_unfrozen
+            rows["blank_coverage"] = True
+            for blank in experiment.water_blank_map.get(name, []):
+                observed = frame.loc[
+                    frame.measurement_id.eq(blank) & frame.run_id.eq(member["run_id"])
                     & frame.cycle_id.eq(member["cycle_id"])
-                ].copy()
-                # Keep the initial zero/one/two-frozen-well states of the first
-                # dilution. Later stages still need a usable positive signal.
-                rows["too_few_frozen"] = (rows.n_frozen < min_frozen) & (stage > 0)
-                rows["too_few_liquid"] = rows.n_total - rows.n_frozen < min_unfrozen
-                rows["previous_dilution_active"] = (
-                    False if previous_cold is None else rows.temperature_C.ge(previous_cold)
+                ]
+                rows["blank_coverage"] &= rows.temperature_C.between(
+                    observed.temperature_C.min(), observed.temperature_C.max()
                 )
-                rows["blank_coverage"] = True
-                for blank in experiment.water_blank_map.get(name, []):
-                    observed = frame.loc[
-                        frame.measurement_id.eq(blank) & frame.run_id.eq(member["run_id"])
-                        & frame.cycle_id.eq(member["cycle_id"])
-                    ]
-                    rows["blank_coverage"] &= rows.temperature_C.between(
-                        observed.temperature_C.min(), observed.temperature_C.max()
-                    )
-                rows["range_eligible"] = (
-                    ~rows.too_few_frozen & ~rows.too_few_liquid & rows.blank_coverage
-                    & ~rows.previous_dilution_active
+            rows["range_eligible"] = (
+                ~rows.too_few_frozen & ~rows.too_few_liquid & rows.blank_coverage
+            )
+            rows["temperature_eligible"] = rows.groupby(
+                "temperature_C"
+            ).range_eligible.transform("all")
+            bases[name] = _eligible_blocks(rows)
+            rows_by_name[name] = rows
+        planner = RangePlanner(frame, members, experiment, bases, grid, z)
+        chosen = planner.choose([m["measurement_id"] for m in members])
+        previous_cold = None
+        for member in members:
+            name = member["measurement_id"]
+            rows = rows_by_name[name]
+            selected = chosen.get(name)
+            limits = selected["limits"] if selected is not None else None
+            rows["previous_dilution_active"] = (
+                False if previous_cold is None else rows.temperature_C.ge(previous_cold)
+            )
+            rows["monotone_limit_reason"] = ""
+            if limits is None:
+                rows.loc[rows.temperature_eligible, "monotone_limit_reason"] = (
+                    "no_monotone_continuation"
                 )
-                rows["temperature_eligible"] = rows.groupby(
-                    "temperature_C"
-                ).range_eligible.transform("all")
-                limits = _choose_block(rows)
-                plans[name] = (rows, limits, stage == 0)
-                if limits is not None:
-                    cold_limits.append(limits["min_C"])
-            if cold_limits:
-                previous_cold = min(cold_limits)
+            else:
+                outside = ~rows.temperature_C.between(limits["min_C"], limits["max_C"])
+                rows.loc[outside & rows.temperature_eligible & ~rows.previous_dilution_active,
+                         "monotone_limit_reason"] = selected["reason"]
+                previous_cold = limits["min_C"]
+            first = experiment.measurements[name].dilution == first_dilution
+            plans[name] = (rows, limits, first)
     return plans
 
 
@@ -137,25 +143,38 @@ def suggest_temperature_ranges(
     min_unfrozen: int = 3,
     water_blank_correction: bool = True,
     z: float = 1.96,
+    temperature_step_C: float | None = DEFAULTS.temperature_step_C,
+    temperature_start_C: float | None = DEFAULTS.temperature_start_C,
+    temperature_end_C: float | None = DEFAULTS.temperature_end_C,
+    temperature_method: str = DEFAULTS.temperature_method,
+    temperature_window_C: float | None = DEFAULTS.temperature_window_C,
 ) -> RangeSuggestions:
-    """Suggest inclusive Average ranges without modifying data or running an average.
+    """Suggest nonoverlapping Average ranges with nondecreasing concentration.
 
-    Use each dilution from warm to cold before switching to the next dilution.
-    Keep the first dilution's initial observations, including zero frozen wells.
-    Later dilutions require ``min_frozen`` wells and start strictly colder than
-    the previous stage's cold limit. All require ``min_unfrozen`` liquid wells
-    and, when enabled, raw blank coverage. Stop each range at its first failing
-    temperature. Equal-dilution inputs may overlap and be averaged together.
-    Thresholds default to three wells as an editable heuristic, not a validated
-    confidence criterion.
-    Repeated temperatures must pass in every observation. Select one cycle per
-    measurement using ``curves``; repeated cycles never share an inferred range.
+    Exhaust the least diluted input's initial eligible interval, stopping before
+    saturation or a decrease in blank-corrected concentration. A later input must
+    continue at or above the preceding concentration; shorten the preceding range
+    if needed for a handoff. Stop when no such continuation exists. Equal dilution
+    inputs are ordered as supplied in the curve and also receive nonoverlapping ranges.
 
-    Within proposed ranges, fit individual sample/blank count states using the
-    existing Average model. An interval reaching zero is flagged, never excluded
-    for that reason. Concentration decreases never determine these suggestions.
-    Confidence intervals are approximate and do not include selection uncertainty.
+    Use the SAME curves, grid, temperature rule and blank correction for analysis.
+    Each trial uses the actual aligned sample and blank counts. No concentration
+    values are changed and no final decrease filter is needed for these ranges.
+    Count thresholds are editable heuristics, not confidence criteria. The first
+    dilution retains its initial observations without a minimum frozen count.
+    Repeated temperatures must pass in every observation; cycles remain separate.
+    Intervals reaching zero are flagged, not excluded for that reason. Reported
+    confidence intervals do not include the uncertainty of selecting these ranges.
     """
+    validate_temperature_selection(
+        temperature_step_C, temperature_method, temperature_window_C,
+        temperature_start_C, temperature_end_C,
+    )
+    grid = {
+        "temperature_step_C": temperature_step_C, "temperature_start_C": temperature_start_C,
+        "temperature_end_C": temperature_end_C, "temperature_method": temperature_method,
+        "temperature_window_C": temperature_window_C,
+    }
     min_frozen = _positive_count(min_frozen, "min_frozen")
     min_unfrozen = _positive_count(min_unfrozen, "min_unfrozen")
     if isinstance(z, bool) or not np.isfinite(z) or z <= 0:
@@ -178,6 +197,7 @@ def suggest_temperature_ranges(
         raise ValueError("No sample inputs selected for range suggestions")
     plans = _sequential_ranges(
         frame, groups, view, min_frozen=min_frozen, min_unfrozen=min_unfrozen,
+        grid=grid, z=float(z),
     )
     proposals, reports = {}, []
     cache = {}
@@ -199,6 +219,8 @@ def suggest_temperature_ranges(
                 excluded.append("missing_blank_coverage")
             if row.previous_dilution_active:
                 excluded.append("previous_dilution_active")
+            if row.monotone_limit_reason and not excluded:
+                excluded.append(row.monotone_limit_reason)
             if not excluded and not row.in_suggested_range:
                 excluded.append("outside_selected_contiguous_block" if row.temperature_eligible
                                 else "another_observation_at_same_temperature_failed")
@@ -261,9 +283,10 @@ def suggest_temperature_ranges(
         "operation": "suggest_temperature_ranges", "intended_method": "average",
         "min_frozen": min_frozen, "min_unfrozen": min_unfrozen, "z": float(z),
         "water_blank_correction": water_blank_correction,
-        "rule": "ascending dilution; exhaust each stage's first eligible block before the next",
+        "rule": "ascending dilution; nonoverlapping monotone intervals and handoffs",
+        **grid,
         "first_dilution": "preserve initial observations; no minimum frozen count",
-        "same_dilution": "may overlap; advance after all inputs in the stage end",
+        "same_dilution": "nonoverlapping; curve input order breaks dilution ties",
         "repeated_temperatures": "all observations must pass",
         "blank_flags_change_ranges": False,
         "uncertainty": "individual pointwise profile bounds; excludes range-selection uncertainty",

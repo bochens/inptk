@@ -163,11 +163,13 @@ def test_cli_thresholds_and_input_selection_are_exposed_in_capabilities(capsys):
     assert "curves" in flags and "cycle" in flags
 
 
-def test_suggestions_do_not_optimize_away_a_decrease_in_corrected_concentration():
+def test_suggestions_end_before_a_decrease_in_corrected_concentration():
     data = source((8, 8, 8), blank=([0, 1, 4], [-5, -6, -7], 32, 50))
     report = inptk.suggest_temperature_ranges(data).observations.to_dataframe()
-    assert report.in_suggested_range.all()
-    assert np.all(np.diff(report.concentration) < 0)
+    assert report.in_suggested_range.tolist() == [True, False, False]
+    assert "concentration_decrease" in report.range_exclusion_reasons.iloc[1]
+    proposal = inptk.suggest_temperature_ranges(data)
+    assert proposal.temperature_ranges_C["001"] == {"min_C": -5, "max_C": -5}
 
 
 def dilution_series(*, second_dilution=10, second_counts=None):
@@ -205,9 +207,9 @@ def test_exhaust_previous_dilution_before_switching_even_when_next_is_already_us
     )
 
 
-def test_equal_dilution_inputs_can_average_before_switch_to_more_dilute_input():
+def test_equal_dilution_inputs_also_have_nonoverlapping_monotone_ranges():
     proposal = inptk.suggest_temperature_ranges(dilution_series(second_dilution=1))
-    assert proposal.temperature_ranges_C["B"] == {"min_C": -11, "max_C": -5}
+    assert proposal.temperature_ranges_C["B"] == {"min_C": -11, "max_C": -11}
     assert proposal.temperature_ranges_C["C"] == {"min_C": -12, "max_C": -12}
 
 
@@ -221,7 +223,7 @@ def test_later_dilution_still_needs_minimum_frozen_count_and_gaps_remain_visible
 
 def test_unused_later_dilution_is_reported_instead_of_restored_to_full_range():
     proposal = inptk.suggest_temperature_ranges(
-        dilution_series(second_counts=[0, 3, 16, 29, 30, 31, 32, 32])
+        dilution_series(second_counts=[0, 0, 0, 0, 0, 0, 0, 0])
     )
     assert proposal.inputs["B"]["status"] == "no_usable_range"
     with pytest.raises(ValueError, match="No usable temperature range"):
@@ -233,3 +235,116 @@ def test_shared_input_with_different_switching_context_requires_separate_suggest
         inptk.suggest_temperature_ranges(dilution_series(), curves={
             "combined": {"inputs": ["A", "B"]}, "alone": {"inputs": ["B"]},
         })
+
+
+def two_inputs(first, second, *, second_dilution=2):
+    rows, metadata = [], []
+    for name, counts, dilution in [("A", first, 1), ("B", second, second_dilution)]:
+        metadata.append({"measurement_id": name, "sample_id": "sample",
+                         "dilution": dilution, "droplet_volume_uL": 50})
+        rows.extend({"measurement_id": name, "temperature_C": -5-i,
+                     "n_total": 32, "n_frozen": count} for i, count in enumerate(counts))
+    return inptk.read_counts(rows, metadata=metadata)
+
+
+def unfiltered(data, proposal, *, curves=None, **grid):
+    return inptk.estimate_concentration(
+        inptk.frozen_fraction(data), experiment=data, method="average", curves=curves,
+        temperature_ranges_C=proposal.temperature_ranges_C, **grid,
+    ).to_dataframe()
+
+
+def test_handoff_shortens_previous_range_without_modifying_concentrations():
+    data = two_inputs([0, 16, 24, 29, 30], [0, 3, 5, 8, 12])
+    proposal = inptk.suggest_temperature_ranges(data)
+    assert proposal.temperature_ranges_C == {
+        "A": {"min_C": -6, "max_C": -5}, "B": {"min_C": -9, "max_C": -9},
+    }
+    assert proposal.inputs["A"]["cold_limit_reason"] == ["shortened_for_monotone_handoff"]
+    table = unfiltered(data, proposal)
+    finite = table.loc[np.isfinite(table.concentration)]
+    assert finite.temperature_C.tolist() == [-5, -6, -9]
+    assert finite.contributor_count.eq(1).all()
+    np.testing.assert_allclose(finite.concentration, -np.log([1, 0.5, 0.625]) / 0.05 * [1, 1, 2])
+    assert finite.concentration.diff().dropna().ge(0).all()
+
+
+def test_impossible_handoff_stops_and_reports_unused_input():
+    data = two_inputs([8, 16, 24, 29], [0, 0, 0, 3], second_dilution=1)
+    proposal = inptk.suggest_temperature_ranges(data)
+    assert proposal.inputs["A"]["range_C"] == {"min_C": -8, "max_C": -5}
+    assert proposal.inputs["B"]["range_C"] is None
+    report = proposal.observations.to_dataframe()
+    assert report.loc[report.measurement_id.eq("B"), "range_exclusion_reasons"].str.contains(
+        "no_monotone_continuation|previous_dilution_active"
+    ).all()
+    with pytest.raises(ValueError, match="No usable temperature range"):
+        _ = proposal.temperature_ranges_C
+
+
+def test_total_count_change_is_checked_through_concentration():
+    data = inptk.read_counts(
+        {"measurement_id": ["A"] * 3, "temperature_C": [-5, -6, -7],
+         "n_total": [32, 32, 64], "n_frozen": [8, 12, 12]},
+        metadata=[{"measurement_id": "A", "sample_id": "A", "dilution": 1,
+                   "droplet_volume_uL": 50}],
+    )
+    proposal = inptk.suggest_temperature_ranges(data)
+    assert proposal.temperature_ranges_C["A"] == {"min_C": -6, "max_C": -5}
+    assert unfiltered(data, proposal).concentration.diff().dropna().ge(0).all()
+
+
+@pytest.mark.parametrize("method", ["latest", "max", "window"])
+def test_monotone_limits_use_the_same_initial_grid_and_rule_as_analysis(method):
+    temperatures = [-5, -5.4, -6, -6.4, -7]
+    data = source((0, 4, 9, 12, 29), temperatures=temperatures,
+                  blank=([0, 1, 7, 7, 8], temperatures, 32, 50))
+    grid = {"temperature_step_C": 0.5, "temperature_start_C": -5,
+            "temperature_end_C": -7, "temperature_method": method}
+    if method == "window":
+        grid["temperature_window_C"] = 0.5
+    proposal = inptk.suggest_temperature_ranges(data, **grid)
+    table = unfiltered(data, proposal, **grid)
+    finite = table.loc[np.isfinite(table.concentration)]
+    assert len(finite) >= 2
+    assert finite.concentration.diff().dropna().ge(0).all()
+    assert finite.contributor_count.eq(1).all()
+    for key, value in grid.items():
+        assert proposal.settings[key] == value
+
+
+def test_count_eligible_island_between_grid_targets_does_not_block_later_input():
+    data = two_inputs([0, 16, 29, 30, 31, 32], [0, 3, 2, 8, 16, 29], second_dilution=10)
+    grid = {"temperature_step_C": 2}
+    proposal = inptk.suggest_temperature_ranges(data, **grid)
+    assert proposal.inputs["B"]["range_C"] is not None
+    finite = unfiltered(data, proposal, **grid).dropna(subset=["concentration"])
+    assert finite.concentration.diff().dropna().ge(0).all()
+
+
+def test_cli_monotone_limits_share_grid_settings_with_python(tmp_path, capsys):
+    data = source((8, 8, 8), blank=([0, 1, 4], [-5, -6, -7], 32, 50))
+    path = tmp_path / "experiment.inptk"
+    data.save(path)
+    assert main(["suggest-ranges", str(path), "--format", "saved",
+                 "--temperature-step-C", "0.5", "--temperature-start-C", "-5.1",
+                 "--temperature-end-C", "-6.9", "--temperature-method", "max", "--json"]) == 0
+    actual = json.loads(capsys.readouterr().out)
+    expected = inptk.suggest_temperature_ranges(
+        data, temperature_step_C=0.5, temperature_start_C=-5.1,
+        temperature_end_C=-6.9, temperature_method="max",
+    )
+    assert actual["temperature_ranges_C"] == expected.temperature_ranges_C
+    assert actual["settings"] == expected.settings
+
+
+def test_unselected_cycles_do_not_change_handoff_limits():
+    data = dilution_series()
+    curves = {"sample": {"inputs": ["A", "B", "C"], "cycle": "1"}}
+    expected = inptk.suggest_temperature_ranges(data, curves=curves)
+    original = data.counts.to_dataframe()
+    other = original.assign(cycle_id="2", temperature_C=original.temperature_C + 0.125)
+    both = inptk.Experiment(inptk.CountsTable(pd.concat([original, other])),
+                            data.samples, data.measurements)
+    actual = inptk.suggest_temperature_ranges(both, curves=curves)
+    assert actual.temperature_ranges_C == expected.temperature_ranges_C

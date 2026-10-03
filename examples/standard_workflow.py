@@ -62,7 +62,7 @@ print({name: curve.kind for name, curve in result.curves.items()})
 # When ready to save, choose a new destination:
 # result.save("analysis.inptk")
 
-# Suggest editable count-based limits before using Average on a selected cycle.
+# Suggest editable monotone limits before using Average on a selected cycle.
 average_curves = {"A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"}}
 suggestions = inptk.suggest_temperature_ranges(experiment, curves=average_curves)
 print(suggestions.inputs)  # Includes the reason for each proposed cutoff.

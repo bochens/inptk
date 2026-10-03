@@ -1,47 +1,32 @@
-INP-toolkit handoff — 2026-10-02
-Goal completed: read CSV or .icescopy archives through the same public importer.
-Repo /Users/C832577250/Project/inptk; branch codex/measurement-results.
-Pre-archive checkpoint: 641ed20; pre-cleanup: e34814d; previous refactor: 55851aa.
-No remote push, merge, Icescopy GUI edit, or live background analysis in this task.
-Decisions: one count-selection grid at the beginning; no final regridding or resampled result.
-Spacing: temperature_step_C; optional temperature_start_C / temperature_end_C are exact warm/cold endpoints.
-Endpoints default to None: use warmest/coldest temperatures of the curve's selected inputs, no rounding.
-Both endpoints included; the last interval can be shorter. Without spacing, native processing remains.
-Rules latest / max / window are unchanged; window requires full temperature_window_C width.
-Sample and blank independently use the same rule before estimation. No inferred blank roles.
-All supplied count/time/temperature rows remain available, with or without an image ID.
-Cycles remain separate. Shared physical blanks enter once; different runs retain their own backgrounds.
-fit_step_C controls MLE shape only, never reporting temperatures; it is rejected for Average.
-Core: estimation.py now owns shared concentration calculation; context.py validates inputs.
-settings.py owns scalar defaults/validation shared by Python and CLI.
-processing.py individual spectra use the same estimator; duplicate Average calculation path removed.
-Public differentiate_spectrum(cumulative) differences an existing individual spectrum without fitting.
-Workflow differential output reuses already calculated concentrations; no second fit.
-workflows.py orchestrates estimation, optional correction, units, final selection and result assembly.
-No processing/workflows circular imports remain.
-Saved format is 4; old versions rejected without fallback. CLI protocol remains 2, package 0.4.0.
-CLI preview, suggest-ranges, analyze, export-csv, capabilities remain; final-grid flags removed.
-README.md, ICESCOPY_HANDOFF.md and examples/standard_workflow.py match current interfaces.
-Both M1 notebooks executed successfully, all 53,286 raw CSV rows preserved; 102 analysis temperatures.
-Sample_0..4: dilutions 1,13,169,2197,28561; explicit Sample_5 blank; 32 wells each, 50 uL.
-Air conversion 17829.1 L, 10 mL suspension, filter fraction 1 from adjacent OLAF reference.
-Source CSV and reference hashes unchanged. External notebook export disabled.
-Current verification: 731 tests passed; one expected invalid-timestamp parsing warning.
-Current Ruff, mypy (30 files), archive-module Bandit and Git whitespace review passed.
-Wheel built/installed in temporary directory; installed executable capabilities, blank fit, bounds and CSV passed.
-No known implementation failures remain. Statistical coverage of joint-model intervals is not validated broadly.
-Commands: Research/bin/python; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src OPENBLAS_NUM_THREADS=1.
-Quality tools: /private/tmp/inptk-release-soxonxxd/quality/bin; keep caches/builds outside repository.
-CSV cleanup: read_csu_csv returns CSUSpectrum.table, normalized metadata, and original source/header.
-Both notebooks call read_icescopy with explicit water_blank_map; no manual Experiment reconstruction.
-Removed duplicate reference parsing and unused Icescopy-header diagnostic parsing.
-Cleanup checks: 66 targeted tests, Ruff and mypy passed; both notebooks re-executed successfully.
-All six saved figure PNGs are byte-identical to the pre-cleanup versions; source files unchanged.
-Archive reader: src/inptk/icescopy_input.py; tests/test_icescopy_archive.py.
-Reads only freeze_count_timeseries.csv and optional session.json in memory; no extraction.
-Saved physical metadata is used; grouping and blank choices remain explicit.
-Rejects missing/duplicate counts and saved counts marked as requiring analysis.
-Actual M1 archive matches separate CSV: all 53,286 count rows and physical metadata.
-CLI preview and analysis accept .icescopy with existing --format icescopy.
-Next: integrate explicit choices and direct result plotting in Icescopy using ICESCOPY_HANDOFF.md.
-Do not reread archive image arrays, full notebook outputs, or obsolete image-only diagnostic numbers.
+INP-toolkit handoff — 2026-10-03
+Goal completed: default automatic Average ranges must produce a monotone curve before final filtering.
+Repo: /Users/C832577250/Project/inptk; branch codex/measurement-results.
+Pre-edit checkpoint: 51bca3e. No push, merge, Icescopy GUI changes, or source-data edits.
+Key files: src/inptk/range_selection.py, ranges.py, cli.py; tests/test_range_suggestions.py.
+Notebook: notebook/icescopy_freeze_count_to_air_inp_demo.ipynb.
+Docs: README.md, ICESCOPY_HANDOFF.md; examples/standard_workflow.py.
+Automatic limits use blank-corrected concentrations and the actual analysis alignment rules.
+Use least diluted first; end before a decrease or count/coverage failure.
+Next input must begin at or above the preceding retained concentration.
+Try shortening the preceding interval to enable a handoff; otherwise stop and report unused inputs.
+Automatic ranges never overlap; equal-dilution ties follow requested curve input order.
+No concentration values are adjusted. Manual ranges retain their existing behavior.
+Suggestions remain an explicit step; pass their ranges to Average analysis.
+CLI suggest-ranges accepts the same grid step/start/end/method/window arguments as analyze.
+Suggestions and analysis must use the same curves, grid and blank settings.
+Blocks entirely between grid targets do not supply calculation points and are skipped.
+Changing a range can change latest/max/window count selection; recalculate each trial.
+Cycles stay separate; only the chosen cycle supplies handoff boundary temperatures.
+Incomplete proposals stay visible but temperature_ranges_C rejects them; never silently restore full ranges.
+Additional filter-blank spectrum subtraction can change monotonicity after these raw-assay limits.
+Uncertainty intervals do not account for selecting ranges using the observed concentrations.
+M1 notebook uses 0.5 C/latest for suggestions and analysis; plots estimates before final filtering.
+Verified M1: 96 finite Average points, all nondecreasing, one contributor at each point.
+All-in-one workflow retains every finite point of that unfiltered curve; all three plots refreshed.
+Checks: full suite 739 passed before final selected-cycle boundary tightening.
+After final fix: all 31 range tests, Ruff, mypy (31 files), whitespace review and standard example passed.
+Known errors: none. No claim of broad statistical coverage validation.
+Commands: Research/bin/python, PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src OPENBLAS_NUM_THREADS=1.
+Quality tools: /private/tmp/inptk-release-soxonxxd/quality/bin; Ruff --no-cache.
+Next: Icescopy integration should pass current dialog temperature settings when suggesting limits.
+Do not reread full notebook JSON, image arrays, or legacy UFOLAF code for this change.

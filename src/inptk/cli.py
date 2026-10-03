@@ -123,27 +123,7 @@ def build_parser():
         "--curves",
         help="JSON object or file mapping curve names to inputs lists and optional cycle labels",
     )
-    analyze.add_argument(
-        "--temperature-step-C", type=float,
-        help="Optional count-selection grid spacing before estimation and blank correction",
-    )
-    analyze.add_argument(
-        "--temperature-start-C", type=float, default=DEFAULTS.temperature_start_C,
-        help="Warm grid endpoint; defaults to the warmest selected input temperature",
-    )
-    analyze.add_argument(
-        "--temperature-end-C", type=float, default=DEFAULTS.temperature_end_C,
-        help="Cold grid endpoint; defaults to the coldest selected input temperature",
-    )
-    analyze.add_argument(
-        "--temperature-method", choices=("latest", "max", "window"),
-        default=DEFAULTS.temperature_method,
-        help="Select latest warmer counts, maximum warmer fraction, or maximum count in a window",
-    )
-    analyze.add_argument(
-        "--temperature-window-C", type=float,
-        help="Full centered window width in degrees C; required only for window",
-    )
+    _temperature_arguments(analyze)
     analyze.add_argument(
         "--fit-step-C", type=float,
         help="MLE curve shape spacing (e.g. 0.5 C); does not choose output temperatures",
@@ -167,6 +147,7 @@ def build_parser():
     suggest.add_argument("--min-unfrozen", type=int, default=3,
                          help="Minimum liquid sample wells (default: 3)")
     suggest.add_argument("--z", type=float, default=DEFAULTS.z)
+    _temperature_arguments(suggest)
     export = commands.add_parser("export-csv", help="Export a quantity from named saved curves")
     _json_flag(export)
     export.add_argument("input")
@@ -176,6 +157,30 @@ def build_parser():
         "--table", choices=("cumulative", "excluded"), default="cumulative"
     )
     return parser
+
+
+def _temperature_arguments(parser):
+    parser.add_argument(
+        "--temperature-step-C", type=float,
+        help="Optional count-selection grid spacing before estimation and blank correction",
+    )
+    parser.add_argument(
+        "--temperature-start-C", type=float, default=DEFAULTS.temperature_start_C,
+        help="Warm grid endpoint; defaults to the warmest selected input temperature",
+    )
+    parser.add_argument(
+        "--temperature-end-C", type=float, default=DEFAULTS.temperature_end_C,
+        help="Cold grid endpoint; defaults to the coldest selected input temperature",
+    )
+    parser.add_argument(
+        "--temperature-method", choices=("latest", "max", "window"),
+        default=DEFAULTS.temperature_method,
+        help="Select latest warmer counts, maximum warmer fraction, or maximum count in a window",
+    )
+    parser.add_argument(
+        "--temperature-window-C", type=float,
+        help="Full centered window width in degrees C; required only for window",
+    )
 
 
 def _select_experiment(experiment, sample_ids, cycle_ids):
@@ -485,6 +490,11 @@ def main(argv=None):
             proposal = suggest_temperature_ranges(
                 _read_analysis_input(args), curves=_json_object(args.curves, "--curves"),
                 min_frozen=args.min_frozen, min_unfrozen=args.min_unfrozen, z=args.z,
+                temperature_step_C=args.temperature_step_C,
+                temperature_start_C=args.temperature_start_C,
+                temperature_end_C=args.temperature_end_C,
+                temperature_method=args.temperature_method,
+                temperature_window_C=args.temperature_window_C,
                 water_blank_correction=not args.no_water_blank_correction,
             )
             complete = all(item["range_C"] is not None for item in proposal.inputs.values())

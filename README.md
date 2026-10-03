@@ -239,19 +239,30 @@ only when explicitly passed as `temperature_ranges_C`:
 curves = {"Sample A": {"inputs": ["Sample_0", "Sample_1"], "cycle": "1"}}
 suggestions = inptk.suggest_temperature_ranges(
     experiment, curves=curves, min_frozen=3, min_unfrozen=3,
+    temperature_step_C=0.5, temperature_method="latest",
 )
 print(suggestions.inputs)  # Limits, selected cycle, and reasons for each cutoff.
 ranges = suggestions.temperature_ranges_C  # A copy; edit limits here if needed.
 result = inptk.analyze_concentration(
     experiment, curves=curves, method="average", temperature_ranges_C=ranges,
+    temperature_step_C=0.5, temperature_method="latest",
 )
 ```
 
-Within each curve, suggestions use the least-diluted input first and exhaust its
-usable range before switching to the next dilution. A later dilution starts
-strictly colder than the previous dilution's cold limit, even if it already has
-enough frozen wells. Inputs at the same dilution may overlap and be averaged;
-the next dilution starts after all inputs at the preceding dilution have ended.
+Automatic Average limits now enforce a nondecreasing concentration curve by
+selecting ranges before combination. Start with the least diluted input and end
+its range before saturation or the first decrease in blank-corrected concentration.
+Switch only when the next input is at least as high as the last retained value.
+If that fails, try a shorter preceding interval. Stop and report an unavailable
+continuation if no valid handoff exists; no concentration value is adjusted.
+
+All automatic ranges are nonoverlapping, including equal-dilution inputs (ties
+follow the input order in the requested curve). Manual ranges can still overlap
+and use Average in their overlap. Use the same curves, grid endpoints/spacing,
+temperature rule and blank-correction setting for suggestions and analysis.
+Range trials recalculate the selected counts, since changing a limit can change
+which observation supplies a grid point. The guarantee applies to that unchanged
+analysis setup, before any additional sample/filter-blank spectrum subtraction.
 
 The first dilution keeps its initial observations, including zero frozen wells.
 For every dilution, the default cold cutoff requires at least three liquid wells.
@@ -262,17 +273,19 @@ starting values, not a validated confidence criterion. Assigned blanks must cove
 the selected temperatures when correction is enabled. The thresholds apply to
 sample wells, not blank wells.
 
-Suggestions contain one contiguous observed-temperature interval for each named
-input. Use the first eligible interval encountered during cooling and stop at its
-first failing temperature; never replace it with a longer, colder interval.
+Suggestions contain one contiguous interval for each named input. Keep the first
+input's initial eligible interval. Later inputs start in the first eligible block
+that can continue the previous concentration; no interval bridges a failing
+count state. Blocks falling entirely between grid targets contain no calculation
+points and are skipped.
 Every observation at a repeated temperature must pass, because a
 temperature range cannot distinguish those images. Inputs with no usable interval
 remain in `suggestions.inputs` with `status="no_usable_range"`; accessing
 `suggestions.temperature_ranges_C` then raises an error instead of silently using
 the unrestricted input. Review thresholds or remove that input from `curves` and
 request suggestions again. This includes an input whose entire usable range was
-already covered by an earlier dilution. Gaps remain if the next dilution is not
-yet usable; suggestions do not extend ranges to fill them. Select one cycle per
+unavailable after the preceding input, or a stop because no monotone continuation
+exists. Gaps remain if the next dilution is not yet usable; suggestions do not extend ranges to fill them. Select one cycle per
 input; use the same curve/cycle selection when applying its ranges. Request
 suggestions separately for curves that share an input but have different input
 sets, since their switch temperatures may differ. Manual ranges may still overlap.
@@ -283,14 +296,15 @@ proposed interval, `blank_status="not_distinguished_from_blank"` means the
 individual blank-corrected concentration interval reaches zero. Such points stay
 in the range. `uncertainty_unavailable` flags a failed finite estimate or interval;
 it also does not silently change the range. Diagnostic concentrations and error
-widths are per mL of original suspension. No blank fit is performed when correction
-is disabled or no map exists. Settings and proposals are recorded in the suggestion
-table's history. Save the suggestion report alongside the analysis if you need
+widths are per mL of original suspension. Without a blank map, the same range rule
+uses uncorrected concentrations. Settings and proposals are recorded in the
+suggestion table's history. Save the suggestion report alongside the analysis if you need
 threshold and diagnostic provenance; analysis records the applied temperature limits.
 
-Suggestions do not search for peaks or remove concentration decreases. Average can
-still decrease when contributors change, so its final stop/skip policy remains
-separate. Reported intervals do not include uncertainty from choosing the ranges.
+For complete suggestions, the calculated finite points are already monotone;
+the final stop/skip filter need not remove any concentration decrease. A shorter
+curve is possible. The confidence intervals do not include the uncertainty from
+selecting these ranges using the observed concentrations.
 
 Icescopy and other applications can request the same report without creating a
 saved result:
@@ -298,7 +312,7 @@ saved result:
 ```bash
 inptk suggest-ranges observations.csv --metadata metadata.csv \
   --curves curves.json --water-blank-map blanks.json \
-  --min-frozen 3 --min-unfrozen 3 --json
+  --min-frozen 3 --min-unfrozen 3 --temperature-step-C 0.5 --json
 ```
 
 The response includes `inputs`, `settings`, an observation `table`, and
