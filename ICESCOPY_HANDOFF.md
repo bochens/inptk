@@ -40,10 +40,12 @@ an equal-weight mean of eligible concentration estimates at each temperature.
 Both retain blank uncertainty when raw sample and blank counts are supplied.
 Average uses conservative bounds that allow shared blank uncertainty.
 
-Export raw counts for actual images: fixed total wells and cumulative first-freezing
-counts within each cycle. Do not supply the old blank-adjusted, changing-total
-export or temperature-clock rows filled between images. Joint MLE rejects changing
-totals and falling frozen counts. Raw blanks remain separate physical well sets.
+Use every row with time, temperature and freezing counts, including rows without
+an image ID. An image ID is optional source information, not an eligibility rule.
+Joint MLE requires fixed total wells and cumulative first-freezing counts within
+each cycle; it rejects changing totals and falling frozen counts. Raw blanks
+remain separate physical well sets. Do not supply the old blank-adjusted,
+changing-total export to joint MLE.
 The CLI `capabilities` response describes these method requirements.
 
 Grouping, runs, cycles, dilution, actual droplet volume, sample normalization and
