@@ -161,3 +161,63 @@ def test_joint_likelihood_is_invariant_to_duplicate_observation_rows_with_new_id
     np.testing.assert_allclose(fitted[["concentration", "lower_error", "upper_error"]],
                                original[["concentration", "lower_error", "upper_error"]],
                                rtol=2e-6, atol=2e-6)
+
+
+def test_fitting_grid_preserves_off_grid_events_and_matches_direct_probability_fit():
+    from scipy.optimize import minimize, minimize_scalar
+
+    temperatures = [-5, -5.4, -6]
+    inputs = [stream([1, 4, 7], 10, volume=1000, temperatures=temperatures),
+              stream([0, 1, 3], 10, volume=1000, dilution=4, temperatures=temperatures)]
+    original = [s.frozen.copy() for s in inputs]
+    # K(-5.4) is 40% of the way from the warm grid level to the cold level.
+    def objective(levels):
+        warm, cold = levels
+        if warm <= 0 or cold <= warm:
+            return np.inf
+        concentrations = np.array([warm, .6 * warm + .4 * cold, cold])
+        value = 0.0
+        for exposure, outcomes in [(1, [1, 3, 3, 3]), (.25, [0, 1, 2, 7])]:
+            survival = np.exp(-exposure * concentrations)
+            probabilities = np.r_[1 - survival[0], -np.diff(survival), survival[-1]]
+            value -= np.asarray(outcomes) @ np.log(probabilities)
+        return value
+
+    independent = minimize(objective, [.1, 1.2], method="Nelder-Mead",
+                           options={"xatol": 1e-11, "fatol": 1e-11})
+    assert independent.success
+    model = CurveLikelihood(inputs, temperatures, fit_step_C=1)
+    values = [model.estimate(t, 1.96**2 / 2) for t in temperatures]
+    np.testing.assert_allclose([values[0][0], values[-1][0]], independent.x, rtol=3e-6)
+    center, lower, upper = values[1]
+    assert center == pytest.approx(.6 * independent.x[0] + .4 * independent.x[1], rel=3e-6)
+    for endpoint in [center - lower, center + upper]:
+        profile = minimize_scalar(
+            lambda warm, endpoint=endpoint: objective([warm, (endpoint - .6 * warm) / .4]),
+            bounds=(1e-12, endpoint), method="bounded", options={"xatol": 1e-12},
+        )
+        assert profile.fun - independent.fun == pytest.approx(1.96**2 / 2, rel=3e-5)
+    # Fractional temperatures inside the same grid cell have distinct bounds.
+    other = model.estimate(-5.2, 1.96**2 / 2)
+    assert other[0] < center
+    assert other[0] + other[2] < center + upper
+    for s, counts in zip(inputs, original, strict=True):
+        np.testing.assert_array_equal(s.frozen, counts)
+        np.testing.assert_array_equal(s.temperatures, temperatures)
+
+
+def test_grid_at_observed_temperatures_retains_joint_blank_estimates_and_bounds():
+    temperatures = np.array([-5., -6., -7.])
+    inputs = [FreezingSeries(temperatures, np.array([1, 5, 12]), 20, .05, .05, "run"),
+              FreezingSeries(temperatures, np.array([0, 2, 4]), 20, 0., .05, "run")]
+    native = CurveLikelihood(inputs, temperatures)
+    grid = CurveLikelihood(inputs, temperatures, fit_step_C=1)
+    for temperature in temperatures:
+        np.testing.assert_allclose(grid.estimate(temperature, 1.96**2 / 2),
+                                   native.estimate(temperature, 1.96**2 / 2), rtol=3e-6)
+
+
+@pytest.mark.parametrize("step", [0, -1, True, np.nan, np.inf])
+def test_invalid_fitting_grid_steps_are_rejected(step):
+    with pytest.raises(ValueError, match="finite and positive"):
+        CurveLikelihood([stream([0, 4])], [-5, -6], fit_step_C=step)

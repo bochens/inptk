@@ -8,6 +8,8 @@ the original droplet total. Images are not independent trials.
 Sample hazard is volume * (K / dilution + B_run). K and each B_run are sums of
 nonnegative increments on the observed temperature support. Profile intervals
 optimize the same complete likelihood, including all background parameters.
+The optional experimental fitting grid instead uses cumulative concentrations
+linear between grid points, evaluated at the unchanged observation temperatures.
 """
 
 from __future__ import annotations
@@ -152,12 +154,24 @@ class CurveLikelihood:
     increment does not falsely imply zero uncertainty between freezing events.
     """
 
-    def __init__(self, series: list[FreezingSeries], temperatures):
+    def __init__(self, series: list[FreezingSeries], temperatures, *, fit_step_C=None):
         if not series:
             raise ValueError("A joint curve requires at least one physical droplet set")
-        self.temperatures = np.unique(np.concatenate([
+        observed = np.unique(np.concatenate([
             np.asarray(temperatures, dtype=float), *[s.temperatures for s in series]
         ]))[::-1]
+        self.fit_step_C = fit_step_C
+        if fit_step_C is None:
+            self.temperatures = observed
+        else:
+            if isinstance(fit_step_C, bool) or not np.isfinite(fit_step_C) or fit_step_C <= 0:
+                raise ValueError("fit_step_C must be finite and positive")
+            # Trial model: cumulative sample and blank concentrations are linear
+            # between regular knots. Evaluate this model at the ORIGINAL temperatures
+            # of observed freezing states; never round or interpolate counts.
+            lower = int(np.floor(observed[-1] / fit_step_C))
+            upper = int(np.ceil(observed[0] / fit_step_C))
+            self.temperatures = np.arange(upper, lower - 1, -1, dtype=float) * fit_step_C
         self.backgrounds = sorted({s.background for s in series if s.background})
         size = len(self.temperatures)
         width = size * (1 + len(self.backgrounds))
@@ -176,7 +190,7 @@ class CurveLikelihood:
             previous_count = 0
             for temperature, frozen in zip(stream.temperatures, stream.frozen, strict=True):
                 state = np.zeros(width)
-                mask = self.temperatures >= temperature
+                mask = self._basis(temperature)
                 state[:size] = mask * stream.sample_exposure
                 if stream.background:
                     component = 1 + self.backgrounds.index(stream.background)
@@ -211,6 +225,18 @@ class CurveLikelihood:
             position = original[np.flatnonzero(inverse == group)[-1]]
             self.increments[position] = solution[group] / scale[group]
 
+    def _basis(self, temperature):
+        """Weights of nonnegative cumulative increments at an observed temperature."""
+        if self.fit_step_C is None:
+            return self.temperatures >= temperature
+        if temperature > self.temperatures[0] or temperature < self.temperatures[-1]:
+            raise ValueError("Temperature is outside the fitting grid")
+        weights = np.ones(len(self.temperatures))
+        weights[1:] = np.clip(
+            (self.temperatures[:-1] - temperature) / -np.diff(self.temperatures), 0, 1,
+        )
+        return weights
+
     def _reduced(self, target=None):
         design = np.vstack([self.linear[self.usable], self.events[:, self.usable]])
         if target is not None:
@@ -225,7 +251,7 @@ class CurveLikelihood:
 
     def estimate(self, temperature, confidence_drop):
         target = np.zeros(len(self.linear))
-        target[:len(self.temperatures)] = self.temperatures >= temperature
+        target[:len(self.temperatures)] = self._basis(temperature)
         if np.any(target[self.unbounded]):
             return np.nan, np.nan, np.nan
         estimate = float(target @ self.increments)
@@ -233,7 +259,10 @@ class CurveLikelihood:
             self._column_groups, weights=target[self.usable], minlength=len(self._group_sizes)
         )
         state = np.where(selected == 0, 0, np.where(selected == self._group_sizes, 1, 2))
-        key = state.astype(np.uint8).tobytes() + float(confidence_drop).hex().encode()
+        # Linear interpolation gives distinct fractional targets within a cell.
+        # They must not reuse a step-curve interval's cached profile bounds.
+        key = (state.astype(np.uint8).tobytes() if self.fit_step_C is None else target.tobytes())
+        key += float(confidence_drop).hex().encode()
         if key not in self._bounds_cache:
             model, inverse, scale, direction = self._reduced(target)
             initial = np.bincount(

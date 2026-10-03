@@ -42,7 +42,7 @@ def _trajectory(rows, *, name):
     return selected.iloc[keep], len(rows)
 
 
-def fit_curve(points, experiment, *, z):
+def fit_curve(points, experiment, *, z, fit_step_C=None):
     """Fit selected sample/blank streams once; return estimates at native temperatures."""
     sample_pieces = [point.samples for point in points if not point.samples.empty]
     if not sample_pieces:
@@ -79,7 +79,7 @@ def fit_curve(points, experiment, *, z):
             })
     # The engine includes both original targets and each stream's own observed
     # transitions, so blank intervals are not snapped onto sample temperatures.
-    model = CurveLikelihood(streams, targets)
+    model = CurveLikelihood(streams, targets, fit_step_C=fit_step_C)
     estimates = {temperature: model.estimate(temperature, z**2 / 2) for temperature in targets}
     details = {
         "physical_droplets": model.physical_droplets,
@@ -92,6 +92,9 @@ def fit_curve(points, experiment, *, z):
         "confidence_drop": z**2 / 2,
         "uncertainty_coverage": "nominal approximate; not a simultaneous confidence band",
         "unbounded_tail": "no finite point estimate reported",
+        "fit_step_C": fit_step_C,
+        "curve_shape": ("native_temperature_steps" if fit_step_C is None
+                        else "piecewise_linear_cumulative_concentration"),
         "sources": identities,
     }
     return estimates, details
