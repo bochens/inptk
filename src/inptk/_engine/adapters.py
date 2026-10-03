@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import io
 import re
+from collections.abc import Iterable
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -97,14 +99,17 @@ def read_sync(path: str | Path) -> tuple[pd.DataFrame, dict[str, str]]:
     """Read an Icescopy temperature-sync CSV with optional commented preamble."""
 
     preamble = read_preamble(path)
-    df = pd.read_csv(
-        path,
+    return _read_sync_data(path), preamble
+
+
+def _read_sync_data(source):
+    return pd.read_csv(
+        source,
         comment="#",
         dtype={"sample_id": str, "cycle": str, "observation_id": str},
         keep_default_na=False,
         na_values=[""],
     )
-    return df, preamble
 
 
 def read_metadata(
@@ -112,21 +117,33 @@ def read_metadata(
 ) -> tuple[dict[str, str], dict[str, SampleMetadata]]:
     """Read Icescopy commented session/sample metadata from a freeze-count CSV."""
 
+    with Path(path).open("r", encoding="utf-8") as handle:
+        return _read_metadata_lines(handle)
+
+
+def read_icescopy_csv_text(text: str) -> tuple[pd.DataFrame, dict[str, SampleMetadata]]:
+    """Parse CSV text with the same count and metadata rules as file input."""
+    _, metadata = _read_metadata_lines(io.StringIO(text))
+    return _read_sync_data(io.StringIO(text)), metadata
+
+
+def _read_metadata_lines(
+    handle: Iterable[str],
+) -> tuple[dict[str, str], dict[str, SampleMetadata]]:
     session_metadata: dict[str, str] = {}
     sample_rows: dict[str, list[str]] = {}
-    with Path(path).open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.startswith("#"):
-                break
-            body = line[1:].strip()
-            if _is_sample_metadata_row(body):
-                values = _split_csv_metadata_row(body)
-                sample_rows[values[0]] = values[1:]
-                continue
-            if ":" in body:
-                key, value = body.split(":", 1)
-                session_metadata[key.strip()] = value.strip()
-                continue
+    for line in handle:
+        if not line.startswith("#"):
+            break
+        body = line[1:].strip()
+        if _is_sample_metadata_row(body):
+            values = _split_csv_metadata_row(body)
+            sample_rows[values[0]] = values[1:]
+            continue
+        if ":" in body:
+            key, value = body.split(":", 1)
+            session_metadata[key.strip()] = value.strip()
+            continue
 
     metadata_by_sample_id: dict[str, SampleMetadata] = {}
     row_count = max((len(values) for values in sample_rows.values()), default=0)
@@ -139,33 +156,40 @@ def read_metadata(
             or raw_sample_metadata.get("sample_id")
             or str(index)
         )
-        metadata_by_sample_id[sample_id] = SampleMetadata(
-            format_name=session_metadata.get("format_name", ""),
-            file_version=session_metadata.get("file_version", ""),
-            project_name=session_metadata.get("project_name", ""),
-            user_name=session_metadata.get("user_name", ""),
-            institution=session_metadata.get("institution", ""),
-            date=session_metadata.get("analysis_date", session_metadata.get("date", "")),
-            well_volume_uL=_optional_float(
-                raw_sample_metadata.get("well_volume_uL", session_metadata.get("well_volume_uL"))
-            ),
-            reset_temperature_C=_optional_float(session_metadata.get("reset_temperature_C")),
-            sample_id=sample_id,
-            sample_name=raw_sample_metadata.get("sample_name", ""),
-            sample_long_name=raw_sample_metadata.get("sample_long_name", ""),
-            collection_start=raw_sample_metadata.get("collection_start", ""),
-            collection_end=raw_sample_metadata.get("collection_end", ""),
-            sample_type=_normalize_sample_type(raw_sample_metadata.get("sample_type", "other")),
-            dilution=_optional_float(raw_sample_metadata.get("dilution")),
-            air_volume_L=_optional_float(raw_sample_metadata.get("air_volume_L")),
-            filter_fraction_used=_optional_float(raw_sample_metadata.get("filter_fraction_used")),
-            suspension_volume_mL=_optional_float(raw_sample_metadata.get("suspension_volume_mL")),
-            dry_mass_g=_optional_float(raw_sample_metadata.get("dry_mass_g")),
-            total_cells=_optional_int(raw_sample_metadata.get("cell_number")),
-            raw_preamble=session_metadata,
-            raw_sample_metadata=raw_sample_metadata,
+        metadata_by_sample_id[sample_id] = _sample_metadata_from_record(
+            session_metadata, raw_sample_metadata, sample_id
         )
     return session_metadata, metadata_by_sample_id
+
+
+def _sample_metadata_from_record(session_metadata, raw_sample_metadata, sample_id):
+    """Normalize explicitly stored export metadata; never choose analysis roles."""
+    return SampleMetadata(
+        format_name=session_metadata.get("format_name", ""),
+        file_version=session_metadata.get("file_version", ""),
+        project_name=session_metadata.get("project_name", ""),
+        user_name=session_metadata.get("user_name", ""),
+        institution=session_metadata.get("institution", ""),
+        date=session_metadata.get("analysis_date", session_metadata.get("date", "")),
+        well_volume_uL=_optional_float(
+            raw_sample_metadata.get("well_volume_uL", session_metadata.get("well_volume_uL"))
+        ),
+        reset_temperature_C=_optional_float(session_metadata.get("reset_temperature_C")),
+        sample_id=sample_id,
+        sample_name=raw_sample_metadata.get("sample_name", ""),
+        sample_long_name=raw_sample_metadata.get("sample_long_name", ""),
+        collection_start=raw_sample_metadata.get("collection_start", ""),
+        collection_end=raw_sample_metadata.get("collection_end", ""),
+        sample_type=_normalize_sample_type(raw_sample_metadata.get("sample_type", "other")),
+        dilution=_optional_float(raw_sample_metadata.get("dilution")),
+        air_volume_L=_optional_float(raw_sample_metadata.get("air_volume_L")),
+        filter_fraction_used=_optional_float(raw_sample_metadata.get("filter_fraction_used")),
+        suspension_volume_mL=_optional_float(raw_sample_metadata.get("suspension_volume_mL")),
+        dry_mass_g=_optional_float(raw_sample_metadata.get("dry_mass_g")),
+        total_cells=_optional_int(raw_sample_metadata.get("cell_number")),
+        raw_preamble=session_metadata,
+        raw_sample_metadata=raw_sample_metadata,
+    )
 
 
 def read_counts(

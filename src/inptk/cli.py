@@ -52,6 +52,7 @@ def _analysis_input_arguments(parser):
         choices=("native", "icescopy", "saved"),
         default="native",
         help=(
+            "Icescopy input accepts CSV or .icescopy projects. "
             "Saved analyses reuse original observations; processing settings use "
             "this command's arguments, not prior settings"
         ),

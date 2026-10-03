@@ -1,7 +1,7 @@
 INP-toolkit handoff — 2026-10-02
-Goal completed: remove notebook-owned CSV parsing without changing the analysis.
+Goal completed: read CSV or .icescopy archives through the same public importer.
 Repo /Users/C832577250/Project/inptk; branch codex/measurement-results.
-Pre-cleanup checkpoint: e34814d; previous refactor checkpoint: 55851aa.
+Pre-archive checkpoint: 641ed20; pre-cleanup: e34814d; previous refactor: 55851aa.
 No remote push, merge, Icescopy GUI edit, or live background analysis in this task.
 Decisions: one count-selection grid at the beginning; no final regridding or resampled result.
 Spacing: temperature_step_C; optional temperature_start_C / temperature_end_C are exact warm/cold endpoints.
@@ -26,8 +26,8 @@ Both M1 notebooks executed successfully, all 53,286 raw CSV rows preserved; 102 
 Sample_0..4: dilutions 1,13,169,2197,28561; explicit Sample_5 blank; 32 wells each, 50 uL.
 Air conversion 17829.1 L, 10 mL suspension, filter fraction 1 from adjacent OLAF reference.
 Source CSV and reference hashes unchanged. External notebook export disabled.
-Verification: 710 tests passed; one expected invalid-timestamp parsing warning.
-Ruff, mypy (29 files), Bandit, Git whitespace review and executable standard example passed.
+Current verification: 731 tests passed; one expected invalid-timestamp parsing warning.
+Current Ruff, mypy (30 files), archive-module Bandit and Git whitespace review passed.
 Wheel built/installed in temporary directory; installed executable capabilities, blank fit, bounds and CSV passed.
 No known implementation failures remain. Statistical coverage of joint-model intervals is not validated broadly.
 Commands: Research/bin/python; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src OPENBLAS_NUM_THREADS=1.
@@ -37,6 +37,11 @@ Both notebooks call read_icescopy with explicit water_blank_map; no manual Exper
 Removed duplicate reference parsing and unused Icescopy-header diagnostic parsing.
 Cleanup checks: 66 targeted tests, Ruff and mypy passed; both notebooks re-executed successfully.
 All six saved figure PNGs are byte-identical to the pre-cleanup versions; source files unchanged.
-The full suite was not repeated for this import-only cleanup.
+Archive reader: src/inptk/icescopy_input.py; tests/test_icescopy_archive.py.
+Reads only freeze_count_timeseries.csv and optional session.json in memory; no extraction.
+Saved physical metadata is used; grouping and blank choices remain explicit.
+Rejects missing/duplicate counts and saved counts marked as requiring analysis.
+Actual M1 archive matches separate CSV: all 53,286 count rows and physical metadata.
+CLI preview and analysis accept .icescopy with existing --format icescopy.
 Next: integrate explicit choices and direct result plotting in Icescopy using ICESCOPY_HANDOFF.md.
 Do not reread archive image arrays, full notebook outputs, or obsolete image-only diagnostic numbers.

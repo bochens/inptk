@@ -33,7 +33,7 @@ counts = inptk.read_observations("counts.csv")
 fractions = inptk.frozen_fraction(counts)
 ```
 
-For an Icescopy CSV use `format="icescopy"`. Optional `metadata=` can be incomplete
+For an Icescopy CSV or `.icescopy` project use `format="icescopy"`. Optional `metadata=` can be incomplete
 at this stage. Available metadata are retained in the count table's history.
 Missing parent-sample assignments keep measurements separate; they are not
 inferred from names. The concentration readers below still require complete
@@ -657,7 +657,7 @@ inptk analyze raw_counts.csv --format native --metadata measurements.csv \
 Sample/cycle selection retains the associated blank observations and metadata
 without producing blank samples as analysis results. Saved experiments preserve
 the assignment, so `--format saved` uses it directly and rejects an override.
-Raw Icescopy CSV input also accepts `--water-blank-map`. Assign blanks explicitly
+Raw Icescopy CSV or `.icescopy` archive input also accepts `--water-blank-map`. Assign blanks explicitly
 in the analysis dialog or input settings. Short names, long names and text such
 as "water blank" never assign a processing role.
 
@@ -685,9 +685,32 @@ experiment = inptk.read_icescopy(
 result = inptk.analyze_concentration(experiment, output_basis="sampled_air")
 ```
 
+The same reader accepts a saved project directly:
+
+```python
+experiment = inptk.read_icescopy("experiment.icescopy", water_blank_map={"A": ["B"]})
+```
+
+A `.icescopy` file is a ZIP archive. INP-toolkit reads its root
+`freeze_count_timeseries.csv` and the physical metadata saved with that table in
+`session.json`, without extracting files or reading image/brightness data.
+Explicit metadata overrides still take precedence. Grouping and blank assignments
+are never inferred from names or the session's previous blank selection.
+Missing count tables, corrupt archives, and counts marked as needing recalculation
+raise an error. Missing physical metadata can still be previewed, but must be
+provided before concentration calculation.
+
+The CLI uses the same format choice for CSV and project input:
+
+```bash
+inptk preview experiment.icescopy --format icescopy --json
+inptk analyze experiment.icescopy --format icescopy \
+  --water-blank-map '{"A":["B"]}' --temperature-step-C 0.5 --out analysis.inptk
+```
+
 `sample_map` explicitly maps Icescopy measurement labels to original samples.
 Without it, each label remains a separate sample. The importer never guesses
-relationships by stripping numbers from names. Icescopy's header metadata must
+relationships by stripping numbers from names. Icescopy's CSV or saved project metadata must
 provide the droplet volume and dilution, or the reader must receive metadata
 overrides (`metadata=` in Python or `--metadata` on the command line). Overrides
 use Icescopy measurement labels as `sample_id` and `well_volume_uL` for droplet volume.

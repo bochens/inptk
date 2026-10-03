@@ -49,7 +49,13 @@ these rows directly; there is no final grid, interpolation setting, or resampled
 table in the workflow.
 
 Blank inputs are always selected explicitly by the user. Send their selected
-input IDs through `--water-blank-map` for native or raw Icescopy CSV input.
+input IDs through `--water-blank-map` for native or raw Icescopy CSV/project input.
+`read_icescopy()` and CLI `--format icescopy` accept either the exported CSV or
+an `.icescopy` ZIP project. Projects supply the root freeze-count CSV plus saved
+physical metadata from `session.json`. No files are extracted. The reader uses
+the saved exact CSV column labels to locate metadata, but never interprets their
+text to choose a parent sample or blank. Missing counts and stale analysis fail
+explicitly; missing physical metadata remains previewable.
 Short names and long names are display text only; never infer a blank role from them.
 
 Use every row with time, temperature and freezing counts, including rows without

@@ -206,7 +206,7 @@ def _icescopy_overrides(metadata, measurement_ids: set[str]) -> dict[str, dict]:
 
 def _icescopy_observations(
     source, *, sample_map=None, metadata=None, run_id="1", require_metadata: bool
-) -> tuple[pd.DataFrame, list[dict]]:
+) -> tuple[pd.DataFrame, list[dict], dict]:
     """Read an Icescopy export; map measurement labels to original sample IDs.
 
     Without sample_map, every Icescopy measurement is a separate sample. Names
@@ -215,8 +215,9 @@ def _icescopy_observations(
     name; omitted or missing fields retain their values from the export.
     """
     from ._engine.adapters import read_counts as read_export
-    from ._engine.adapters import read_metadata, read_sync, split_metadata_rows
+    from ._engine.adapters import split_metadata_rows
     from ._engine.models import SampleMetadata as ExportMetadata
+    from .icescopy_input import read_icescopy_source
 
     if sample_map is not None and (
         not isinstance(sample_map, Mapping)
@@ -228,11 +229,11 @@ def _icescopy_observations(
     ):
         raise TypeError("sample_map must map non-empty measurement names to sample names")
     header_metadata: dict[str, ExportMetadata]
+    source_info = {"format": "icescopy", "path": None}
     if isinstance(source, pd.DataFrame):
         data, header_metadata = source.copy(deep=True), {}
     else:
-        data, _ = read_sync(source)
-        _, header_metadata = read_metadata(source)
+        data, header_metadata, source_info = read_icescopy_source(source)
     data, _ = split_metadata_rows(data)
     if "cycle" in data:
         missing_cycle = data.cycle.isna() | data.cycle.astype(str).str.strip().eq("")
@@ -301,22 +302,24 @@ def _icescopy_observations(
         raise ValueError("No count observations found")
     if sample_map is not None and set(sample_map) - known:
         raise ValueError(f"Unknown measurements in sample_map: {sorted(set(sample_map) - known)}")
-    return pd.concat(frames, ignore_index=True), list(records.values())
+    return pd.concat(frames, ignore_index=True), list(records.values()), source_info
 
 
 def read_icescopy(
     source, *, sample_map: dict[str, str] | None = None, metadata=None, run_id: str = "1",
     water_blank_map: dict[str, list[str]] | None = None,
 ) -> Experiment:
-    """Read Icescopy counts with the physical metadata required for concentration.
+    """Read an Icescopy CSV, .icescopy project archive, or count DataFrame.
 
     Map exact measurement names to parent samples explicitly. Supplied metadata
     overrides only the named fields; missing values retain export-header values.
     Use read_observations for counts/fractions before physical metadata is ready.
     For raw exports, water_blank_map assigns physical blank sets explicitly.
+    Archives read freeze_count_timeseries.csv and its saved session metadata
+    without extracting files. Explicit metadata overrides still take precedence.
     Every complete count row is retained; an image ID is not required.
     """
-    data, records = _icescopy_observations(
+    data, records, source_info = _icescopy_observations(
         source, sample_map=sample_map, metadata=metadata, run_id=run_id, require_metadata=True
     )
     experiment = read_counts(data, metadata=records, water_blank_map=water_blank_map)
@@ -324,10 +327,7 @@ def read_icescopy(
         experiment.counts,
         experiment.samples,
         experiment.measurements,
-        source={
-            "format": "icescopy",
-            "path": str(source) if isinstance(source, (str, Path)) else None,
-        },
+        source=source_info,
         water_blank_map=experiment.water_blank_map,
     )
 
@@ -344,8 +344,9 @@ def read_observations(
     Concentration calculation still requires a fully validated Experiment.
     """
     provisional = []
+    source_info: dict[str, str | None] = {}
     if format == "icescopy":
-        data, records = _icescopy_observations(
+        data, records, source_info = _icescopy_observations(
             source,
             sample_map=sample_map,
             metadata=metadata,
@@ -431,6 +432,7 @@ def read_observations(
                 "operation": "read_observations",
                 "format": format,
                 "path": str(source) if isinstance(source, (str, Path)) else None,
+                **source_info,
                 "measurement_metadata": records,
                 "provisional_sample_assignments": provisional,
             }
