@@ -1,7 +1,14 @@
 """INP-toolkit: independent analysis of droplet-freezing experiments."""
 
 from .estimation import estimate_concentration
-from .experiment import AnalysisResult, CurveResult, Experiment, MeasurementMetadata, SampleMetadata
+from .experiment import (
+    AnalysisResult,
+    CurveResult,
+    Experiment,
+    MeasurementMetadata,
+    ProcessingResult,
+    SampleMetadata,
+)
 from .io import load, save
 from .processing import (
     cumulative_spectrum,
@@ -11,7 +18,6 @@ from .processing import (
 )
 from .ranges import RangeSuggestions, suggest_temperature_ranges
 from .readers import CSUSpectrum, read_counts, read_csu_csv, read_icescopy, read_observations
-from .resampling import resample_spectrum
 from .tables import (
     CountsTable,
     CumulativeSpectrumTable,
@@ -38,6 +44,7 @@ __all__ = [
     "Experiment",
     "FrozenFractionTable",
     "MeasurementMetadata",
+    "ProcessingResult",
     "RangeSuggestions",
     "SampleMetadata",
     "analyze_concentration",
@@ -53,7 +60,6 @@ __all__ = [
     "read_csu_csv",
     "read_icescopy",
     "read_observations",
-    "resample_spectrum",
     "save",
     "subtract_blanks",
     "suggest_temperature_ranges",

@@ -235,7 +235,7 @@ def finalize_spectrum(
     """Keep nondecreasing concentration in observation order, allowing fitting roundoff.
 
     No temperature sorting, rounding, value adjustment or uncertainty reduction
-    is performed. Segment IDs retain gaps for safe later resampling.
+    is performed. Segment IDs retain gaps for plotting.
     """
     return _final_candidates(spectrum, decrease_policy=decrease_policy).select(used_in_final=True)
 

@@ -236,7 +236,10 @@ def differentiate_spectrum(cumulative: CumulativeSpectrumTable) -> DifferentialS
             previous, following = group.iloc[position], group.iloc[position + 1]
             start, end = float(previous.temperature_C), float(following.temperature_C)
             identity = {name: str(previous[name]) for name in identity_columns}
-            if end >= start:
+            different_segment = (
+                "segment_id" in group and previous.segment_id != following.segment_id
+            )
+            if different_segment or end >= start:
                 omitted.append(
                     {
                         **identity,
@@ -244,7 +247,9 @@ def differentiate_spectrum(cumulative: CumulativeSpectrumTable) -> DifferentialS
                         "to_observation_id": str(following.observation_id),
                         "from_temperature_C": start,
                         "to_temperature_C": end,
-                        "reason": "repeated_temperature" if end == start else "warming",
+                        "reason": "excluded_interval"
+                        if different_segment
+                        else ("repeated_temperature" if end == start else "warming"),
                     }
                 )
                 continue

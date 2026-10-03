@@ -222,6 +222,36 @@ implemented; do not label individual-input intervals as combined intervals.
 Keep edited controls separate from the last calculated result. Provide
 Recalculate, Cancel and Save. Use a new output path for every calculation.
 
+## Persistent processing for interactive clients
+
+Launch `inptk serve` once with stdin/stdout pipes. Send `{"id":ID,"args":[...]}`
+as one JSON line and read one response line carrying the same `id`. The argument
+list is the ordinary CLI command and flags; JSON output is automatic. This keeps
+Python/SciPy and input data alive between operations, without a network service.
+
+Use `--out @fractions` or another named reference to retain a result in memory;
+pass that reference as later input with `--format saved` where that flag applies.
+Release superseded results with `{"id":ID,"release":["@name"]}`. A reference
+cannot be overwritten until released. Closing stdin ends the process and drops
+its in-memory results. `save @result --out result.inptk` writes a retained result
+without recalculating. File outputs remain explicit through ordinary paths.
+Requests are sequential; send current settings after the preceding calculation
+finishes. To cancel a running calculation, SIGINT produces the existing cancelled
+response where handled; terminating the process also discards its references.
+
+`fractions` saves original fractions, `estimate` calculates unfiltered suspension
+concentrations, `convert` changes units, and `finalize` selects final points without
+refitting. `estimate --individual` followed by `differentiate` handles individual
+suspension spectra. `analyze` remains the whole workflow. Each step carries its
+experiment metadata in a saved `ProcessingResult`; no client-owned math is needed.
+Fractions may be saved without complete metadata, then completed at `estimate`.
+
+Use `table INPUT --table cumulative --curve NAME --json` for plot rows, uncertainty,
+columns, dtypes and history. The same command reads counts, frozen fractions,
+excluded points and differential tables. Without `--table` it lists available
+quantities. CSV export supports all these quantities. The initial-grid calculation
+is the only grid operation; the Python resampling utility has been removed.
+
 ## CLI and saved-result contract
 
 Use Qt separate-process support with an executable path and argument list,

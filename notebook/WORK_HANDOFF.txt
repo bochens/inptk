@@ -1,32 +1,39 @@
 INP-toolkit handoff — 2026-10-03
-Goal completed: default automatic Average ranges must produce a monotone curve before final filtering.
+Goal completed: individual CLI steps and fast persistent client processing.
 Repo: /Users/C832577250/Project/inptk; branch codex/measurement-results.
-Pre-edit checkpoint: 51bca3e. No push, merge, Icescopy GUI changes, or source-data edits.
-Key files: src/inptk/range_selection.py, ranges.py, cli.py; tests/test_range_suggestions.py.
-Notebook: notebook/icescopy_freeze_count_to_air_inp_demo.ipynb.
-Docs: README.md, ICESCOPY_HANDOFF.md; examples/standard_workflow.py.
-Automatic limits use blank-corrected concentrations and the actual analysis alignment rules.
-Use least diluted first; end before a decrease or count/coverage failure.
-Next input must begin at or above the preceding retained concentration.
-Try shortening the preceding interval to enable a handoff; otherwise stop and report unused inputs.
-Automatic ranges never overlap; equal-dilution ties follow requested curve input order.
-No concentration values are adjusted. Manual ranges retain their existing behavior.
-Suggestions remain an explicit step; pass their ranges to Average analysis.
-CLI suggest-ranges accepts the same grid step/start/end/method/window arguments as analyze.
-Suggestions and analysis must use the same curves, grid and blank settings.
-Blocks entirely between grid targets do not supply calculation points and are skipped.
-Changing a range can change latest/max/window count selection; recalculate each trial.
-Cycles stay separate; only the chosen cycle supplies handoff boundary temperatures.
-Incomplete proposals stay visible but temperature_ranges_C rejects them; never silently restore full ranges.
-Additional filter-blank spectrum subtraction can change monotonicity after these raw-assay limits.
-Uncertainty intervals do not account for selecting ranges using the observed concentrations.
-M1 notebook uses 0.5 C/latest for suggestions and analysis; plots estimates before final filtering.
-Verified M1: 96 finite Average points, all nondecreasing, one contributor at each point.
-All-in-one workflow retains every finite point of that unfiltered curve; all three plots refreshed.
-Checks: full suite 739 passed before final selected-cycle boundary tightening.
-After final fix: all 31 range tests, Ruff, mypy (31 files), whitespace review and standard example passed.
-Known errors: none. No claim of broad statistical coverage validation.
+Pre-edit checkpoint: 880af43. No push, merge, source-data edits or Icescopy GUI changes.
+Key files: src/inptk/cli.py, cli_steps.py, cli_store.py, experiment.py, io.py.
+Scientific fix: processing.py does not differentiate across finalized exclusion gaps.
+Tests: tests/test_cli_steps.py, tests/test_gui_protocol.py and existing full suite.
+Docs: README.md and ICESCOPY_HANDOFF.md include ordinary CLI and persistent client examples.
+Commands: fractions -> estimate -> convert -> finalize; analyze remains all-in-one.
+estimate accepts the same estimator/grid/blank/range settings and retains unfiltered values.
+estimate --individual -> differentiate computes differential suspension spectra without refitting.
+convert, finalize, differentiate and save reuse completed calculations.
+ProcessingResult carries tables and optional experiment context; save/load supports it.
+Fractions need no physical metadata. Complete missing metadata at estimate --format saved.
+Blank selection remains explicit. Cycles and original observation identities remain separate.
+Saved complete experiments keep their existing metadata/blank assignments; reimport to change them.
+Optional spectrum resampling removed from Python; use the initial count-selection grid.
+table reads any saved scientific quantity, with --json giving rows, dtypes and history.
+export-csv supports counts, fractions, cumulative, excluded and differential tables.
+inptk serve keeps Python and results alive; local stdin/stdout, no network service.
+Send one JSON line: {"id":1,"args":["command","arguments"]}; one JSON reply with same id.
+Use --out @name for memory; --format saved reads it where that option applies.
+Release via {"id":2,"release":["@name"]}; referenced results never overwrite until released.
+save @result --out result.inptk writes an existing result without recalculation.
+Requests run sequentially; EOF exits. Terminating the process loses unsaved memory results.
+Help/version aliases cannot print prose or terminate a client request loop; use capabilities.
+Final checks: 731 tests passed; Ruff, mypy (32 files), Bandit and git diff --check passed.
+One existing pandas timestamp warning in an invalid-timestamp test; no failures.
+Benchmark: 164 raw rows, 3 sample inputs plus blank, 41 temperatures; median of 7 local runs.
+Average direct Python 346.71 ms, persistent client 336.69 ms (timing variation; comparable).
+Conversion 2.06 vs 2.16 ms; final selection 4.16 vs 5.71 ms; one-time startup 353.31 ms.
+Benchmark script: /private/tmp/benchmark_inptk_client.py; no speed claim for expensive MLE fits.
 Commands: Research/bin/python, PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src OPENBLAS_NUM_THREADS=1.
 Quality tools: /private/tmp/inptk-release-soxonxxd/quality/bin; Ruff --no-cache.
-Next: Icescopy integration should pass current dialog temperature settings when suggesting limits.
-Do not reread full notebook JSON, image arrays, or legacy UFOLAF code for this change.
+Saved format remains 4, CLI protocol 2, package 0.4.0; capabilities advertises new commands/kind.
+Previous work: auto Average range selection is monotone and nonoverlapping before final filtering.
+Range suggestions remain explicit; suggestions and analysis must use matching grid/blank settings.
+Known errors: none. Next: connect Icescopy's process dialog to these commands.
+Do not reread full notebook JSON, image arrays or legacy UFOLAF code for CLI changes.

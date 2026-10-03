@@ -5,6 +5,65 @@ ice-nucleating particle (INP) concentrations. It accepts ordinary CSV/Python
 tables and Icescopy exports. The same workflow is available from Python and the
 command line, without importing or installing Icescopy.
 
+## Terminal and client workflows
+
+Use `analyze` for the complete workflow, or run the same calculations separately:
+
+```bash
+inptk fractions counts.csv --metadata measurements.csv --out fractions.inptk
+inptk estimate fractions.inptk --format saved --method average --out estimated.inptk
+inptk convert estimated.inptk --output-basis sampled_air --out air.inptk
+inptk finalize air.inptk --decrease-policy skip_decreases --out final.inptk
+inptk table final.inptk --table cumulative
+inptk export-csv final.inptk --table cumulative --out concentrations.csv
+```
+
+`estimate` retains points before final selection, including decreases. It accepts
+the same method, curves, blank and initial-grid settings as `analyze`. Physical
+metadata and explicit blank assignments are carried between steps; each command
+calls the same Python calculation functions. Existing outputs are not overwritten.
+`fractions` also works without physical metadata. Supply `--metadata` to the
+subsequent `estimate --format saved` command when those values become available.
+For Icescopy data use `--format icescopy`; blank assignments remain explicit via
+`--water-blank-map` when importing complete metadata.
+
+To differentiate individual spectra without fitting them again:
+
+```bash
+inptk estimate fractions.inptk --format saved --individual --out individual.inptk
+inptk differentiate individual.inptk --out differential.inptk
+```
+
+Differentiation currently requires individual suspension spectra. It does not
+bridge excluded segments. Optional spectrum resampling has been removed; choose
+the count-selection grid before estimation.
+
+`table RESULT` lists the available tables. Add `--table counts`, `frozen_fraction`,
+`cumulative`, `excluded`, or `differential` to read a quantity, and `--curve NAME`
+for a named curve. `--json` returns its columns, dtypes, rows, and history for a
+client. `export-csv` supports the same tables. A command without `--json` prints
+human-readable output; the calculations do not depend on that flag.
+
+For interactive clients, start **one** `inptk serve` process and send one JSON
+object per line on stdin. It replies with one JSON object per line on stdout,
+including the request `id`. This is a local process, not a network server.
+
+```json
+{"id":1,"args":["fractions","counts.csv","--metadata","measurements.csv","--out","@fractions"]}
+{"id":2,"args":["estimate","@fractions","--format","saved","--method","average","--out","@estimated"]}
+{"id":3,"args":["table","@estimated","--table","cumulative"]}
+{"id":4,"args":["save","@estimated","--out","estimated.inptk"]}
+{"id":5,"release":["@estimated"]}
+```
+
+An `@name` keeps a result in memory instead of writing a file. Later requests
+reuse its data and imported Python libraries. Release results no longer needed;
+all references disappear when the process exits. Use `save @result --out result.inptk`
+to write a retained result without recalculating. File paths still work in this
+mode. Commands and defaults are identical to terminal use, and responses are
+always JSON. Requests run sequentially; computation-heavy MLE fits retain their
+normal scientific cost. EOF ends the process. Use `capabilities` for discovery.
+
 ## Install
 
 ```bash
@@ -977,7 +1036,8 @@ src/inptk/
   estimation.py     shared concentration estimation for individual and combined curves
   context.py        validate observation and metadata ownership
   settings.py       shared Python and CLI defaults and validation
-  resampling.py     standalone table interpolation utility; not part of analysis
+  cli_steps.py      saved step operations and table access
+  cli_store.py      files or in-memory results for a persistent client
   workflows.py      correction, units, final selection, and full workflow
   results.py        assemble named curves with their sources and exclusions
   io.py             versioned saving/loading of complete analyses

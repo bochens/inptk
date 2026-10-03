@@ -1,4 +1,4 @@
-"""Versioned, portable Experiment/AnalysisResult files; no pickle or executable data."""
+"""Portable experiments, processing steps and analyses; no executable data."""
 
 from __future__ import annotations
 
@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from .experiment import AnalysisResult, CurveResult, Experiment, MeasurementMetadata, SampleMetadata
+from .experiment import (
+    AnalysisResult,
+    CurveResult,
+    Experiment,
+    MeasurementMetadata,
+    ProcessingResult,
+    SampleMetadata,
+)
 from .tables import (
     CountsTable,
     CumulativeSpectrumTable,
@@ -91,10 +98,16 @@ def _experiment_from_payload(payload):
     )
 
 
-def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
+def save(value: Experiment | AnalysisResult | ProcessingResult, path: str | Path) -> None:
     """Save a complete analysis folder. Existing destinations are never overwritten."""
     if isinstance(value, Experiment):
         payload = {"kind": "experiment", "experiment": _experiment_payload(value)}
+    elif isinstance(value, ProcessingResult):
+        payload = {
+            "kind": "processing",
+            "experiment": _experiment_payload(value.experiment) if value.experiment else None,
+            "tables": {name: _table_payload(table) for name, table in value.tables.items()},
+        }
     elif isinstance(value, AnalysisResult):
         payload = {
             "kind": "analysis",
@@ -117,7 +130,7 @@ def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
             "warnings": value.warnings,
         }
     else:
-        raise TypeError("save expects an Experiment or AnalysisResult")
+        raise TypeError("save expects an Experiment, ProcessingResult or AnalysisResult")
     from . import __version__
 
     payload.update(format="inptk", format_version=FORMAT_VERSION, toolkit_version=__version__)
@@ -127,10 +140,19 @@ def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
     (target / "analysis.json").write_text(text + "\n", encoding="utf-8")
 
 
-def load(path: str | Path) -> Experiment | AnalysisResult:
+def load(path: str | Path) -> Experiment | AnalysisResult | ProcessingResult:
     payload = _decode(json.loads((Path(path) / "analysis.json").read_text(encoding="utf-8")))
     if payload.get("format") != "inptk" or payload.get("format_version") != FORMAT_VERSION:
         raise ValueError("Unsupported INP-toolkit file format or version")
+    if payload["kind"] == "processing":
+        return ProcessingResult(
+            tables={name: _table_from_payload(table) for name, table in payload["tables"].items()},
+            experiment=(
+                _experiment_from_payload(payload["experiment"])
+                if payload["experiment"] is not None
+                else None
+            ),
+        )
     experiment = _experiment_from_payload(payload["experiment"])
     if payload["kind"] == "experiment":
         return experiment

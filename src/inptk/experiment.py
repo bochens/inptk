@@ -10,9 +10,11 @@ from typing import Literal
 
 from .tables import (
     CountsTable,
+    CumulativeSpectrumTable,
     CurveSpectrumTable,
     DifferentialSpectrumTable,
     FrozenFractionTable,
+    ScientificTable,
 )
 
 
@@ -319,3 +321,36 @@ class AnalysisResult:
     ) -> None:
         """Export a quantity for all curves or one named curve; never overwrite."""
         self.to_dataframe(table=table, curve_id=curve_id).to_csv(path, index=False, mode="x")
+
+
+@dataclass(frozen=True)
+class ProcessingResult:
+    """Saved tables from one calculation step, with optional experiment context.
+
+    Fractions can be saved before physical metadata is available. Concentration
+    steps retain the experiment so subsequent commands reuse its sample metadata.
+    """
+
+    tables: dict[str, ScientificTable]
+    experiment: Experiment | None = None
+
+    def __post_init__(self):
+        if not isinstance(self.tables, dict) or not self.tables:
+            raise TypeError("ProcessingResult requires a nonempty table dictionary")
+        types = {
+            "counts": CountsTable,
+            "frozen_fraction": FrozenFractionTable,
+            "cumulative": CumulativeSpectrumTable,
+            "excluded": CumulativeSpectrumTable,
+            "differential": DifferentialSpectrumTable,
+        }
+        for name, table in self.tables.items():
+            if name not in types or not isinstance(table, types[name]):
+                raise TypeError(f"Invalid processing table {name!r}")
+        if self.experiment is not None and not isinstance(self.experiment, Experiment):
+            raise TypeError("ProcessingResult experiment must be an Experiment")
+
+    def save(self, path: str | Path) -> None:
+        from .io import save
+
+        save(self, path)
