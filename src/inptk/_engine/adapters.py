@@ -66,6 +66,7 @@ METADATA_ROW_LABELS = {
     "collection_start",
     "collection_end",
     "sample_type",
+    "well_volume_uL",
     "dilution",
     "air_volume_L",
     "filter_fraction_used",
@@ -145,7 +146,9 @@ def read_metadata(
             user_name=session_metadata.get("user_name", ""),
             institution=session_metadata.get("institution", ""),
             date=session_metadata.get("analysis_date", session_metadata.get("date", "")),
-            well_volume_uL=_optional_float(session_metadata.get("well_volume_uL")),
+            well_volume_uL=_optional_float(
+                raw_sample_metadata.get("well_volume_uL", session_metadata.get("well_volume_uL"))
+            ),
             reset_temperature_C=_optional_float(session_metadata.get("reset_temperature_C")),
             sample_id=sample_id,
             sample_name=raw_sample_metadata.get("sample_name", ""),

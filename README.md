@@ -675,6 +675,14 @@ Only supplied, nonmissing fields replace the corresponding header values; unknow
 measurement names are rejected. CLI overrides accept CSV or a JSON array of
 records, for example `[{"sample_id":"Sample_0","well_volume_uL":50}]`.
 
+Per-input volume rows such as `# well_volume_uL,50,100` are read in the same
+input order as `# sample_name,...`; sample and blank volumes may differ. When
+the CSV contains raw counts, explicitly assign `Experiment.water_blank_map`
+before calculating blank-corrected concentrations. A label such as "water blank"
+does not automatically enable correction. See the executed
+[raw CSV blank comparison](notebook/icescopy_raw_blank_comparison.ipynb) for a
+0.5 °C experimental fit with correction on and off.
+
 Partially missing cycle labels are rejected rather than merged into a single
 cycle. Zero-total observations are also rejected: exclude unusable observations
 explicitly and retain the exclusion record, as demonstrated in the notebook.

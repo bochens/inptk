@@ -212,6 +212,27 @@ def test_icescopy_file_preserves_labels_without_inventing_elapsed_seconds(tmp_pa
     )
 
 
+def test_icescopy_reads_individual_sample_and_blank_well_volumes(tmp_path):
+    source = tmp_path / "icescopy.csv"
+    source.write_text(
+        "# sample_name,sample,water\n# dilution,1,1\n# well_volume_uL,50,100\n"
+        "temperature_C,cycle,sample number total,sample number frozen,"
+        "water number total,water number frozen\n-10,0,20,10,20,10\n"
+    )
+    imported = inptk.read_icescopy(source)
+    assert imported.measurements["sample"].droplet_volume_uL == 50
+    assert imported.measurements["water"].droplet_volume_uL == 100
+    paired = inptk.Experiment(
+        counts=imported.counts, samples=imported.samples, measurements=imported.measurements,
+        water_blank_map={"sample": ["water"]},
+    )
+    spectrum = inptk.estimate_concentration(inptk.frozen_fraction(paired), experiment=paired)
+    # Equal frozen fractions at different well volumes do not imply zero sample INP.
+    assert spectrum.to_dataframe().concentration.iloc[0] == pytest.approx(
+        -np.log(.5) / .05 + np.log(.5) / .1, rel=1e-5,
+    )
+
+
 def test_supplied_invalid_timestamps_are_not_replaced_with_row_numbers():
     frame = pd.DataFrame(
         {
