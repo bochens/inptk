@@ -112,6 +112,19 @@ interval endpoints. Points combining several dilutions leave `dilution` blank.
 Outputs must be new paths outside the saved analysis folder. Both CSV exporters
 export the saved analysis temperatures without another grid selection.
 
+To read an existing CSU/OLAF reference for comparison:
+
+```python
+reference = inptk.read_csu_csv("reference.csv")
+reference.table     # temperatures, concentrations, error widths, and units
+reference.metadata  # header fields; volumes use INP-toolkit names and units
+reference.source    # file path, SHA-256, and original header
+```
+
+The reader preserves the supplied results without recalculation. It does not
+assign samples or blanks or automatically apply reference metadata to an
+experiment. Both example notebooks use package readers for CSV ingestion.
+
 ## Work one step at a time
 
 You can run the main calculation as separate steps and stop after any step:

@@ -10,7 +10,7 @@ from .processing import (
     frozen_fraction,
 )
 from .ranges import RangeSuggestions, suggest_temperature_ranges
-from .readers import read_counts, read_icescopy, read_observations
+from .readers import CSUSpectrum, read_counts, read_csu_csv, read_icescopy, read_observations
 from .resampling import resample_spectrum
 from .tables import (
     CountsTable,
@@ -29,6 +29,7 @@ from .workflows import (
 __version__ = "0.4.0"
 __all__ = [
     "AnalysisResult",
+    "CSUSpectrum",
     "CountsTable",
     "CumulativeSpectrumTable",
     "CurveResult",
@@ -49,6 +50,7 @@ __all__ = [
     "frozen_fraction",
     "load",
     "read_counts",
+    "read_csu_csv",
     "read_icescopy",
     "read_observations",
     "resample_spectrum",

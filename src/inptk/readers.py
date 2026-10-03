@@ -1,12 +1,16 @@
-"""Translate ordinary count tables and Icescopy exports into an Experiment."""
+"""Read count experiments and already calculated reference spectra."""
 
 from __future__ import annotations
 
+import csv
+import hashlib
+import io
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .experiment import Experiment, MeasurementMetadata, SampleMetadata
@@ -431,4 +435,89 @@ def read_observations(
                 "provisional_sample_assignments": provisional,
             }
         ],
+    )
+
+
+@dataclass(frozen=True)
+class CSUSpectrum:
+    """An already calculated CSU/OLAF air spectrum and its supplied metadata.
+
+    table uses INP-toolkit column names and error widths, in INP per litre of air.
+    metadata uses standard physical-field names; other header fields remain text.
+    source records the path, file hash, and original header. Reading a reference
+    never assigns sample identities, blank roles, or metadata to an experiment.
+    """
+
+    table: pd.DataFrame
+    metadata: dict
+    source: dict
+
+
+def read_csu_csv(source: str | Path) -> CSUSpectrum:
+    """Read a CSU INPs_L CSV, including OLAF reference results, without recalculation.
+
+    The file contains key=value header lines followed by degC, INPS_L,
+    lower_CI and upper_CI columns. The CI columns are error widths, not endpoints.
+    Missing normalization metadata stays missing; importing a comparison curve
+    does not require air volume. Applying its metadata is an explicit caller choice.
+    """
+    path = Path(source)
+    content = path.read_bytes()
+    lines = content.decode("utf-8-sig").splitlines(keepends=True)
+    header = {}
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        columns = [value.strip() for value in next(csv.reader([line]))]
+        if columns[0] == "degC":
+            break
+        key, separator, value = line.partition("=")
+        if not separator or not key.strip():
+            raise ValueError("CSU CSV requires key=value metadata followed by a degC table")
+        key = key.strip()
+        if key in header:
+            raise ValueError(f"Duplicate CSU metadata field {key!r}")
+        header[key] = value.strip()
+    else:
+        raise ValueError("CSU CSV is missing its degC table header")
+    table = pd.read_csv(io.StringIO("".join(lines[index:])))
+    table.columns = table.columns.str.strip()
+    names = {"degC": "temperature_C", "INPS_L": "concentration",
+             "lower_CI": "lower_error", "upper_CI": "upper_error"}
+    missing = set(names) - set(table.columns)
+    if missing:
+        raise ValueError(f"CSU CSV is missing columns: {sorted(missing)}")
+    table = table.rename(columns=names)
+    for column in names.values():
+        table[column] = pd.to_numeric(table[column], errors="raise")
+    if table.empty or not np.isfinite(table.temperature_C).all():
+        raise ValueError("CSU CSV requires nonempty, finite temperatures")
+    if table[["lower_error", "upper_error"]].lt(0).any().any():
+        raise ValueError("CSU uncertainty columns must be nonnegative error widths")
+    table["basis"] = "sampled_air"
+    table["unit"] = "INP_per_L_air"
+    metadata: dict[str, str | float] = dict(header)
+    for original, standard in {
+        "vol_air_filt": "air_volume_L",
+        "vol_susp": "suspension_volume_mL",
+        "proportion_filter_used": "filter_fraction_used",
+    }.items():
+        if original not in metadata:
+            continue
+        if standard in metadata:
+            raise ValueError(f"Duplicate CSU metadata for {standard!r}")
+        raw = metadata.pop(original)
+        if not raw:
+            continue
+        number = float(raw)
+        if not np.isfinite(number) or number <= 0:
+            raise ValueError(f"CSU {original} must be finite and positive")
+        if standard == "filter_fraction_used" and number > 1:
+            raise ValueError("CSU proportion_filter_used must not exceed 1")
+        metadata[standard] = number
+    return CSUSpectrum(
+        table=table,
+        metadata=metadata,
+        source={"format": "csu", "path": str(path),
+                "sha256": hashlib.sha256(content).hexdigest(), "header": header},
     )

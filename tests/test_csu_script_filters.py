@@ -106,6 +106,11 @@ def test_export_preserves_saved_final_rows_values_and_error_widths(
     np.testing.assert_allclose(actual.INPS_L, expected.concentration)
     np.testing.assert_allclose(actual.lower_CI, expected.lower_error)
     np.testing.assert_allclose(actual.upper_CI, expected.upper_error)
+    imported = inptk.read_csu_csv(output)
+    quantities = ["temperature_C", "concentration", "lower_error", "upper_error"]
+    np.testing.assert_allclose(imported.table[quantities], expected[quantities])
+    assert imported.metadata["air_volume_L"] == 100
+    assert imported.metadata["suspension_volume_mL"] == 5
     assert actual.dilution.tolist() == [1] * len(actual)
     assert [line.split(" = ")[0] for line in header] == list(csu.HEADER_ORDER)
     assert "vol_air_filt = 100.0" in header
