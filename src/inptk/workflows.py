@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, cast
 
 import numpy as np
 import pandas as pd
@@ -144,9 +144,9 @@ def _final_candidates(
     if not isinstance(spectrum, CumulativeSpectrumTable):
         raise TypeError("spectrum must be a cumulative spectrum table")
     data = spectrum.to_dataframe()
-    data["used_in_final"] = False
-    data["final_selection_status"] = "nonfinite"
-    data["segment_id"] = ""
+    used = np.zeros(len(data), dtype=bool)
+    statuses = np.full(len(data), "nonfinite", dtype=object)
+    segments = np.full(len(data), "", dtype=object)
     keys = _curve_columns(data)
     reports, notices = [], []
     for identity, original_rows in data.groupby(keys, sort=False):
@@ -163,6 +163,7 @@ def _final_candidates(
         excluded = []
         retained = 0
         for index, row in rows.iterrows():
+            index = cast(int, index)  # ScientificTable stores rows with a RangeIndex.
             concentration = float(row.concentration) if pd.notna(row.concentration) else np.nan
             if not np.isfinite(concentration):
                 status = "nonfinite"
@@ -177,12 +178,12 @@ def _final_candidates(
                 stopped = True
             else:
                 status = "kept"
-            data.at[index, "final_selection_status"] = status
+            statuses[index] = status
             if status == "kept":
                 if not contiguous:
                     segment += 1
-                data.at[index, "segment_id"] = str(segment)
-                data.at[index, "used_in_final"] = True
+                segments[index] = str(segment)
+                used[index] = True
                 previous, previous_point = concentration, row.get("point_id")
                 retained += 1
                 contiguous = True
@@ -210,6 +211,9 @@ def _final_candidates(
             notices.append(
                 f"{dict(zip(keys, identity, strict=True))}: no finite concentration points remain"
             )
+    data["used_in_final"] = used
+    data["final_selection_status"] = statuses
+    data["segment_id"] = segments
     return type(spectrum)(
         data,
         history=spectrum.history

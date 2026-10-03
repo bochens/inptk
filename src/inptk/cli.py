@@ -25,14 +25,13 @@ from .cli_steps import (
     complete_step_metadata,
     counts_from_step,
     fraction_step,
-    saved_tables,
     select_table,
     table_summary,
     transform_step,
 )
 from .cli_store import ResultStore
 from .experiment import Experiment, ProcessingResult
-from .io import FORMAT_VERSION, _encode, _table_payload
+from .io import FORMAT_VERSION, _encode, _table_frame, _table_payload
 from .settings import DEFAULTS
 from .tables import CountsTable
 
@@ -144,6 +143,11 @@ def build_parser():
     )
     _json_flag(suggest)
     _analysis_input_arguments(suggest)
+    suggest.add_argument(
+        "--summary",
+        action="store_true",
+        help="Return limits and reasons without the per-observation report",
+    )
     suggest.add_argument("--curves", help="JSON object or file selecting named curves and cycles")
     suggest.add_argument(
         "--min-frozen",
@@ -201,6 +205,12 @@ def build_parser():
         "--table", choices=("counts", "frozen_fraction", "cumulative", "excluded", "differential")
     )
     table.add_argument("--curve", help="Select one exact named curve")
+    table.add_argument(
+        "--columns", nargs="+", help="Return only these table columns, in this order"
+    )
+    table.add_argument(
+        "--no-history", action="store_true", help="Omit processing history from JSON"
+    )
     _json_flag(table)
     export = commands.add_parser("export-csv", help="Export a quantity from named saved curves")
     _json_flag(export)
@@ -429,6 +439,16 @@ def _capabilities(parser):
             "transport": "one JSON object per line on stdin/stdout",
             "request": {"id": "request ID", "args": ["command", "arguments"]},
             "memory_reference_prefix": "@",
+            "import": {
+                "id": "request ID",
+                "import": {
+                    "out": "@input",
+                    "counts": "Native count records or an object of column arrays",
+                    "metadata": "Complete measurement metadata records or column arrays",
+                    "water_blank_map": "Optional explicit sample-to-blank mapping",
+                    "run_id": "Optional default run identity",
+                },
+            },
             "release": {"id": "request ID", "release": ["@result"]},
         },
         step_sequence=["fractions", "estimate", "convert", "finalize"],
@@ -654,9 +674,9 @@ def _fraction_input(args, store):
 def _estimate_step(args, store):
     source = store.load(args.input) if args.format == "saved" else None
     experiment = _read_analysis_input(args, store, saved=source)
-    tables = saved_tables(source) if source is not None else {}
+    tables = table_summary(source) if source is not None else {}
     if "frozen_fraction" in tables and getattr(source, "experiment", None) is not None:
-        fractions = tables["frozen_fraction"]
+        fractions = select_table(source, "frozen_fraction")
         if args.sample or args.cycle:
             selected = experiment.counts.to_dataframe()
             fractions = fractions.select(
@@ -710,10 +730,38 @@ def serve_client(parser):
             if set(request) == {"id", "release"}:
                 store.release(request["release"])
                 reply = _response("release", released=request["release"])
-                print(json.dumps(_encode({**reply, "id": request_id}), allow_nan=False), flush=True)
+                print(
+                    json.dumps(
+                        _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
+                    ),
+                    flush=True,
+                )
+                continue
+            if set(request) == {"id", "import"}:
+                try:
+                    experiment = store.import_counts(request["import"])
+                    reply = _response(
+                        "import",
+                        output=request["import"]["out"],
+                        tables=table_summary(experiment),
+                        measurements=list(experiment.measurements),
+                    )
+                    del experiment  # The store alone owns the uploaded experiment.
+                except (ValueError, TypeError, KeyError, OSError, AttributeError) as error:
+                    reply = _response(
+                        "import",
+                        status="error",
+                        error={"code": _error_code(error), "message": str(error)},
+                    )
+                print(
+                    json.dumps(
+                        _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
+                    ),
+                    flush=True,
+                )
                 continue
             if set(request) != {"id", "args"}:
-                raise ValueError("Client request requires id and args, or id and release")
+                raise ValueError("Client request requires id and one of args, import or release")
             args = request["args"]
             if not isinstance(args, list) or not args or any(not isinstance(a, str) for a in args):
                 raise ValueError("args must be a nonempty list of command-line strings")
@@ -724,7 +772,12 @@ def serve_client(parser):
 
             def write_reply(payload, request_id=request_id):
                 print(
-                    json.dumps(_encode({**payload, "id": request_id}), allow_nan=False), flush=True
+                    json.dumps(
+                        _encode({**payload, "id": request_id}),
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
                 )
 
             token = _CLIENT_WRITER.set(write_reply)
@@ -736,7 +789,12 @@ def serve_client(parser):
             reply = _response(
                 None, status="error", error={"code": "invalid_request", "message": str(error)}
             )
-            print(json.dumps(_encode({**reply, "id": request_id}), allow_nan=False), flush=True)
+            print(
+                json.dumps(
+                    _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
+                ),
+                flush=True,
+            )
     return 0
 
 
@@ -780,6 +838,7 @@ def main(argv=None, *, store=None, parser=None):
             proposal = suggest_temperature_ranges(
                 _read_analysis_input(args, store),
                 curves=_json_object(args.curves, "--curves"),
+                include_observations=not args.summary,
                 min_frozen=args.min_frozen,
                 min_unfrozen=args.min_unfrozen,
                 z=args.z,
@@ -798,7 +857,11 @@ def main(argv=None, *, store=None, parser=None):
                     temperature_ranges_C=proposal.temperature_ranges_C if complete else None,
                     inputs=proposal.inputs,
                     settings=proposal.settings,
-                    table=_table_payload(proposal.observations),
+                    **(
+                        {"table": _table_payload(proposal.observations)}
+                        if proposal.observations is not None
+                        else {}
+                    ),
                     warnings=[]
                     if complete
                     else [
@@ -810,8 +873,8 @@ def main(argv=None, *, store=None, parser=None):
         if command == "table":
             value = store.load(args.input)
             if args.table is None:
-                if args.curve:
-                    raise ValueError("--curve requires --table")
+                if args.curve or args.columns is not None or args.no_history:
+                    raise ValueError("--curve, --columns and --no-history require --table")
                 summary = table_summary(value)
                 if json_mode:
                     _print_json(_response(command, tables=summary))
@@ -826,12 +889,14 @@ def main(argv=None, *, store=None, parser=None):
                             command,
                             table_name=args.table,
                             curve_id=args.curve,
-                            table=_table_payload(table),
+                            table=_table_payload(
+                                table, columns=args.columns, include_history=not args.no_history
+                            ),
                             warnings=table.warnings,
                         )
                     )
                 else:
-                    print(table.to_dataframe().to_string(index=False))
+                    print(_table_frame(table, args.columns).to_string(index=False))
             return 0
         if store.exists(args.out):
             raise FileExistsError(f"Output already exists: {args.out}")

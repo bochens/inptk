@@ -43,12 +43,11 @@ def prepare_fraction_analysis(
     """Validate identities and remove blank context only from a disabled analysis view."""
     from .water_blank import analysis_experiment, sample_rows
 
-    validate_fraction_context(fractions, experiment)
+    frame = validate_fraction_context(fractions, experiment)
     view = analysis_experiment(
         experiment,
         water_blank_correction=water_blank_correction,
     )
-    frame = fractions.to_dataframe()
     if any(
         step.get("operation") == "frozen_fraction"
         and step.get("temperature_method") == "window_max_count"
@@ -64,7 +63,7 @@ def prepare_fraction_analysis(
             "warm zero rows are not raw measurements; use original observed counts"
         )
     if view is not experiment:
-        rows = sample_rows(fractions.to_dataframe(), experiment)
+        rows = sample_rows(frame, experiment)
         if rows.empty:
             raise ValueError("No sample observations remain after excluding water-blank sets")
         fractions = FrozenFractionTable(rows, history=fractions.history)

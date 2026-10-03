@@ -378,3 +378,39 @@ def test_report_keeps_observation_identity_with_shuffled_input_rows():
             "measurement_id": "water", "run_id": "R", "cycle_id": "01",
             "observation_id": row.observation_id,
         }]
+
+
+@pytest.mark.parametrize("method", ["latest", "max", "window"])
+@pytest.mark.parametrize("blank", [
+    None, ([0, 0, 1, 1, 2, 2, 3], [-5, -6, -7, -8, -9, -10, -11], 20, 25),
+])
+def test_summary_preserves_ranges_and_reasons_without_report(method, blank, monkeypatch):
+    from inptk import ranges
+
+    data = source(blank=blank)
+    settings = {"temperature_step_C": 1, "temperature_method": method}
+    if method == "window":
+        settings["temperature_window_C"] = 1
+    full = inptk.suggest_temperature_ranges(data, **settings)
+
+    def no_report_alignment(*args, **kwargs):
+        raise AssertionError("A summary must not calculate the per-observation report")
+
+    monkeypatch.setattr(ranges, "align_observations", no_report_alignment)
+    summary = inptk.suggest_temperature_ranges(data, include_observations=False, **settings)
+    assert summary.observations is None
+    assert summary.inputs == full.inputs
+    assert summary.settings == full.settings
+    assert summary.temperature_ranges_C == full.temperature_ranges_C
+
+
+def test_cli_summary_matches_full_report(tmp_path, capsys):
+    data = source()
+    data.save(tmp_path / "source.inptk")
+    args = ["suggest-ranges", str(tmp_path / "source.inptk"), "--format", "saved", "--json"]
+    assert main(args) == 0
+    full = json.loads(capsys.readouterr().out)
+    assert main([*args, "--summary"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    full.pop("table")
+    assert summary == full

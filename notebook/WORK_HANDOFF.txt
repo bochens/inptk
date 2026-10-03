@@ -1,39 +1,42 @@
 INP-toolkit handoff — 2026-10-03
-Goal completed: speed up range suggestions and calculations without changing scientific output.
+Goal: remove avoidable interface/copy/report costs and support a fully in-memory client session.
 Repo: /Users/C832577250/Project/inptk; branch codex/measurement-results.
-Pre-edit checkpoint: ff06961. No Icescopy changes, source-data edits, push or merge.
-User-provided untracked ICESCOPY_PERFORMANCE_HANDOFF.md was read and left untouched/uncommitted.
-Key files: src/inptk/alignment.py, estimation.py, range_selection.py, ranges.py, temperature_selection.py.
-Tests: tests/test_range_suggestions.py and tests/test_temperature_selection.py.
-Reproducible benchmark: examples/benchmark_processing.py; no generated output files.
-Docs: README.md and ICESCOPY_HANDOFF.md include benchmarking and restart guidance.
-Profile showed repeated pandas row conversion/report writes dominating Suggest Range.
-Average already cached repeated count fits; that statistical cache has been retained.
-Aligned points now retain one record conversion for count keys and source provenance.
-Single-sample/blank alignment slices actual source rows instead of reconstructing small frames.
-Range reports use observation-ID lookup and array writes, preserving every original row.
-No-blank reports set status directly without repeating native alignment.
-Grid selection caches support/arrays, retaining latest/max/window rules and tie-breaking.
-Unlimited min_C/max_C boundaries, original count pairs and trajectory checks remain intact.
-No grids, ranges, scientific estimators, confidence limits or public settings changed.
-No rows dropped; no cross-request cache or relaxed numerical precision introduced.
-Benchmark: 6000 rows/input, two sample inputs plus shared blank, 10 wells/input.
-Calculate requests include combined and both individual curves on a 0.5 C grid.
-Medians of 3 direct runs: Suggest Range 7.8672 -> 1.2764 seconds (about 6.2x faster).
-Average 0.6366 -> 0.4857 seconds; MLE 1.4026 -> 1.2738 seconds.
-Single native-row Average run: 20.379 -> 4.564 seconds, all 18000 output curve points retained.
-Measurements exclude import, CLI transport and file I/O; controlled synthetic example only.
-Exact before/after serialized output comparison passed for four full 6000-row actions.
-Another 36 comparisons passed: 96/128-well inputs, unequal volumes, no/shared/asynchronous/cross-run blanks.
-Those comparisons cover native/latest/max/window, explicit unlimited bounds, all output rows and history.
-Final checks: 735 tests passed; Ruff, mypy (32 files), Bandit and git diff --check passed.
-One existing pandas timestamp warning in invalid-timestamp test; no failures.
-Commands: Research/bin/python with PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src OPENBLAS_NUM_THREADS=1.
+Pre-edit checkpoint: 70cbf33. No Icescopy edits, source-data edits, push or merge.
+Pre-existing untracked ICESCOPY_PERFORMANCE_HANDOFF.md remains untouched/uncommitted.
+Key files: src/inptk/cli.py, cli_store.py, cli_steps.py, io.py.
+Calculation housekeeping: context.py, ranges.py, range_selection.py, workflows.py.
+Tests: tests/test_cli_steps.py and tests/test_range_suggestions.py.
+Integration instructions and working JSON examples: ICESCOPY_HANDOFF.md.
+Reproducible no-file benchmarks: examples/benchmark_client.py and benchmark_processing.py.
+serve now accepts id + import with out, native counts, metadata, optional run_id/water_blank_map.
+JSON counts/metadata accept row records or column arrays; standard read_counts validation applies.
+Blank/sample relationships remain explicit. Counts are never inferred from names or pooled cycles.
+Upload once to @input; analyze/estimate from @input to @result; table reads retained results.
+Input metadata or blank assignment edits require a new import; no in-place mutation command.
+Existing commands cover steps, whole analysis, save, export and release; no scientific path duplicated.
+Failed imports do not replace valid inputs; release frees unreferenced experiments during service.
+Client must release superseded results; results can retain their source experiment after input release.
+suggest-ranges --summary / include_observations=False omit only the detailed observation report.
+Range limits, reasons and settings match full reports; selection still computes needed estimates.
+Range planning and diagnostic reports share complete estimates keyed by physical count states.
+table --columns ... --no-history returns requested display data; default full tables remain available.
+Direct named-curve access and table summaries no longer assemble/copy all unrelated result tables.
+Validation copies are reused; final selection writes arrays in bulk with identical decisions.
+Saved format 4 retained; JSON whitespace reduced. No numerical precision changes.
+Exact before/after serialized output comparison passed: large full suggestion, Average, MLE, native Average.
+Full suite: 755 passed, one existing invalid-timestamp pandas warning.
+After adding memory-release regression: final CLI-step suite 26 passed (one extra test).
+Ruff, mypy (32 files), Bandit passed. Handoff's six JSON requests executed successfully.
+Benchmark: 6000 rows/input; two sample inputs plus shared blank; three output curves; 0.5 C.
+Median 3 real subprocess requests: full suggestion 1.349 s/8.65 MB; summary 0.289 s/2.15 KB.
+Average 0.501 s; MLE 1.319 s; plot columns 0.0005 s/5.31 KB; one-time JSON upload 0.044 s.
+Those measurements include JSON exchange and parsing; startup separately 0.349 s.
+Existing file-path boundary example: saved JSON 14.636 -> 8.709 MB; no schema/data deletion.
+MLE profile-confidence fitting remains essential statistical work; no relaxed accuracy or omitted bounds.
+Current Icescopy still passes file paths; toolkit changes alone do not migrate that client.
+Next client work: direct JSON import, named result references, summary suggestions, projected plots.
+Keep unchanged-request caching; coalesce edits; preserve last good result; release old refs after success.
+Research/bin/python; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1.
 Quality tools: /private/tmp/inptk-release-soxonxxd/quality/bin; Ruff --no-cache.
-Installed editable launcher: /Users/C832577250/miniforge3/envs/Research/bin/inptk.
-Restart the existing Icescopy/toolkit process to import updated code; no reinstall required.
-MLE confidence-limit fitting remains a substantial cost; uncertainty math was not altered.
-Earlier CLI work remains: saved steps, serve, memory references, table access, no final resampling.
-Known errors: none. No claim of broad statistical coverage validation or universal speedups.
-Next: use Icescopy with a fresh toolkit process; profile actual slow datasets if needed.
-Do not reread full notebook JSON, image arrays or legacy UFOLAF code for this performance change.
+Editable executable: /Users/C832577250/miniforge3/envs/Research/bin/inptk; restart process after updating.
+Known errors: none. Do not reread full notebooks, image arrays, or legacy UFOLAF for this work.

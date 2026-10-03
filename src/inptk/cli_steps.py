@@ -10,72 +10,100 @@ from .tables import CountsTable, CumulativeSpectrumTable
 from .workflows import _final_candidates, convert_concentration
 
 
-def saved_tables(value):
-    """Expose quantities consistently for whole analyses and intermediate steps."""
+def _table_groups(value):
+    """Describe available tables using references, without collecting their rows."""
     if isinstance(value, Experiment):
-        return {"counts": value.counts}
+        return {"counts": [(None, value.counts)]}
     if isinstance(value, ProcessingResult):
         tables = {"counts": value.experiment.counts} if value.experiment else {}
-        return {**tables, **value.tables}
+        tables.update(value.tables)
+        return {name: [(None, table)] for name, table in tables.items()}
     if not isinstance(value, AnalysisResult):
         raise TypeError("Input must be a saved experiment, processing step or analysis")
-    tables = {"counts": value.counts, "frozen_fraction": value.frozen_fraction}
+    groups = {"counts": [(None, value.counts)], "frozen_fraction": [(None, value.frozen_fraction)]}
     for name in ("cumulative", "excluded", "differential"):
-        parts = []
-        histories = {}
-        table_type = None
-        for curve_id, curve in value.curves.items():
-            table = getattr(curve, name)
-            if table is not None:
-                parts.append(table.to_dataframe().assign(curve_id=curve_id))
-                histories[curve_id] = table.history
-                table_type = type(table)
+        parts = [
+            (curve_id, table)
+            for curve_id, curve in value.curves.items()
+            if (table := getattr(curve, name)) is not None
+        ]
         if parts:
-            history = next(iter(histories.values()))
-            if any(other != history for other in histories.values()):
-                history = [
-                    {
-                        "operation": "collect_curves",
-                        "curve_histories": histories,
-                        "warnings": list(
-                            dict.fromkeys(
-                                warning
-                                for steps in histories.values()
-                                for step in steps
-                                for warning in step.get("warnings", [])
-                            )
-                        ),
-                    }
-                ]
-            tables[name] = table_type(pd.concat(parts, ignore_index=True), history=history)
-    return tables
+            groups[name] = parts
+    return groups
+
+
+def _named_table(curve_id, table):
+    if curve_id is None or "curve_id" in table.columns:
+        return table
+    return type(table)(table.to_dataframe().assign(curve_id=curve_id), history=table.history)
+
+
+def _collect_tables(parts):
+    if len(parts) == 1:
+        return _named_table(*parts[0])
+    histories = {curve_id: table.history for curve_id, table in parts}
+    history = next(iter(histories.values()))
+    if any(other != history for other in histories.values()):
+        history = [
+            {
+                "operation": "collect_curves",
+                "curve_histories": histories,
+                "warnings": list(
+                    dict.fromkeys(
+                        warning
+                        for steps in histories.values()
+                        for step in steps
+                        for warning in step.get("warnings", [])
+                    )
+                ),
+            }
+        ]
+    frames = [table.to_dataframe().assign(curve_id=curve_id) for curve_id, table in parts]
+    return type(parts[0][1])(pd.concat(frames, ignore_index=True), history=history)
+
+
+def saved_tables(value):
+    """Collect all quantities only for operations that need all of them."""
+    return {name: _collect_tables(parts) for name, parts in _table_groups(value).items()}
 
 
 def select_table(value, name, curve=None):
-    tables = saved_tables(value)
-    if name not in tables:
-        raise ValueError(f"Table {name!r} is unavailable; available tables: {list(tables)}")
-    table = tables[name]
-    if curve is not None:
-        if "curve_id" not in table.columns:
-            raise ValueError(f"Table {name!r} has no named curves; omit --curve")
-        names = {
-            str(item)
-            for t in tables.values()
-            if "curve_id" in t.columns
-            for item in t.to_dataframe().curve_id.unique()
-        }
-        if curve not in names:
-            raise ValueError(f"Unknown curve {curve!r}; available curves: {sorted(names)}")
-        table = table.select(curve_id=curve)
-    return table
+    groups = _table_groups(value)
+    if name not in groups:
+        raise ValueError(f"Table {name!r} is unavailable; available tables: {list(groups)}")
+    parts = groups[name]
+    if curve is None:
+        return _collect_tables(parts)
+    if not any(label is not None or "curve_id" in table.columns for label, table in parts):
+        raise ValueError(f"Table {name!r} has no named curves; omit --curve")
+    if isinstance(value, AnalysisResult):
+        if curve not in value.curves:
+            raise ValueError(f"Unknown curve {curve!r}; available curves: {sorted(value.curves)}")
+        for label, table in parts:
+            if label == curve:
+                return _named_table(label, table)
+        # The curve exists but has no table of this quantity, e.g. differential.
+        return _collect_tables(parts).select(curve_id=curve)
+    table = _collect_tables(parts)
+    names = {
+        str(item)
+        for values in groups.values()
+        for _, t in values
+        if "curve_id" in t.columns
+        for item in t.to_dataframe().curve_id.unique()
+    }
+    if curve not in names:
+        raise ValueError(f"Unknown curve {curve!r}; available curves: {sorted(names)}")
+    return table.select(curve_id=curve)
 
 
 def counts_from_step(value):
-    tables = saved_tables(value)
+    groups = _table_groups(value)
     for name in ("counts", "frozen_fraction"):
-        if name in tables:
-            source = tables[name]
+        if name in groups:
+            source = select_table(value, name)
+            if type(source) is CountsTable and "fraction_frozen" not in source.columns:
+                return source
             return CountsTable(
                 source.to_dataframe().drop(columns="fraction_frozen", errors="ignore"),
                 history=source.history,
@@ -110,7 +138,9 @@ def fraction_step(counts, *, experiment=None):
 def transform_step(value, operation, *, basis=None, decrease_policy=None):
     """Convert, select final points, or differentiate without repeating estimation."""
     tables = saved_tables(value)
-    cumulative = select_table(value, "cumulative")
+    if "cumulative" not in tables:
+        raise ValueError("This step requires a cumulative concentration table")
+    cumulative = tables["cumulative"]
     if not isinstance(cumulative, CumulativeSpectrumTable):
         raise TypeError("This step requires a cumulative concentration table")
     experiment = (
@@ -151,11 +181,19 @@ def transform_step(value, operation, *, basis=None, decrease_policy=None):
 
 
 def table_summary(value):
-    return {
-        name: {
-            "type": type(table).__name__,
-            "row_count": len(table),
-            "columns": list(table.columns),
+    """Summarize table references without copying rows or processing histories."""
+    summary = {}
+    for name, parts in _table_groups(value).items():
+        columns = list(
+            dict.fromkeys(
+                column
+                for label, table in parts
+                for column in (*table.columns, *(("curve_id",) if label is not None else ()))
+            )
+        )
+        summary[name] = {
+            "type": type(parts[0][1]).__name__,
+            "row_count": sum(len(table) for _, table in parts),
+            "columns": columns,
         }
-        for name, table in saved_tables(value).items()
-    }
+    return summary

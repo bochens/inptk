@@ -194,6 +194,19 @@ The reader preserves the supplied results without recalculation. It does not
 assign samples or blanks or automatically apply reference metadata to an
 experiment. Both example notebooks use package readers for CSV ingestion.
 
+## Interactive application clients
+
+`inptk serve` keeps observations and results in memory between requests. An
+application can upload native counts and metadata as JSON, calculate using
+`@input`, retain `@result`, and request only the plot columns it needs. No
+intermediate CSV or result file is required. Files are written when explicitly
+saving or exporting. Terminal commands with file inputs remain available.
+
+See [the Icescopy handoff](ICESCOPY_HANDOFF.md#persistent-processing-for-interactive-clients)
+for the JSON request format, reference ownership and client integration steps.
+`examples/benchmark_client.py` measures the complete in-memory exchange, including
+JSON transport; `examples/benchmark_processing.py` measures calculation alone.
+
 ## Work one step at a time
 
 You can run the main calculation as separate steps and stop after any step:
@@ -383,6 +396,11 @@ inptk suggest-ranges observations.csv --metadata metadata.csv \
   --curves curves.json --water-blank-map blanks.json \
   --min-frozen 3 --min-unfrozen 3 --temperature-step-C 0.5 --json
 ```
+
+Use `--summary` when only limits and their reasons are needed. It skips the
+per-observation diagnostic report while retaining the same proposals. In Python,
+`suggest_temperature_ranges(..., include_observations=False)` returns the same
+`inputs` and `settings`, with `observations=None`.
 
 The response includes `inputs`, `settings`, an observation `table`, and
 `temperature_ranges_C`. If any input has no usable interval, `complete` is false

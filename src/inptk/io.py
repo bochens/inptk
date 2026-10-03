@@ -58,14 +58,29 @@ def _decode(value):
     return value
 
 
-def _table_payload(table):
-    return {
+def _table_frame(table, columns=None):
+    frame = table.to_dataframe()
+    if columns is not None:
+        if not columns or len(set(columns)) != len(columns):
+            raise ValueError("Columns must be a nonempty list without duplicates")
+        missing = set(columns) - set(frame.columns)
+        if missing:
+            raise ValueError(f"Unknown table columns: {sorted(missing)}")
+        frame = frame.loc[:, columns]
+    return frame
+
+
+def _table_payload(table, *, columns=None, include_history=True):
+    frame = _table_frame(table, columns)
+    payload = {
         "type": type(table).__name__,
-        "columns": list(table.columns),
-        "dtypes": {name: str(dtype) for name, dtype in table.to_dataframe().dtypes.items()},
-        "rows": table.to_dataframe().to_dict("records"),
-        "history": table.history,
+        "columns": list(frame.columns),
+        "dtypes": {name: str(dtype) for name, dtype in frame.dtypes.items()},
+        "rows": frame.to_dict("records"),
     }
+    if include_history:
+        payload["history"] = table.history
+    return payload
 
 
 def _table_from_payload(payload):
@@ -134,7 +149,7 @@ def save(value: Experiment | AnalysisResult | ProcessingResult, path: str | Path
     from . import __version__
 
     payload.update(format="inptk", format_version=FORMAT_VERSION, toolkit_version=__version__)
-    text = json.dumps(_encode(payload), indent=2, allow_nan=False)
+    text = json.dumps(_encode(payload), separators=(",", ":"), allow_nan=False)
     target = Path(path)
     target.mkdir(parents=True, exist_ok=False)
     (target / "analysis.json").write_text(text + "\n", encoding="utf-8")

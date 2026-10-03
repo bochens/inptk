@@ -1,8 +1,8 @@
 # Icescopy integration handoff
 
 INP-toolkit owns the calculations. Icescopy edits analysis choices, displays
-plots, launches a separately installed `inptk` executable and reads its saved
-results. Python and the CLI use the same functions and defaults. No Icescopy GUI
+plots, and exchanges JSON with a separately installed `inptk` executable.
+Experiments and results can stay in the toolkit process memory. Python and the CLI use the same functions and defaults. No Icescopy GUI
 files have changed in this work.
 
 ## Preferences and the process dialog
@@ -220,40 +220,130 @@ original endpoints survived selection. Combined differential output is not
 implemented; do not label individual-input intervals as combined intervals.
 
 Keep edited controls separate from the last calculated result. Provide
-Recalculate, Cancel and Save. Use a new output path for every calculation.
+Recalculate, Cancel and Save. Use a new in-memory reference for every calculation;
+write a file only when the user saves or exports.
 
 ## Persistent processing for interactive clients
 
-Launch `inptk serve` once with stdin/stdout pipes. Send `{"id":ID,"args":[...]}`
-as one JSON line and read one response line carrying the same `id`. The argument
-list is the ordinary CLI command and flags; JSON output is automatic. This keeps
-Python/SciPy and input data alive between operations, without a network service.
+Launch `inptk serve` once with stdin/stdout pipes. The process owns loaded
+experiments and calculated results until released or the process closes. Send
+one JSON object per line and read one response line carrying the same `id`.
+No network service or temporary CSV is needed. Ordinary terminal commands still
+accept file paths; `serve` also accepts those commands through `args`.
 
-Use `--out @fractions` or another named reference to retain a result in memory;
-pass that reference as later input with `--format saved` where that flag applies.
-Release superseded results with `{"id":ID,"release":["@name"]}`. A reference
-cannot be overwritten until released. Closing stdin ends the process and drops
-its in-memory results. `save @result --out result.inptk` writes a retained result
-without recalculating. File outputs remain explicit through ordinary paths.
-The installed editable package uses the current source, but a running process
-keeps its already imported code. Restart the toolkit process after package updates.
-`examples/benchmark_processing.py` measures calculation time separately from transport.
-Requests are sequential; send current settings after the preceding calculation
-finishes. To cancel a running calculation, SIGINT produces the existing cancelled
-response where handled; terminating the process also discards its references.
+### Upload the observations once
 
-`fractions` saves original fractions, `estimate` calculates unfiltered suspension
-concentrations, `convert` changes units, and `finalize` selects final points without
-refitting. `estimate --individual` followed by `differentiate` handles individual
-suspension spectra. `analyze` remains the whole workflow. Each step carries its
-experiment metadata in a saved `ProcessingResult`; no client-owned math is needed.
-Fractions may be saved without complete metadata, then completed at `estimate`.
+Use the `import` request to transfer native counts and metadata directly. The
+following is expanded for readability; serialize it as one JSON line:
 
-Use `table INPUT --table cumulative --curve NAME --json` for plot rows, uncertainty,
-columns, dtypes and history. The same command reads counts, frozen fractions,
-excluded points and differential tables. Without `--table` it lists available
-quantities. CSV export supports all these quantities. The initial-grid calculation
-is the only grid operation; the Python resampling utility has been removed.
+```json
+{
+  "id": 1,
+  "import": {
+    "out": "@input-1",
+    "counts": {
+      "measurement_id": ["A", "A", "Water", "Water"],
+      "cycle_id": ["0", "0", "0", "0"],
+      "observation_id": ["frame-1", "frame-2", "frame-1", "frame-2"],
+      "time_s": [0, 1, 0, 1],
+      "temperature_C": [-5, -6, -5, -6],
+      "n_total": [32, 32, 16, 16],
+      "n_frozen": [1, 4, 0, 1]
+    },
+    "metadata": [
+      {"measurement_id": "A", "sample_id": "Sample A", "dilution": 1, "droplet_volume_uL": 50},
+      {"measurement_id": "Water", "sample_id": "Blank", "dilution": 1, "droplet_volume_uL": 50}
+    ],
+    "water_blank_map": {"A": ["Water"]},
+    "run_id": "run-1"
+  }
+}
+```
+
+Both `counts` and `metadata` accept records (a list of row objects) or an object
+of equal-length column arrays. Column arrays avoid repeating every field name
+for every observation. These are the standard Python `read_counts` fields and
+validation, not a second scientific importer. Include all valid time/temperature/
+count observations, not only image rows. Carry exact identities and raw counts;
+never infer blanks or groups from short names, long names, or display text.
+Metadata must contain sample identity, dilution and well volume; include the
+normalization metadata when requesting air or soil concentration. Missing cycle
+IDs mean one cycle labelled `1`. Send explicit cycles for Icescopy.
+
+The reply returns the reference, measurement IDs and a small table summary; it
+does not echo the observations. Input validation finishes before the reference
+is created. Failed imports leave existing objects untouched. Metadata or blank
+assignment changes currently require a new import; there is no in-place edit
+command. Method, grid, range and output-curve changes reuse the existing input.
+
+If the input already exists as a CSV or .icescopy file, load it once with
+`fractions PATH --format icescopy ... --out @input-1`. Direct JSON upload avoids
+creating that file when Icescopy already holds the observations in memory.
+
+### Calculate and retrieve plot data
+
+Each example below is a separate request. `--format saved` means an already
+imported experiment or processing result; the `@` reference stays in memory.
+
+```json
+{"id":2,"args":["suggest-ranges","@input-1","--format","saved","--temperature-step-C","0.5","--summary"]}
+{"id":3,"args":["analyze","@input-1","--format","saved","--method","average","--temperature-step-C","0.5","--curves","{\"Sample A\":{\"inputs\":[\"A\"],\"cycle\":\"0\"}}","--out","@result-1"]}
+{"id":4,"args":["table","@result-1","--table","cumulative","--curve","Sample A","--columns","temperature_C","concentration","lower_error","upper_error","--no-history"]}
+{"id":5,"args":["save","@result-1","--out","chosen-result.inptk"]}
+{"id":6,"release":["@result-1","@input-1"]}
+```
+
+Apply accepted suggestions to the next calculation with `--temperature-ranges`.
+Pass the same curves and grid settings to suggestion and calculation requests.
+`--summary` preserves proposed limits, reasons and completeness but omits the
+large per-observation report. Only request the full report when inspecting those
+observations. A projected `table` reply is plot data, not a complete saved
+scientific table. Omit `--columns` and `--no-history` when the full table is needed.
+Always retain units and basis from a full table or include `unit` and `basis` in
+the requested columns. Error columns are distances from the concentration;
+decode tagged nonfinite numbers before plotting. Display warnings from replies.
+
+`fractions`, `estimate`, `convert`, `finalize` and `differentiate` also accept
+references. `estimate` preserves concentration points before final selection;
+`convert` and `finalize` reuse that estimate instead of refitting. Run
+`estimate --individual` before `differentiate`. `analyze` remains the whole
+workflow. Each operation uses the Python package calculations. Without `--table`,
+`table @result` returns available quantities and sizes without copying their rows.
+CSV export accepts `@result` directly; do not write a temporary saved result first.
+
+### Icescopy changes required
+
+1. Keep one toolkit process per analysis session. Discover options using
+   `capabilities`; its `client_mode.import` entry advertises direct JSON upload.
+2. Replace calculation-time CSV export with one import for the current source
+   revision, metadata and explicit blank mapping. Retain its returned reference.
+3. Send calculation settings and `--out @result-N`. Keep the last successful
+   result visible while a new calculation runs; only switch after success.
+4. Read just the required curves/columns using `table`. Request range summaries
+   for the limits controls. Keep current unchanged-request caching in Icescopy.
+5. Save or export from the retained result only on request. Release superseded
+   references after success, including intermediate steps no longer needed.
+6. Keep transport, large JSON parsing and plot preparation off the GUI thread.
+   Reject stale replies using request IDs/source revisions. Plot temperatures
+   low to high without changing the scientific row ordering in stored results.
+
+Requests run sequentially; coalesce obsolete pending edits instead of queueing
+all slider positions. References cannot be overwritten: calculate a fresh name,
+then release the old one. Released inputs can remain alive through retained
+results that reference their experiment; release those results too to reclaim
+memory. There is no hidden growing cache across requests. Closing stdin exits;
+terminating the process cancels work and discards all unsaved references. Restart
+and reimport after a process crash. Preserve the last displayed successful result.
+
+The current Icescopy implementation still uses file paths for calculations; these
+client changes are not applied by an INP-toolkit update alone. Saved format 4 and
+the default full response fields are retained; saved JSON now omits whitespace.
+The installed editable package uses current source, but a running process keeps
+already imported code. Restart it after package updates.
+
+`examples/benchmark_client.py` measures upload, repeated requests and response
+sizes through a real subprocess without writing data files.
+`examples/benchmark_processing.py` measures calculations without transport.
 
 ## CLI and saved-result contract
 

@@ -16,14 +16,14 @@ class RangePlanner:
     rather than slicing an already calculated curve.
     """
 
-    def __init__(self, frame, members, experiment, bases, grid, z):
+    def __init__(self, frame, members, experiment, bases, grid, z, estimates):
         self.frame = frame
         self.members = members
         self.experiment = experiment
         self.bases = bases
         self.grid = grid
         self.z = z
-        self.estimates = {}
+        self.estimates = estimates
         self.trials = {}
         self.outside = float(frame.temperature_C.max()) + 1
 
@@ -46,8 +46,8 @@ class RangePlanner:
                 self.estimates[key] = estimate_point(
                     point.samples, point.blanks, self.experiment, method="average",
                     confidence_drop=self.z**2 / 2,
-                )[0]
-            records.append((float(point.temperature_C), self.estimates[key]))
+                )
+            records.append((float(point.temperature_C), self.estimates[key][0]))
         return records
 
     def interval(self, name, previous=None, cold_limit=None):

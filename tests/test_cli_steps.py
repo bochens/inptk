@@ -388,3 +388,144 @@ def test_save_cached_result_without_recalculation(tmp_path, source, capsys, monk
     assert restored.experiment.water_blank_map == source.water_blank_map
     reply = invoke(capsys, "save", "@fractions", "--out", out, store=store, ok=False)
     assert reply["error"]["code"] == "output_exists"
+
+
+@pytest.mark.parametrize("columns", [False, True])
+def test_json_upload_calculation_and_projection_without_files(source, monkeypatch, capsys, columns):
+    from dataclasses import asdict
+    from io import StringIO
+
+    from inptk import cli_store
+
+    counts = source.counts.to_dataframe()
+    metadata = [
+        {**asdict(source.samples[m.sample_id]), **asdict(m)}
+        for m in source.measurements.values()
+    ]
+    expected = inptk.analyze_concentration(source, method="average")
+    selected = ["temperature_C", "concentration", "lower_error", "upper_error"]
+    payload = {
+        "out": "@input", "counts": counts.to_dict("list" if columns else "records"),
+        "metadata": metadata, "water_blank_map": source.water_blank_map,
+    }
+    requests = [
+        {"id": 1, "import": payload},
+        {"id": 2, "args": ["analyze", "@input", "--format", "saved", "--method", "average",
+                           "--out", "@result"]},
+        {"id": 3, "import": {**payload, "counts": []}},  # No overwrite of a valid input.
+        {"id": 4, "release": ["@input"]},
+        {"id": 5, "args": ["table", "@result", "--table", "cumulative",
+                           "--columns", *selected, "--no-history"]},
+        {"id": 6, "import": {**payload, "out": "@invalid", "metadata": []}},
+        {"id": 7, "args": ["table", "@invalid"]},
+        {"id": 8, "args": ["table", "@result"]},
+    ]
+
+    def no_disk(*args, **kwargs):
+        raise AssertionError("The memory workflow must not read or write saved files")
+
+    monkeypatch.setattr(cli_store, "save", no_disk)
+    monkeypatch.setattr(cli_store, "load", no_disk)
+    monkeypatch.setattr(sys, "stdin", StringIO("\n".join(map(json.dumps, requests)) + "\n"))
+    assert cli.main(["serve"]) == 0
+    captured = capsys.readouterr()
+    assert not captured.err
+    replies = [json.loads(line) for line in captured.out.splitlines()]
+    assert [r["id"] for r in replies] == list(range(1, 9))
+    assert [r["status"] for r in replies] == ["ok", "ok", "error", "ok", "ok", "error",
+                                             "error", "ok"]
+    assert replies[2]["error"]["code"] == "output_exists"
+    projection = replies[4]["table"]
+    assert "history" not in projection
+    assert projection["columns"] == selected
+    assert list(projection["dtypes"]) == selected
+    from inptk.io import _encode
+    assert projection["rows"] == _encode(expected.to_dataframe()[selected].to_dict("records"))
+
+
+def test_direct_curve_selection_and_summary_do_not_materialize_other_tables(source, monkeypatch):
+    from inptk.cli_steps import select_table, table_summary
+    from inptk.tables import ScientificTable
+
+    result = inptk.analyze_concentration(source, method="average", curves={
+        "first": {"inputs": ["001"], "cycle": "01"},
+        "second": {"inputs": ["002"], "cycle": "01"},
+    })
+    expected = result.curves["first"].cumulative
+
+    def no_frame(*args, **kwargs):
+        raise AssertionError("Selecting a curve or summarizing tables must not copy rows")
+
+    monkeypatch.setattr(ScientificTable, "to_dataframe", no_frame)
+    assert select_table(result, "cumulative", "first") is expected
+    summary = table_summary(result)
+    assert summary["counts"]["row_count"] == len(source.counts)
+    assert summary["cumulative"]["row_count"] == sum(
+        len(c.cumulative) for c in result.curves.values()
+    )
+
+
+@pytest.mark.parametrize("flags", [
+    ["--columns", "missing"], ["--columns", "temperature_C", "temperature_C"],
+])
+def test_table_rejects_invalid_projection(source, capsys, flags):
+    store = ResultStore(memory=True)
+    store.save(source, "@input")
+    reply = invoke(capsys, "table", "@input", "--table", "counts", *flags, store=store, ok=False)
+    assert "column" in reply["error"]["message"].lower()
+
+
+@pytest.mark.parametrize("flags", [["--columns", "temperature_C"], ["--no-history"]])
+def test_table_projection_requires_quantity(source, capsys, flags):
+    store = ResultStore(memory=True)
+    store.save(source, "@input")
+    reply = invoke(capsys, "table", "@input", *flags, store=store, ok=False)
+    assert "require --table" in reply["error"]["message"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"out": "disk.inptk"}, {"out": "@"}, {"counts": "counts.csv"},
+    {"counts": {"n_total": 20}}, {"metadata": [1]}, {"unexpected": True},
+])
+def test_upload_rejects_invalid_payload_without_storing(source, changes):
+    from dataclasses import asdict
+
+    store = ResultStore(memory=True)
+    payload = {"out": "@input", "counts": source.counts.to_dataframe().to_dict("list"),
+               "metadata": [{**asdict(source.samples[m.sample_id]), **asdict(m)}
+                            for m in source.measurements.values()]}
+    with pytest.raises((TypeError, ValueError)):
+        store.import_counts({**payload, **changes})
+    assert not store.results
+
+
+
+def test_release_allows_uploaded_experiment_to_be_freed_while_server_runs(monkeypatch, capsys):
+    import gc
+    import weakref
+
+    references = []
+    original = ResultStore.import_counts
+
+    def upload(store, payload):
+        experiment = original(store, payload)
+        references.append(weakref.ref(experiment))
+        return experiment
+
+    def requests():
+        yield json.dumps({"id": 1, "import": {
+            "out": "@input", "counts": {"measurement_id": ["a"],
+                "temperature_C": [-5], "n_total": [20], "n_frozen": [1]},
+            "metadata": [{"measurement_id": "a", "sample_id": "a", "dilution": 1,
+                          "droplet_volume_uL": 50}],
+        }}) + "\n"
+        yield '{"id":2,"release":["@input"]}\n'
+        gc.collect()
+        assert references[0]() is None
+        yield '{"id":3,"args":["capabilities"]}\n'
+
+    monkeypatch.setattr(ResultStore, "import_counts", upload)
+    monkeypatch.setattr(sys, "stdin", requests())
+    assert cli.main(["serve"]) == 0
+    replies = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [reply["status"] for reply in replies] == ["ok"] * 3
