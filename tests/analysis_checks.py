@@ -26,15 +26,6 @@ def all_points(result):
     )
 
 
-def sampled(result):
-    if all(curve.resampled is None for curve in result.curves.values()):
-        return None
-    return inptk.CurveSpectrumTable(
-        result.to_dataframe(table="resampled"),
-        history=next(iter(result.curves.values())).resampled.history,
-    )
-
-
 def selected_fractions(result):
     keys = ("measurement_id", "run_id", "cycle_id")
     members = {
@@ -74,6 +65,12 @@ def input_spectra(result):
         selected_fractions(result),
         experiment=result.experiment,
         temperature_ranges_C=result.settings["temperature_ranges_C"],
+        temperature_step_C=result.settings["temperature_step_C"],
+        temperature_start_C=result.settings["temperature_start_C"],
+        temperature_end_C=result.settings["temperature_end_C"],
+        temperature_method=result.settings["temperature_method"],
+        temperature_window_C=result.settings["temperature_window_C"],
+        fit_step_C=result.settings["fit_step_C"],
         z=result.settings["z"],
         method=result.settings["estimation_method"],
         water_blank_correction=result.settings["water_blank_correction"],
@@ -88,6 +85,12 @@ def fit_estimates(result):
         method=result.settings["estimation_method"],
         z=result.settings["z"],
         temperature_ranges_C=result.settings["temperature_ranges_C"],
+        temperature_step_C=result.settings["temperature_step_C"],
+        temperature_start_C=result.settings["temperature_start_C"],
+        temperature_end_C=result.settings["temperature_end_C"],
+        temperature_method=result.settings["temperature_method"],
+        temperature_window_C=result.settings["temperature_window_C"],
+        fit_step_C=result.settings["fit_step_C"],
         water_blank_correction=result.settings["water_blank_correction"],
     )
 
@@ -108,7 +111,6 @@ def quantity_for_check(result, name):
         "final_candidates": all_points,
         "combined": fit_estimates,
         "per_dilution": input_spectra,
-        "resampled": sampled,
         "differential": intervals,
     }
     return result.frozen_fraction if name == "frozen_fraction" else functions[name](result)

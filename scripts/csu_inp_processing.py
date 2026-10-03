@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument(
             f"--{name}", help=f"Exact saved {name}_id; required when selection is ambiguous"
         )
-    parser.add_argument("--table", choices=("cumulative", "resampled"), default="cumulative")
+    parser.add_argument("--table", choices=("cumulative",), default="cumulative")
     parser.add_argument(
         "--header",
         action="append",

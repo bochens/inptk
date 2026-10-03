@@ -9,7 +9,7 @@ files have changed in this work.
 
 Preferences → INP toolkit should contain an executable chooser, Browse, Test
 connection, detected version and connection status. Test with `inptk capabilities`.
-INP-toolkit **0.4.0** uses CLI protocol **2** and saved format **3**. Other formats must
+INP-toolkit **0.4.0** uses CLI protocol **2** and saved format **4**. Other formats must
 be rejected explicitly. There are no compatibility flags or old-format loaders.
 
 Preferences supply starting values. The process dialog records the choices used
@@ -20,17 +20,16 @@ for each analysis; changing Preferences must not change a saved result.
 | Executable | Show connection failures | Executable path and connection test |
 | `curves` | Name each output and select its physical inputs and cycle | Never store session input names globally |
 | `method` | MLE or Average | Initial `mle` |
-| `fit_step_C` | MLE curve spacing and reporting grid; e.g. 0.5 °C | Initial unset; hide for Average |
+| `fit_step_C` | MLE curve shape spacing; e.g. 0.5 °C | Initial unset; hide for Average |
 | `temperature_ranges_C` | Inclusive cold/warm limits for each input | Never store input-specific ranges globally |
 | `temperature_step_C` | Optional grid for selecting counts before calculation | Initial off; offer 0.5 °C |
+| `temperature_start_C` / `temperature_end_C` | Exact warm/cold grid endpoints, or blank to use data limits | Initial blank; do not round endpoints |
 | `temperature_method` | Latest warmer, maximum warmer fraction, or centered window | Initial `latest` |
 | `temperature_window_C` | Full window width, shown and required only for `window` | Optional initial width |
 | `water_blank_map` | Assign raw blank sets to inputs | Never store session assignments globally |
 | `water_blank_correction` | Apply blank correction checkbox, keeping assignments when off | Initial on; no map means no correction |
 | `output_basis` | Suspension, sampled air or dry soil with required metadata | Avoid assuming one basis for every sample |
 | `decrease_policy` | Stop at first decrease or skip decreases | Initial `stop_at_decrease` |
-| `output_step_C` | Optional final grid spacing | Initial off |
-| `output_method` | Sample or interpolate the final curve | Initial `sample` |
 | `z` | Advanced uncertainty setting | Initial 1.96, nominal 95% bounds |
 | `differential` | Optional intervals for individual suspension curves | Initial off |
 
@@ -40,9 +39,14 @@ background constrained to increase or stay constant during cooling. Average take
 an equal-weight mean of eligible concentration estimates at each temperature.
 Both retain blank uncertainty when raw sample and blank counts are supplied.
 Average uses conservative bounds that allow shared blank uncertainty.
-`--fit-step-C 0.5` fits every selected input row and evaluates concentration and
-profile bounds on that grid. It does not thin or round the input counts.
-It is separate from optional count selection and later display resampling.
+`--temperature-step-C 0.5` selects counts once at the beginning. Grid start/end
+are optional (`--temperature-start-C`, `--temperature-end-C`); unset endpoints
+use selected inputs' measured warmest/coldest values, without rounding. Both
+endpoints are included, so the final interval can be shorter than the spacing.
+`--fit-step-C 0.5` controls MLE curve shape independently. Concentration and
+profile bounds are reported at the selected count temperatures. Plot and export
+these rows directly; there is no final grid, interpolation setting, or resampled
+table in the workflow.
 
 Blank inputs are always selected explicitly by the user. Send their selected
 input IDs through `--water-blank-map` for native or raw Icescopy CSV input.
@@ -172,11 +176,10 @@ guarantee a monotone Average curve when contributors change.
 Without a count-selection grid, use original counts and temperatures. Matching observations retain their native
 sequence. Alignment uses the latest observation at or warmer than the target
 only where matching is needed. Native order follows observation time or original
-row order. Independent streams use warm-to-cold target order. Sampling or
-interpolation happens afterward and is a separate view.
-For MLE, the complete curve is fitted before any sampling; changing the display
-grid cannot change the fit or its uncertainty. Bounds are nominal approximate
-pointwise profile intervals of the full curve likelihood, not simultaneous bands.
+row order. Independent streams use warm-to-cold target order. With a grid,
+select counts before estimation and display the calculated temperatures directly.
+There is no final regridding. MLE bounds are nominal approximate pointwise
+profile intervals of the full curve likelihood, not simultaneous bands.
 
 Show retained `cumulative` points normally and `excluded` points faintly with
 reasons. `stop_at_decrease` excludes the first decrease and all later points;
@@ -237,9 +240,9 @@ saved_format_version, command, status and warnings. Analyze replies include
 output, reusable settings, observation_tables and a curves dictionary. Each
 curve entry contains curve_id, kind, sources and table types/row counts.
 
-Saved `analysis.json` format 3 contains experiment, frozen_fraction, curves,
+Saved `analysis.json` format 4 contains experiment, frozen_fraction, curves,
 settings, history and warnings. Each curves[name] contains curve_id, sources and
-its tables: cumulative, excluded, and optional resampled/differential. Tables
+its tables: cumulative, excluded, and optional differential. Tables
 contain type, columns, dtypes, rows and history. There are no stage-based result
 fields. The whole original experiment, including unused observations, is retained.
 
@@ -250,7 +253,7 @@ alignment. lower_error and upper_error are **widths**, not interval endpoints:
 subtract/add them to concentration. Preserve unit, basis and quality flags.
 Nonfinite numbers use objects such as {"$nonfinite":"inf"}.
 
-CSV export defaults to cumulative. Select --table resampled or --table excluded
+CSV export defaults to cumulative. Select --table excluded
 explicitly. Omitting --curve exports all curves, retaining curve_id labels.
 The CSU helper also selects --curve and formats saved sampled-air concentrations;
 it performs no separate calculation or normalization.

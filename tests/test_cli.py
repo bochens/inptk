@@ -143,8 +143,8 @@ def test_cli_does_not_offer_synthetic_window_counts_for_concentration():
     assert process.returncode == 0
     assert "--temperature-ranges" in process.stdout
     assert "--curves" in process.stdout
-    assert "--output-step-C" in process.stdout
-    assert "--output-method {sample,interpolate}" in process.stdout
+    assert "--temperature-step-C" in process.stdout
+    assert "--output-method" not in process.stdout
     assert "--temperature-method {latest,max,window}" in process.stdout
     assert "--temperature-step-C" in process.stdout
     assert "--temperature-window-C" in process.stdout

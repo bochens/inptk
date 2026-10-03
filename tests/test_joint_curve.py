@@ -223,25 +223,13 @@ def test_invalid_fitting_grid_steps_are_rejected(step):
         CurveLikelihood([stream([0, 4])], [-5, -6], fit_step_C=step)
 
 
-def test_output_grid_evaluates_same_fit_without_resampling_observed_counts():
-    from inptk.alignment import align_observations
-    from inptk.curve_fit import fit_curve
-    from inptk.methods import resolve_curves
-
-    data = experiment([("A", 20, [1, 5, 12], 1, 50), ("W", 20, [0, 1, 3], 1, 50)],
-                      blanks={"A": ["W"]})
-    frame = data.counts.to_dataframe()
-    members = next(iter(resolve_curves(None, data, frame).values()))["members"]
-    points = align_observations(frame, members, water_blank_map=data.water_blank_map,
-                                temperature_ranges_C=None)
-    original, original_details = fit_curve(points, data, z=1.96, fit_step_C=.5)
-    gridded, details = fit_curve(points, data, z=1.96, fit_step_C=.5, output_step_C=.5)
-    assert list(gridded) == [-5, -5.5, -6, -6.5, -7]
-    assert details["sources"] == original_details["sources"]
-    assert details["physical_droplets"] == 40
-    assert details["observation_count"] == 6
-    for temperature, values in original.items():
-        np.testing.assert_allclose(gridded[temperature], values, rtol=1e-7)
+def test_fitting_resolution_does_not_choose_output_temperatures():
+    data = experiment([("A", 20, [1, 5, 12], 1, 50)])
+    result = inptk.analyze_concentration(data, fit_step_C=.5)
+    assert result.to_dataframe().temperature_C.tolist() == [-5, -6, -7]
+    gridded = inptk.analyze_concentration(data, temperature_step_C=.5, fit_step_C=.5)
+    assert gridded.to_dataframe().temperature_C.tolist() == [-5, -5.5, -6, -6.5, -7]
+    pd.testing.assert_frame_equal(result.counts.to_dataframe(), gridded.counts.to_dataframe())
 
 
 def test_public_grid_fit_matches_complete_likelihood_and_profile_at_output_targets(tmp_path):
@@ -257,9 +245,11 @@ def test_public_grid_fit_matches_complete_likelihood_and_profile_at_output_targe
                             water_blank_map=data.water_blank_map)
     members = next(iter(resolve_curves(None, data, frame).values()))["members"]
     points = align_observations(frame, members, water_blank_map=data.water_blank_map,
-                                temperature_ranges_C=None)
-    expected, details = fit_curve(points, data, z=1.96, fit_step_C=.5, output_step_C=.5)
-    result = inptk.analyze_concentration(data, fit_step_C=.5, differential=True)
+                                temperature_ranges_C=None, temperature_step_C=.5)
+    expected, details = fit_curve(points, data, z=1.96, fit_step_C=.5)
+    result = inptk.analyze_concentration(
+        data, fit_step_C=.5, temperature_step_C=.5, differential=True,
+    )
     actual = result.to_dataframe().set_index("temperature_C")
     assert actual.index.tolist() == list(expected)
     for temperature, estimate in expected.items():
@@ -271,7 +261,7 @@ def test_public_grid_fit_matches_complete_likelihood_and_profile_at_output_targe
     pd.testing.assert_frame_equal(result.counts.to_dataframe(), frame)
     assert result.settings["fit_step_C"] == .5
     individual = inptk.cumulative_spectrum(
-        inptk.frozen_fraction(data), experiment=data, fit_step_C=.5
+        inptk.frozen_fraction(data), experiment=data, fit_step_C=.5, temperature_step_C=.5
     )
     np.testing.assert_allclose(individual.to_dataframe().concentration, actual.concentration)
     inptk.save(result, tmp_path / "fit.inptk")

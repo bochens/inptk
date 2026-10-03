@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from analysis_checks import all_points, retained, sampled
+from analysis_checks import all_points, retained
 
 import inptk
 
@@ -63,8 +63,8 @@ def test_cli_matches_python_and_preserves_cycle_ids(tmp_path, sample_id):
         restored.settings["observation_processing"]
         == "native; latest warmer alignment only where required"
     )
-    assert restored.settings["output_step_C"] is None
-    assert sampled(restored) is None
+    assert restored.settings["temperature_step_C"] is None
+    assert not hasattr(next(iter(restored.curves.values())), "resampled")
     assert restored.settings["decrease_policy"] == "stop_at_decrease"
     payload = json.loads((tmp_path / "result" / "analysis.json").read_text())
     assert payload["toolkit_version"] == inptk.__version__

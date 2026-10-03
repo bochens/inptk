@@ -3,22 +3,11 @@
 from __future__ import annotations
 
 import json
-from numbers import Real
 
 import numpy as np
 import pandas as pd
 
 from ._engine.curve_likelihood import CurveLikelihood, FreezingSeries
-from .resampling import _grid
-
-
-def validate_fit_step(step, *, method):
-    """Reject ignored or invalid fitting resolutions before doing any analysis."""
-    if step is not None:
-        if isinstance(step, bool) or not isinstance(step, Real) or not np.isfinite(step) or step <= 0:
-            raise ValueError("fit_step_C must be finite and positive")
-        if method != "mle":
-            raise ValueError("fit_step_C applies only to method='mle'")
 
 
 def _trajectory(rows, *, name):
@@ -66,12 +55,8 @@ def _trajectory(rows, *, name):
     return selected.iloc[keep], len(rows)
 
 
-def fit_curve(points, experiment, *, z, fit_step_C=None, output_step_C=None):
-    """Fit original streams, then evaluate estimates and bounds at requested spacing."""
-    if output_step_C is not None and (
-        isinstance(output_step_C, bool) or not np.isfinite(output_step_C) or output_step_C <= 0
-    ):
-        raise ValueError("output_step_C must be finite and positive")
+def fit_curve(points, experiment, *, z, fit_step_C=None):
+    """Fit selected streams and evaluate estimates and bounds at their temperatures."""
     sample_pieces = [point.samples for point in points if not point.samples.empty]
     if not sample_pieces:
         return {}, {"physical_droplets": 0, "observation_count": 0}
@@ -108,12 +93,7 @@ def fit_curve(points, experiment, *, z, fit_step_C=None, output_step_C=None):
     # The engine includes both original targets and each stream's own observed
     # transitions, so blank intervals are not snapped onto sample temperatures.
     model = CurveLikelihood(streams, targets, fit_step_C=fit_step_C)
-    output_temperatures = (
-        targets if output_step_C is None else _grid(pd.Series(targets), output_step_C)
-    )
-    estimates = {
-        temperature: model.estimate(temperature, z**2 / 2) for temperature in output_temperatures
-    }
+    estimates = {temperature: model.estimate(temperature, z**2 / 2) for temperature in targets}
     details = {
         "physical_droplets": model.physical_droplets,
         "observation_count": observation_count,
@@ -130,7 +110,6 @@ def fit_curve(points, experiment, *, z, fit_step_C=None, output_step_C=None):
         "uncertainty_coverage": "nominal approximate; not a simultaneous confidence band",
         "unbounded_tail": "no finite point estimate reported",
         "fit_step_C": fit_step_C,
-        "output_step_C": output_step_C,
         "curve_shape": ("native_temperature_steps" if fit_step_C is None
                         else "piecewise_linear_cumulative_concentration"),
         "sources": identities,

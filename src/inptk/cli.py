@@ -20,6 +20,7 @@ from . import (
 )
 from .experiment import AnalysisResult, Experiment
 from .io import FORMAT_VERSION, _encode, _table_payload
+from .settings import DEFAULTS
 from .tables import CountsTable
 
 CLI_PROTOCOL_VERSION = 2
@@ -106,7 +107,7 @@ def build_parser():
     analyze.add_argument(
         "--method",
         choices=("mle", "average"),
-        default="mle",
+        default=DEFAULTS.method,
         help="Fit one monotone freezing curve (mle) or average estimates at each temperature",
     )
     analyze.add_argument(
@@ -114,40 +115,44 @@ def build_parser():
         help="JSON object or file mapping measurement IDs to inclusive min_C/max_C limits",
     )
     analyze.add_argument(
-        "--output-basis", choices=("suspension", "sampled_air", "dry_soil"), default="suspension"
+        "--output-basis", choices=("suspension", "sampled_air", "dry_soil"),
+        default=DEFAULTS.output_basis
     )
     analyze.add_argument(
         "--curves",
         help="JSON object or file mapping curve names to inputs lists and optional cycle labels",
     )
     analyze.add_argument(
-        "--output-step-C",
-        type=float,
-        help="Optional temperature spacing applied only to the final result",
-    )
-    analyze.add_argument(
         "--temperature-step-C", type=float,
         help="Optional count-selection grid spacing before estimation and blank correction",
     )
     analyze.add_argument(
-        "--temperature-method", choices=("latest", "max", "window"), default="latest",
+        "--temperature-start-C", type=float, default=DEFAULTS.temperature_start_C,
+        help="Warm grid endpoint; defaults to the warmest selected input temperature",
+    )
+    analyze.add_argument(
+        "--temperature-end-C", type=float, default=DEFAULTS.temperature_end_C,
+        help="Cold grid endpoint; defaults to the coldest selected input temperature",
+    )
+    analyze.add_argument(
+        "--temperature-method", choices=("latest", "max", "window"),
+        default=DEFAULTS.temperature_method,
         help="Select latest warmer counts, maximum warmer fraction, or maximum count in a window",
     )
     analyze.add_argument(
         "--temperature-window-C", type=float,
         help="Full centered window width in degrees C; required only for window",
     )
-    analyze.add_argument("--output-method", choices=("sample", "interpolate"), default="sample")
     analyze.add_argument(
         "--fit-step-C", type=float,
-        help="MLE curve spacing (e.g. 0.5 C); fits unchanged sample/blank input temperatures",
+        help="MLE curve shape spacing (e.g. 0.5 C); does not choose output temperatures",
     )
-    analyze.add_argument("--z", type=float, default=1.96)
+    analyze.add_argument("--z", type=float, default=DEFAULTS.z)
     analyze.add_argument("--differential", action="store_true")
     analyze.add_argument(
         "--decrease-policy",
         choices=("stop_at_decrease", "skip_decreases"),
-        default="stop_at_decrease",
+        default=DEFAULTS.decrease_policy,
         help="Select final cumulative points without changing calculated values",
     )
     suggest = commands.add_parser(
@@ -160,14 +165,14 @@ def build_parser():
                          help="Minimum frozen sample wells after the first dilution (default: 3)")
     suggest.add_argument("--min-unfrozen", type=int, default=3,
                          help="Minimum liquid sample wells (default: 3)")
-    suggest.add_argument("--z", type=float, default=1.96)
+    suggest.add_argument("--z", type=float, default=DEFAULTS.z)
     export = commands.add_parser("export-csv", help="Export a quantity from named saved curves")
     _json_flag(export)
     export.add_argument("input")
     export.add_argument("--out", required=True)
     export.add_argument("--curve", help="Export one exact curve name; otherwise export all curves")
     export.add_argument(
-        "--table", choices=("cumulative", "resampled", "excluded"), default="cumulative"
+        "--table", choices=("cumulative", "excluded"), default="cumulative"
     )
     return parser
 
@@ -295,13 +300,13 @@ def _capabilities(parser):
         "capabilities",
         commands=commands,
         observation_tables=["counts", "frozen_fraction"],
-        curve_tables=["cumulative", "excluded", "differential", "resampled"],
+        curve_tables=["cumulative", "excluded", "differential"],
         estimation_methods={
             "mle": {
                 "fit": "joint_monotone_first_freezing_curve",
                 "input": "fixed well totals and cumulative first-freezing counts per cycle",
                 "uncertainty": "pointwise profile bounds from the complete curve likelihood",
-                "output_order": "unique original temperatures, warm to cold",
+                "output_order": "selected analysis temperatures, warm to cold",
             },
             "average": {
                 "fit": "equal-weight concentration mean at each temperature",
@@ -518,12 +523,12 @@ def main(argv=None):
             fit_step_C=args.fit_step_C,
             temperature_ranges_C=temperature_ranges,
             temperature_step_C=args.temperature_step_C,
+            temperature_start_C=args.temperature_start_C,
+            temperature_end_C=args.temperature_end_C,
             temperature_method=args.temperature_method,
             temperature_window_C=args.temperature_window_C,
             curves=curves,
             output_basis=args.output_basis,
-            output_step_C=args.output_step_C,
-            output_method=args.output_method,
             z=args.z,
             differential=args.differential,
             water_blank_correction=not args.no_water_blank_correction,
@@ -555,7 +560,6 @@ def main(argv=None):
                                     "cumulative",
                                     "excluded",
                                     "differential",
-                                    "resampled",
                                 )
                                 if (table := getattr(curve, quantity)) is not None
                             },

@@ -18,7 +18,7 @@ from .tables import (
     FrozenFractionTable,
 )
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 TABLE_TYPES = {
     cls.__name__: cls
     for cls in (
@@ -106,7 +106,7 @@ def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
                     "sources": curve.sources,
                     "tables": {
                         quantity: _table_payload(table)
-                        for quantity in ("cumulative", "excluded", "differential", "resampled")
+                        for quantity in ("cumulative", "excluded", "differential")
                         if (table := getattr(curve, quantity)) is not None
                     },
                 }

@@ -2,28 +2,23 @@
 
 from __future__ import annotations
 
-import json
 from typing import Literal, TypeVar
 
 import numpy as np
 import pandas as pd
 
-from .alignment import align_observations
+from .estimation import estimate_concentration
 from .experiment import AnalysisResult, Experiment, SampleMetadata
 from .methods import (
-    curve_specifications,
     resolve_curves,
-    validate_combination_method,
-    validate_temperature_ranges,
 )
 from .processing import (
-    differential_spectrum,
+    _individual_spectra,
+    differentiate_spectrum,
     frozen_fraction,
-    prepare_fraction_analysis,
 )
-from .resampling import resample_spectrum
-from .tables import UNITS, CumulativeSpectrumTable, CurveSpectrumTable, FrozenFractionTable
-from .water_blank import estimate_point, sample_rows
+from .settings import DEFAULTS, AnalysisSettings, validate_decrease_policy
+from .tables import UNITS, CumulativeSpectrumTable, CurveSpectrumTable
 
 SpectrumT = TypeVar("SpectrumT", bound=CumulativeSpectrumTable)
 
@@ -139,263 +134,13 @@ def subtract_blanks(
     )
 
 
-def _state_key(point) -> tuple:
-    columns = ["measurement_id", "run_id", "cycle_id", "n_frozen", "n_total"]
-    return tuple(
-        tuple(sorted(frame[columns].itertuples(index=False, name=None)))
-        for frame in (point.samples, point.blanks)
-    )
-
-
-def _sources(point) -> list[dict]:
-    records = []
-    for role, frame in (("sample", point.samples), ("blank", point.blanks)):
-        for row in frame.to_dict("records"):
-            item: dict[str, object] = {
-                key: str(row[key])
-                for key in ("measurement_id", "run_id", "cycle_id", "observation_id")
-            }
-            item.update(
-                role=role,
-                observed_temperature_C=float(row["temperature_C"]),
-                alignment=row.get("temperature_selection", "exact"
-                                  if row["temperature_C"] == point.temperature_C else "latest"),
-            )
-            if "fit_temperature_C" in row:
-                item["selected_temperature_C"] = float(row["fit_temperature_C"])
-            if "time_s" in row and pd.notna(row["time_s"]):
-                item["time_s"] = float(row["time_s"])
-            records.append(item)
-    return records
-
-
-def estimate_concentration(
-    fractions: FrozenFractionTable,
-    *,
-    experiment: Experiment,
-    method: Literal["mle", "average"] = "mle",
-    fit_step_C: float | None = None,
-    temperature_ranges_C=None,
-    temperature_step_C: float | None = None,
-    temperature_method: Literal["latest", "max", "window"] = "latest",
-    temperature_window_C: float | None = None,
-    curves=None,
-    z: float = 1.96,
-    water_blank_correction: bool = True,
-) -> CurveSpectrumTable:
-    """Estimate named curves from original states with separate run backgrounds.
-
-    With no curves supplied, each sample/run/cycle remains separate. Explicit
-    curves can span runs but select only one cycle from each run. Observations
-    align only where needed, using latest warmer states at observed targets.
-    MLE fits complete freezing histories with monotone sample and blank curves;
-    Average estimates each target separately. Original count rows stay unchanged.
-    temperature_step_C instead selects count pairs on a regular grid before
-    either estimator. latest/max use warmer states; window uses a full-width
-    centered window. Sample and blank use the same rule, before correction.
-    """
-    method = validate_combination_method(method)
-    from .curve_fit import validate_fit_step
-
-    validate_fit_step(fit_step_C, method=method)
-    if not np.isfinite(z) or z <= 0:
-        raise ValueError("z must be finite and positive")
-    fractions, experiment = prepare_fraction_analysis(
-        fractions, experiment, water_blank_correction=water_blank_correction
-    )
-    frame = fractions.to_dataframe()
-    source = sample_rows(frame, experiment)
-    if source.empty:
-        raise ValueError("No sample observations are available for concentration calculation")
-    blank_ids = {key for ids in experiment.water_blank_map.values() for key in ids}
-    ranges = validate_temperature_ranges(
-        temperature_ranges_C, measurement_ids=set(experiment.measurements) - blank_ids
-    )
-    groups = resolve_curves(curves, experiment, frame)
-    records, notices, group_alignment, cache = [], [], {}, {}
-    joint_fits = {}
-    for curve_id, group in groups.items():
-        members = group["members"]
-        ids = sorted(member["measurement_id"] for member in members)
-        supports = {}
-        for member in members:
-            selected = source[
-                (source.measurement_id == member["measurement_id"])
-                & (source.cycle_id == member["cycle_id"])
-            ]
-            supports[member["measurement_id"]] = (
-                float(selected.temperature_C.min()),
-                float(selected.temperature_C.max()),
-            )
-        points = align_observations(
-            frame, members, water_blank_map=experiment.water_blank_map, temperature_ranges_C=ranges,
-            temperature_step_C=temperature_step_C, temperature_method=temperature_method,
-            temperature_window_C=temperature_window_C,
-        )
-        if method == "mle":
-            from dataclasses import replace
-
-            from .curve_fit import fit_curve
-
-            estimates, joint_fits[curve_id] = fit_curve(
-                points, experiment, z=z, fit_step_C=fit_step_C, output_step_C=fit_step_C
-            )
-            # A regular fitting grid is also the reporting grid. All selected
-            # input rows enter the fit above at their unchanged temperatures.
-            # A warmer state supplies display provenance, not a refitted count.
-            by_temperature = {point.temperature_C: point for point in points}
-            native_temperatures = np.array(sorted(by_temperature, reverse=True))
-            report_temperatures = (
-                sorted(estimates, reverse=True) if fit_step_C is not None else native_temperatures
-            )
-            reported = []
-            for index, temperature in enumerate(report_temperatures):
-                position = np.searchsorted(-native_temperatures, -temperature, side="right") - 1
-                point = by_temperature[native_temperatures[position]]
-                if fit_step_C is not None:
-                    from .alignment import _in_range
-
-                    eligible = np.array([
-                        _in_range(temperature, ranges.get(name, {}))
-                        and supports[name][0] <= temperature <= supports[name][1]
-                        for name in point.samples.measurement_id
-                    ], dtype=bool)
-                    samples = point.samples.loc[eligible].copy()
-                    blank_names = {
-                        name for measurement in samples.measurement_id
-                        for name in experiment.water_blank_map.get(measurement, [])
-                    }
-                    point = replace(
-                        point, samples=samples,
-                        blanks=point.blanks.loc[point.blanks.measurement_id.isin(blank_names)].copy(),
-                    )
-                reported.append(replace(
-                    point, temperature_C=float(temperature), point_order=index,
-                    point_id=f"point:{index}",
-                    alignment="model_evaluation" if fit_step_C is not None else point.alignment,
-                ))
-            points = reported
-        empty_count = 0
-        group_alignment[curve_id] = sorted({point.alignment for point in points})
-        for point in points:
-            contributors = sorted(point.samples.measurement_id.astype(str).tolist())
-            available = sorted(
-                key for key, (cold, warm) in supports.items() if cold <= point.temperature_C <= warm
-            )
-            record = {
-                "sample_id": group["sample_id"],
-                "curve_id": curve_id,
-                "point_id": point.point_id,
-                "point_order": point.point_order,
-                "temperature_C": point.temperature_C,
-                "alignment": point.alignment,
-                "concentration": np.nan,
-                "lower_error": np.nan,
-                "upper_error": np.nan,
-                "unit": "INP_per_mL_suspension",
-                "basis": "suspension",
-                "qc_flag": 1,
-                "source_measurement_ids": json.dumps(ids),
-                "available_measurement_ids": json.dumps(available),
-                "contributing_measurement_ids": json.dumps(contributors),
-                "contributor_count": len(contributors),
-                "source_measurement_id": contributors[0] if len(contributors) == 1 else "",
-                "selection_status": "no_eligible_measurements"
-                if not contributors
-                else "single"
-                if len(contributors) == 1
-                else "combined",
-                "dilution_fold": experiment.measurements[contributors[0]].dilution
-                if len(contributors) == 1
-                else np.nan,
-                "water_blank_ids": json.dumps(
-                    sorted(point.blanks.measurement_id.astype(str).tolist())
-                ),
-                "source_observations": json.dumps(_sources(point)),
-                "uncertainty_method": "joint_curve_profile_likelihood"
-                if method == "mle"
-                else "bonferroni_marginal_profile_bounds"
-                if method == "average" and len(contributors) > 1
-                else "joint_sample_water_blank_profile_likelihood"
-                if experiment.water_blank_map
-                else "binomial_Poisson_profile_likelihood",
-                "correction_state": "water_blank_corrected"
-                if experiment.water_blank_map
-                else "uncorrected",
-            }
-            if contributors:
-                if method == "mle":
-                    estimate, lower, upper = estimates[point.temperature_C]
-                    finite = bool(np.isfinite([estimate, lower, upper]).all())
-                    fit = (estimate, lower, upper, finite)
-                else:
-                    key = _state_key(point)
-                    if key not in cache:
-                        cache[key] = estimate_point(
-                            point.samples,
-                            point.blanks,
-                            experiment,
-                            confidence_drop=z**2 / 2,
-                            method=method,
-                        )
-                    fit = cache[key]
-                record.update(
-                    concentration=fit[0],
-                    lower_error=fit[1],
-                    upper_error=fit[2],
-                    qc_flag=0 if fit[3] else 1,
-                )
-            else:
-                empty_count += 1
-            record["at_zero_boundary"] = record["concentration"] == 0
-            records.append(record)
-        if empty_count:
-            notices.append(f"Curve {curve_id!r}: {empty_count} points have no eligible input")
-    settings = {
-        "operation": "estimate_concentration",
-        "estimation_method": method,
-        "fit_step_C": fit_step_C,
-        "curves": curve_specifications(groups),
-        "curve_sources": groups,
-        "temperature_ranges_C": ranges,
-        "temperature_step_C": temperature_step_C,
-        "temperature_method": temperature_method,
-        "temperature_window_C": temperature_window_C,
-        "range_boundaries": "inclusive; source and target",
-        "alignment": group_alignment,
-        "alignment_rule": temperature_method if temperature_step_C is not None else
-        "latest observation at or warmer than target, only where needed",
-        "z": float(z),
-        "confidence_drop": float(z**2 / 2),
-        "water_blank_correction": water_blank_correction,
-        "water_blank_correction_applied": bool(experiment.water_blank_map),
-        "water_blank_model": "volume_scaled",
-        "background_groups": "separate by run and selected cycle",
-        "water_blank_map": dict(experiment.water_blank_map),
-        "joint_curve_fits": joint_fits,
-        "uncertainty_assumption": (
-            "Independent physical droplet sets, repeated observations never pooled; "
-            "profile bounds and Bonferroni-adjusted average bounds have approximate coverage"
-        ),
-        "warnings": notices,
-    }
-    return CurveSpectrumTable(
-        pd.DataFrame.from_records(records), history=fractions.history + [settings]
-    )
-
-
-def _validate_decrease_policy(decrease_policy: str) -> None:
-    if decrease_policy not in ("stop_at_decrease", "skip_decreases"):
-        raise ValueError("decrease_policy must be 'stop_at_decrease' or 'skip_decreases'")
-
-
 def _final_candidates(
     spectrum: SpectrumT,
     *,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"],
 ) -> SpectrumT:
     """Mark native point selection in observation order without changing values."""
-    _validate_decrease_policy(decrease_policy)
+    validate_decrease_policy(decrease_policy)
     if not isinstance(spectrum, CumulativeSpectrumTable):
         raise TypeError("spectrum must be a cumulative spectrum table")
     data = spectrum.to_dataframe()
@@ -485,7 +230,7 @@ def _final_candidates(
 def finalize_spectrum(
     spectrum: SpectrumT,
     *,
-    decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = "stop_at_decrease",
+    decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = DEFAULTS.decrease_policy,
 ) -> SpectrumT:
     """Keep nondecreasing concentration in observation order, allowing fitting roundoff.
 
@@ -498,33 +243,39 @@ def finalize_spectrum(
 def analyze_concentration(
     experiment: Experiment,
     *,
-    method: Literal["mle", "average"] = "mle",
-    fit_step_C: float | None = None,
+    method: Literal["mle", "average"] = DEFAULTS.method,
+    fit_step_C: float | None = DEFAULTS.fit_step_C,
     temperature_ranges_C=None,
-    temperature_step_C: float | None = None,
-    temperature_method: Literal["latest", "max", "window"] = "latest",
-    temperature_window_C: float | None = None,
+    temperature_step_C: float | None = DEFAULTS.temperature_step_C,
+    temperature_start_C: float | None = DEFAULTS.temperature_start_C,
+    temperature_end_C: float | None = DEFAULTS.temperature_end_C,
+    temperature_method: Literal["latest", "max", "window"] = DEFAULTS.temperature_method,
+    temperature_window_C: float | None = DEFAULTS.temperature_window_C,
     curves=None,
-    output_basis: str = "suspension",
-    z: float = 1.96,
-    differential: bool = False,
+    output_basis: str = DEFAULTS.output_basis,
+    z: float = DEFAULTS.z,
+    differential: bool = DEFAULTS.differential,
     blank_by_curve: dict[str, CumulativeSpectrumTable] | None = None,
-    water_blank_correction: bool = True,
-    decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = "stop_at_decrease",
-    output_step_C: float | None = None,
-    output_method: Literal["sample", "interpolate"] = "sample",
+    water_blank_correction: bool = DEFAULTS.water_blank_correction,
+    decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = DEFAULTS.decrease_policy,
 ) -> AnalysisResult:
-    """Analyze native or explicitly selected counts; optionally grid the final result."""
+    """Run the public calculation steps using native or initially gridded counts."""
     from .water_blank import analysis_experiment
 
-    _validate_decrease_policy(decrease_policy)
-    method = validate_combination_method(method)
-    if output_basis not in UNITS:
-        raise ValueError(f"Unknown output_basis {output_basis!r}")
-    if output_method not in ("sample", "interpolate"):
-        raise ValueError("output_method must be 'sample' or 'interpolate'")
-    if output_step_C is not None and (not np.isfinite(output_step_C) or output_step_C <= 0):
-        raise ValueError("output_step_C must be finite and positive")
+    AnalysisSettings(
+        method=method,
+        fit_step_C=fit_step_C,
+        temperature_step_C=temperature_step_C,
+        temperature_start_C=temperature_start_C,
+        temperature_end_C=temperature_end_C,
+        temperature_method=temperature_method,
+        temperature_window_C=temperature_window_C,
+        z=z,
+        water_blank_correction=water_blank_correction,
+        output_basis=output_basis,
+        differential=differential,
+        decrease_policy=decrease_policy,
+    )
     source = analysis_experiment(experiment, water_blank_correction=water_blank_correction)
     fractions = frozen_fraction(source)
     observed_fractions = fractions if source is experiment else frozen_fraction(experiment)
@@ -547,93 +298,49 @@ def analyze_concentration(
         fit_step_C=fit_step_C,
         temperature_ranges_C=temperature_ranges_C,
         temperature_step_C=temperature_step_C,
+        temperature_start_C=temperature_start_C,
+        temperature_end_C=temperature_end_C,
         temperature_method=temperature_method,
         temperature_window_C=temperature_window_C,
         curves=curves,
         z=z,
         water_blank_correction=water_blank_correction,
     )
-    analysis_fractions = fractions
-    if differential and curves is not None:
-        # Differential fits need only selected input/cycle rows and their blanks.
-        # The archived observations remain complete.
-        resolved = combined.history[-1]["curve_sources"]
-        keys = ["measurement_id", "run_id", "cycle_id"]
-        members = {
-            tuple(str(member[key]) for key in keys)
-            for group in resolved.values()
-            for member in group["members"]
-        }
-        blanks = (
-            {
-                (blank_id, run, cycle)
-                for measurement, run, cycle in members
-                for blank_id in experiment.water_blank_map.get(measurement, [])
-            }
-            if water_blank_correction
-            else set()
-        )
-        requested = members | blanks
-        frame = fractions.to_dataframe()
-        selected = [
-            tuple(row) in requested for row in frame[keys].itertuples(index=False, name=None)
-        ]
-        analysis_fractions = FrozenFractionTable(
-            frame.loc[selected],
-            history=fractions.history
-            + [
-                {
-                    "operation": "select_curve_inputs",
-                    "curve_ids": list(resolved),
-                    "members": [dict(zip(keys, member, strict=True)) for member in sorted(members)],
-                    "water_blank_context": [
-                        dict(zip(keys, blank, strict=True)) for blank in sorted(blanks)
-                    ],
-                }
-            ],
-        )
     candidates = subtract_blanks(combined, blank_by_curve) if blank_by_curve else combined
     if output_basis != "suspension":
         candidates = convert_concentration(candidates, experiment.samples, basis=output_basis)
     final_candidates = _final_candidates(candidates, decrease_policy=decrease_policy)
     final = final_candidates.select(used_in_final=True)
-    sampled = (
-        resample_spectrum(final, step_C=output_step_C, method=output_method)
-        if output_step_C is not None
-        else None
-    )
-    differential_result = (
-        differential_spectrum(
-            analysis_fractions,
-            experiment=experiment,
-            temperature_ranges_C=temperature_ranges_C,
-            temperature_step_C=temperature_step_C,
-            temperature_method=temperature_method,
-            temperature_window_C=temperature_window_C,
-            method=method,
-            fit_step_C=fit_step_C,
-            z=z,
-            water_blank_correction=water_blank_correction,
-        )
-        if differential
-        else None
-    )
+    differential_result = None
+    if differential:
+        # Reuse the estimates already calculated above. Differencing cannot
+        # change the fit, select another count state, or repeat optimization.
+        differential_result = {
+            name: differentiate_spectrum(
+                _individual_spectra(
+                    combined.select(curve_id=name),
+                    fractions,
+                    source,
+                )
+            )
+            for name in combined.history[-1]["curve_sources"]
+        }
     settings = {
         "estimation_method": method,
         "fit_step_C": fit_step_C,
         "temperature_ranges_C": combined.history[-1]["temperature_ranges_C"],
         "temperature_step_C": temperature_step_C,
+        "temperature_start_C": temperature_start_C,
+        "temperature_end_C": temperature_end_C,
         "temperature_method": temperature_method,
         "temperature_window_C": temperature_window_C,
         "curves": combined.history[-1]["curves"],
         "observation_processing": (
             f"selected {temperature_step_C:g} C grid; {temperature_method}; before blank correction"
-            if temperature_step_C is not None else
-            "native; latest warmer alignment only where required"
+            if temperature_step_C is not None
+            else "native; latest warmer alignment only where required"
         ),
         "output_basis": output_basis,
-        "output_step_C": output_step_C,
-        "output_method": output_method if sampled is not None else None,
         "z": z,
         "differential": differential,
         "water_blank_correction": water_blank_correction,
@@ -642,12 +349,15 @@ def analyze_concentration(
         "water_blank_model": "volume_scaled",
         "decrease_policy": decrease_policy,
     }
-    history = final.history + (sampled.history[-1:] if sampled is not None else [])
+    history = final.history
     warnings = list(
         dict.fromkeys(
             final.warnings
-            + (sampled.warnings if sampled is not None else [])
-            + (differential_result.warnings if differential_result is not None else [])
+            + [
+                warning
+                for table in (differential_result or {}).values()
+                for warning in table.warnings
+            ]
         )
     )
     from .results import assemble_curves
@@ -660,7 +370,6 @@ def analyze_concentration(
             final_candidates,
             combined.history[-1]["curve_sources"],
             experiment=experiment,
-            resampled=sampled,
             differential=differential_result,
         ),
         settings=settings,

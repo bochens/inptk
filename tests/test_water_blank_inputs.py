@@ -125,9 +125,14 @@ def test_empty_mapping_roundtrip_and_missing_mapping_is_not_reconstructed(tmp_pa
         inptk.load(tmp_path / "source.inptk")
 
 
-def test_corrected_icescopy_reader_does_not_offer_raw_water_blank_mapping():
-    with pytest.raises(TypeError, match="water_blank_map"):
-        inptk.read_icescopy(pd.DataFrame(), water_blank_map={"007": ["B"]})
+def test_icescopy_reader_accepts_explicit_raw_blank_mapping():
+    data = pd.DataFrame({"temperature_C": [-5],
+                         "007 number total": [20], "007 number frozen": [4],
+                         "B number total": [10], "B number frozen": [1]})
+    result = inptk.read_icescopy(data, water_blank_map={"007": ["B"]},
+                               metadata={"well_volume_uL": 50, "dilution": 1})
+    assert result.water_blank_map == {"007": ["B"]}
+    assert result.counts.to_dataframe().n_total.tolist() == [20, 10]
 
 
 def two_blank_inputs():

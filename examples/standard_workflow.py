@@ -25,15 +25,34 @@ metadata = pd.DataFrame(
     ]
 )
 experiment = inptk.read_counts(pd.DataFrame(observations), metadata=metadata)
-result = inptk.analyze_concentration(
-    experiment,
-    curves={
-        "A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"},
-        "A_neat": {"inputs": ["A_neat"], "cycle": "1"},
-        "A_diluted": {"inputs": ["A_diluted"], "cycle": "1"},
-        "A_cycle2": {"inputs": ["A_neat", "A_diluted"], "cycle": "2"},
-    },
+curves = {
+    "A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"},
+    "A_neat": {"inputs": ["A_neat"], "cycle": "1"},
+    "A_diluted": {"inputs": ["A_diluted"], "cycle": "1"},
+    "A_cycle2": {"inputs": ["A_neat", "A_diluted"], "cycle": "2"},
+}
+options = {
+    "method": "mle",
+    "temperature_step_C": 0.5,
+    "temperature_start_C": None,
+    "temperature_end_C": None,
+}
+result = inptk.analyze_concentration(experiment, curves=curves, **options)
+
+# The same analysis, one step at a time.
+fractions = inptk.frozen_fraction(experiment)
+estimated = inptk.estimate_concentration(
+    fractions,
+    experiment=experiment,
+    curves=curves,
+    **options,
 )
+final = inptk.finalize_spectrum(estimated)
+pd.testing.assert_frame_equal(result.to_dataframe(), final.to_dataframe())
+
+# Differentiate an existing individual spectrum without repeating the fit.
+individual = inptk.cumulative_spectrum(fractions, experiment=experiment, **options)
+differential = inptk.differentiate_spectrum(individual)
 
 print(result.curves["A"].cumulative.to_dataframe())
 print(result.curves["A"].sources)
@@ -48,7 +67,9 @@ average_curves = {"A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"}}
 suggestions = inptk.suggest_temperature_ranges(experiment, curves=average_curves)
 print(suggestions.inputs)  # Includes the reason for each proposed cutoff.
 average = inptk.analyze_concentration(
-    experiment, curves=average_curves, method="average",
+    experiment,
+    curves=average_curves,
+    method="average",
     temperature_ranges_C=suggestions.temperature_ranges_C,
 )
 print(average.curves["A"].cumulative.to_dataframe())

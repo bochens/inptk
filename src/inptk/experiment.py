@@ -185,7 +185,7 @@ class Experiment:
 class CurveResult:
     """One named curve, its sources, and excluded native points.
 
-    cumulative contains retained points. resampled is a separate optional view.
+    cumulative contains retained points on the analysis temperatures.
     sources identifies physical inputs, independently of contributors at each
     point. Labels and result curves are never additional independent droplets.
     """
@@ -195,15 +195,12 @@ class CurveResult:
     sources: list[dict]
     excluded: CurveSpectrumTable
     differential: DifferentialSpectrumTable | None = None
-    resampled: CurveSpectrumTable | None = None
 
     def __post_init__(self):
         if not isinstance(self.curve_id, str) or not self.curve_id.strip():
             raise ValueError("curve_id must be non-empty text")
-        for name in ("cumulative", "excluded", "resampled"):
+        for name in ("cumulative", "excluded"):
             table = getattr(self, name)
-            if table is None and name == "resampled":
-                continue
             if not isinstance(table, CurveSpectrumTable):
                 raise TypeError(f"CurveResult {name} must be a CurveSpectrumTable")
             if set(table.to_dataframe().curve_id) - {self.curve_id}:
@@ -282,7 +279,7 @@ class AnalysisResult:
                     raise ValueError("Curve source cycle has no observations")
             if len(parents) != 1:
                 raise ValueError("Each curve must refer to one original sample")
-            for table in (curve.cumulative, curve.excluded, curve.resampled):
+            for table in (curve.cumulative, curve.excluded):
                 if table is not None and set(table.to_dataframe().sample_id) - parents:
                     raise ValueError("Curve table disagrees with its original sample")
 
@@ -294,20 +291,18 @@ class AnalysisResult:
     def to_dataframe(
         self,
         *,
-        table: Literal["cumulative", "resampled", "excluded"] = "cumulative",
+        table: Literal["cumulative", "excluded"] = "cumulative",
         curve_id: str | None = None,
     ):
         """Collect a quantity into a pandas table, retaining curve_id labels."""
         import pandas as pd
 
-        if table not in ("cumulative", "resampled", "excluded"):
-            raise ValueError("table must be 'cumulative', 'resampled' or 'excluded'")
+        if table not in ("cumulative", "excluded"):
+            raise ValueError("table must be 'cumulative' or 'excluded'")
         if curve_id is not None and curve_id not in self.curves:
             raise ValueError(f"Unknown curve {curve_id!r}; available curves: {list(self.curves)}")
         curves = self.curves if curve_id is None else {curve_id: self.curves[curve_id]}
         tables = [getattr(curve, table) for curve in curves.values()]
-        if any(value is None for value in tables):
-            raise ValueError("No resampled spectrum is available for every selected curve")
         return pd.concat([value.to_dataframe() for value in tables], ignore_index=True)
 
     def save(self, path: str | Path) -> None:
@@ -319,7 +314,7 @@ class AnalysisResult:
         self,
         path: str | Path,
         *,
-        table: Literal["cumulative", "resampled", "excluded"] = "cumulative",
+        table: Literal["cumulative", "excluded"] = "cumulative",
         curve_id: str | None = None,
     ) -> None:
         """Export a quantity for all curves or one named curve; never overwrite."""

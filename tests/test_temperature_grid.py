@@ -29,6 +29,8 @@ def points(data, method="latest", window=None, ranges=None):
         [{"measurement_id": "sample", "run_id": "R", "cycle_id": "0"}],
         water_blank_map=data.water_blank_map, temperature_ranges_C=ranges,
         temperature_step_C=.5, temperature_method=method, temperature_window_C=window,
+        temperature_start_C=np.floor(data.counts.to_dataframe().temperature_C.max() / .5) * .5,
+        temperature_end_C=np.ceil(data.counts.to_dataframe().temperature_C.min() / .5) * .5,
     )
 
 
@@ -204,3 +206,76 @@ def test_grid_preserves_cycles_and_per_run_blanks():
 def test_invalid_or_irrelevant_settings_are_rejected(step, method, width):
     with pytest.raises(ValueError):
         validate_temperature_selection(step, method, width)
+
+
+@pytest.mark.parametrize("method", ["mle", "average"])
+@pytest.mark.parametrize("bounds, expected", [
+    ({}, [-5.23, -5.73, -6.23, -6.4]),
+    ({"temperature_start_C": -5.4}, [-5.4, -5.9, -6.4]),
+    ({"temperature_end_C": -6.1}, [-5.23, -5.73, -6.1]),
+    ({"temperature_start_C": -5.4, "temperature_end_C": -6.1}, [-5.4, -5.9, -6.1]),
+    ({"temperature_start_C": -6.1, "temperature_end_C": -6.1}, [-6.1]),
+])
+def test_exact_grid_bounds_full_and_stepwise_agree(method, bounds, expected, tmp_path):
+    data = source((-5.23, -5.8, -6.4), (1, 4, 7))
+    options = dict(method=method, temperature_step_C=.5, **bounds)
+    result = inptk.analyze_concentration(data, **options)
+    estimated = inptk.estimate_concentration(
+        inptk.frozen_fraction(data), experiment=data, **options,
+    )
+    stepwise = inptk.finalize_spectrum(estimated).to_dataframe()
+    assert stepwise.temperature_C.tolist() == expected
+    pd.testing.assert_frame_equal(result.to_dataframe(), stepwise)
+    individual = inptk.cumulative_spectrum(
+        inptk.frozen_fraction(data), experiment=data, **options,
+    )
+    assert individual.to_dataframe().temperature_C.tolist() == expected
+    np.testing.assert_allclose(individual.to_dataframe().concentration, stepwise.concentration)
+    interval = inptk.differentiate_spectrum(individual).to_dataframe()
+    if len(expected) > 1:
+        width = np.array(expected[:-1]) - np.array(expected[1:])
+        np.testing.assert_allclose(interval.concentration, np.diff(stepwise.concentration) / width)
+    pd.testing.assert_frame_equal(result.counts.to_dataframe(), data.counts.to_dataframe())
+    result.save(tmp_path / "grid.inptk")
+    restored = inptk.load(tmp_path / "grid.inptk")
+    assert restored.settings["temperature_start_C"] == bounds.get("temperature_start_C")
+    assert restored.settings["temperature_end_C"] == bounds.get("temperature_end_C")
+    pd.testing.assert_frame_equal(restored.to_dataframe(), result.to_dataframe())
+
+
+@pytest.mark.parametrize("options", [
+    {"temperature_start_C": -5},
+    {"temperature_step_C": .5, "temperature_start_C": -7, "temperature_end_C": -5},
+    {"temperature_step_C": .5, "temperature_start_C": float("nan")},
+    {"temperature_step_C": .5, "temperature_end_C": True},
+    {"temperature_step_C": .5, "temperature_start_C": "-5"},
+    {"temperature_step_C": .5, "temperature_end_C": -4},
+])
+def test_invalid_grid_bounds_fail_in_full_and_stepwise_api(options):
+    data = source()
+    with pytest.raises(ValueError):
+        inptk.analyze_concentration(data, **options)
+    with pytest.raises(ValueError):
+        inptk.estimate_concentration(inptk.frozen_fraction(data), experiment=data, **options)
+
+
+def test_cli_exact_bounds_match_python_and_reject_final_grid_flags(tmp_path, capsys):
+    from inptk.cli import main
+
+    data = source((-5.23, -5.8, -6.4), (1, 4, 7))
+    data.save(tmp_path / "input.inptk")
+    output = tmp_path / "output.inptk"
+    main(["analyze", str(tmp_path / "input.inptk"), "--format", "saved",
+          "--temperature-step-C", ".5", "--temperature-start-C", "-5.4",
+          "--temperature-end-C", "-6.1", "--out", str(output), "--json"])
+    reply = json.loads(capsys.readouterr().out)
+    assert reply["status"] == "ok"
+    expected = inptk.analyze_concentration(
+        data, temperature_step_C=.5, temperature_start_C=-5.4, temperature_end_C=-6.1,
+    )
+    pd.testing.assert_frame_equal(inptk.load(output).to_dataframe(), expected.to_dataframe())
+    with pytest.raises(SystemExit) as rejected:
+        main(["analyze", str(tmp_path / "input.inptk"), "--format", "saved",
+              "--output-step-C", ".5", "--out", str(tmp_path / "invalid.inptk")])
+    assert rejected.value.code == 2
+    assert not (tmp_path / "invalid.inptk").exists()

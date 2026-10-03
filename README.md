@@ -110,7 +110,7 @@ recalculating concentrations. Its columns are `degC`, `dilution`, `INPS_L`,
 `lower_CI`, and `upper_CI`; the two CI columns contain **error widths**, not
 interval endpoints. Points combining several dilutions leave `dilution` blank.
 Outputs must be new paths outside the saved analysis folder. Both CSV exporters
-accept `--table resampled` when a separate resampled table was requested.
+export the saved analysis temperatures without another grid selection.
 
 ## Work one step at a time
 
@@ -125,11 +125,12 @@ estimated = inptk.estimate_concentration(
     curves={"A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"}},
     method="mle",
     temperature_ranges_C=ranges,
+    temperature_step_C=0.5,
+    temperature_start_C=None,
+    temperature_end_C=None,
 )
 converted = inptk.convert_concentration(estimated, experiment.samples, basis="sampled_air")
 final = inptk.finalize_spectrum(converted, decrease_policy="stop_at_decrease")
-# Optional display/export grid, after all calculations and final selection:
-sampled = inptk.resample_spectrum(final, step_C=0.5, method="sample")
 ```
 
 Frozen fractions need only the labelled counts table. Concentration calculations
@@ -139,6 +140,9 @@ and total droplet counts stored there. Those counts supply both concentration
 estimates and their uncertainty. Each step returns one scientific table.
 `table.history` records its processing steps; `table.warnings` reports unavailable
 results or settings that could not apply.
+
+Use `differentiate_spectrum(cumulative)` to calculate differential concentration
+from an existing individual cumulative spectrum without fitting again.
 
 To calculate separate spectra for all physical inputs, use `cumulative_spectrum`
 with the same fractions, experiment, method, and temperature ranges.
@@ -378,7 +382,7 @@ Each curve's `cumulative` table contains retained rows. Its `excluded` table con
 excluded rows after blank correction and unit conversion, with `used_in_final` and
 `final_selection_status` to explain selection. Statuses are `kept`, `nonfinite`,
 `decrease`, or `after_decrease`. `segment_id` marks uninterrupted retained portions
-so later resampling cannot bridge exclusions. Original observations remain available.
+to record where observations were excluded. Original observations remain available.
 This final selection is separate from alignment and measurement temperature ranges.
 Average follows observation order. MLE already supplies a monotone fitted curve
 in warm-to-cold order, so it normally retains the full finite fit. An additional
@@ -756,7 +760,6 @@ outputs belong to named curves; no combined droplet counts or fractions are inve
 | `curve.cumulative` | `CurveSpectrumTable` | Retained native concentration points and uncertainty |
 | `curve.sources` | List of records | Selected physical inputs, cycles, dilution, volume and blank assignments |
 | `curve.excluded` | `CurveSpectrumTable` | Excluded native points with selection reasons |
-| `curve.resampled` | `CurveSpectrumTable` or `None` | Optional temperature-grid view |
 | `curve.differential` | `DifferentialSpectrumTable` or `None` | Optional activity per degree for an individual curve |
 
 Curve tables record `contributing_measurement_ids`, `contributor_count`, and
@@ -852,52 +855,42 @@ This selection changes the observations used by the calculation and can change
 both estimates and uncertainty. The intervals do not account for uncertainty
 in the selected temperature or choice of window. It is separate from the
 MLE curve spacing (`fit_step_C`), which controls the fitted curve's shape,
-and from the output grid below, which does not refit observations.
+and does not introduce another output grid.
 
-For the 0.5 °C joint sample-and-blank fit, use:
-
-```python
-result = inptk.analyze_concentration(experiment, method="mle", fit_step_C=0.5)
-```
-
-The CLI equivalent is `--method mle --fit-step-C 0.5`. This fits every selected
-count row at its supplied temperature and evaluates both concentration and its
-profile uncertainty bounds every 0.5 °C. Concentration is linear between fitting
-grid points and monotone during cooling. It does not select or round input rows.
-The same `fit_step_C` argument is available in the step-by-step spectrum functions.
-Omitting it retains the native-temperature model; Average rejects this MLE-only
-setting. The saved result records the choice. Statistical interval coverage for
-this resolution is not established across all experimental conditions.
-
-To request a regular grid **after** calculation and final selection:
+Use one grid at the beginning, with optional exact warm and cold endpoints:
 
 ```python
-result = inptk.analyze_concentration(
-    experiment,
-    output_step_C=0.5,
-    output_method="sample",  # or "interpolate"
+options = dict(
+    method="mle",
+    temperature_step_C=0.5,
+    temperature_start_C=None,  # use the warmest selected input temperature
+    temperature_end_C=None,    # use the coldest selected input temperature
+    temperature_method="latest",
+    fit_step_C=0.5,
 )
-result.to_dataframe(table="resampled")
-result.export_csv("grid.csv", table="resampled")
+result = inptk.analyze_concentration(experiment, **options)
+result.export_csv("concentration.csv")
 ```
 
-`sample` takes the latest retained observation at or warmer than each grid target,
-including its unchanged uncertainty. `interpolate` first uses that same rule at
-each observed temperature to form ordered-temperature endpoints, then linearly
-connects their concentrations and lower/upper interval endpoints. This prevents
-small temperature reversals from placing an older, lower concentration after a
-newer value. It does not change or refit any original observation.
+Endpoints need not be whole degrees. For data spanning −5.23 to −6.40 °C,
+0.5 °C spacing gives −5.23, −5.73, −6.23, −6.40 °C. Both endpoints are
+included; the last interval can be shorter. Set `temperature_start_C=-5.5`
+or `temperature_end_C=-20.2` to choose either endpoint yourself. Start is the
+warmer endpoint and end is the colder endpoint. The grid selects observations;
+it never extrapolates missing sample or blank counts.
 
-Both choices record source point IDs, actual source temperatures, and sampling
-status. `endpoint_temperatures_C` separately records the temperatures used to
-construct interpolation endpoints; these can differ from source temperatures.
-Interpolated bounds are not newly fitted confidence intervals. Neither method
-adds extrapolation beyond a retained segment or bridges excluded observations;
-any existing source extrapolation flags remain visible. Native `curve.cumulative` remains
-unchanged; the optional grid is a separate `resampled` table.
+Concentrations and uncertainty are calculated at these analysis temperatures.
+There is no final regridding step or separate resampled result. With no
+`temperature_step_C`, the calculation uses observed temperatures; grid bounds
+and alternative selection rules then require an explicit spacing.
 
-The CLI equivalents are `--output-step-C 0.5 --output-method sample`, followed by
-`inptk export-csv analysis.inptk --table resampled --out grid.csv`.
+The CLI equivalents are `--temperature-step-C 0.5 --temperature-method latest
+--fit-step-C 0.5`, with optional `--temperature-start-C` and `--temperature-end-C`.
+The same options work in `estimate_concentration` and `cumulative_spectrum`.
+MLE's `fit_step_C` controls the fitted curve's shape only; it does not choose
+analysis temperatures. Average rejects this MLE-only setting. Interval coverage
+for the joint model is approximate and has not been established across all
+experimental conditions.
 
 Concentration columns are `concentration`, `unit`, and `basis`. `lower_error`
 and `upper_error` are error-bar widths: interval endpoints are concentration
@@ -927,12 +920,15 @@ src/inptk/
   experiment.py     sample/measurement information, Experiment, AnalysisResult, CurveResult
   readers.py        native CSV/Python and Icescopy import
   methods.py        method, named-curve inputs, and temperature-range validation
-  processing.py     native count-to-fraction and per-measurement spectrum steps
+  processing.py     count-to-fraction, individual spectra, and adjacent differences
   alignment.py      match original sample/blank observations only where needed
   ranges.py         reviewable Average range suggestions and blank diagnostics
   curve_fit.py      prepare selected physical well histories for the joint curve fit
-  resampling.py     optional grid views after final concentration selection
-  workflows.py      concentration estimation, correction, units, and full workflow
+  estimation.py     shared concentration estimation for individual and combined curves
+  context.py        validate observation and metadata ownership
+  settings.py       shared Python and CLI defaults and validation
+  resampling.py     standalone table interpolation utility; not part of analysis
+  workflows.py      correction, units, final selection, and full workflow
   results.py        assemble named curves with their sources and exclusions
   io.py             versioned saving/loading of complete analyses
   cli.py            command-line arguments calling the same workflow
@@ -946,7 +942,7 @@ workflow and scientific tables. New applications should use
 `inptk`'s public imports; they should not import `_engine`. Individual-droplet
 freezing-event analysis and GUI development are not yet implemented.
 
-Saved analyses use format version 3 in `analysis.json`; other versions are rejected. They include the writing
+Saved analyses use format version 4 in `analysis.json`; other versions are rejected. They include the writing
 package version (`toolkit_version`), metadata, identifiers, tables, settings, and
 history; loading does not execute code. Non-finite numbers are explicitly
 encoded, rather than silently changing

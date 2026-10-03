@@ -12,7 +12,6 @@ from analysis_checks import (
     input_spectra,
     quantity_for_check,
     retained,
-    sampled,
 )
 
 import inptk
@@ -321,10 +320,8 @@ def test_cli_cross_run_groups_preserve_own_blanks_and_export_saved_tables(
         method,
         "--curves",
         group_argument,
-        "--output-step-C",
+        "--temperature-step-C",
         "0.05",
-        "--output-method",
-        "interpolate",
         "--out",
         output,
     )
@@ -334,13 +331,11 @@ def test_cli_cross_run_groups_preserve_own_blanks_and_export_saved_tables(
         cross_run_source,
         method=method,
         curves=groups,
-        output_step_C=0.05,
-        output_method="interpolate",
+        temperature_step_C=0.05,
     )
     pd.testing.assert_frame_equal(
         retained(result).to_dataframe(), retained(expected).to_dataframe()
     )
-    pd.testing.assert_frame_equal(sampled(result).to_dataframe(), sampled(expected).to_dataframe())
     pd.testing.assert_frame_equal(
         result.experiment.counts.to_dataframe(), cross_run_source.counts.to_dataframe()
     )
@@ -365,10 +360,10 @@ def test_cli_cross_run_groups_preserve_own_blanks_and_export_saved_tables(
             (item["measurement_id"], item["run_id"], item["cycle_id"]) for item in blank_sources
         } == {("W0", "R/1", "01"), ("W1", "R2", "02")}
     payload = json.loads((output / "analysis.json").read_text())
-    assert payload["format_version"] == 3
-    for table_name in ("final", "resampled"):
+    assert payload["format_version"] == 4
+    for table_name in ("final",):
         destination = tmp_path / f"{table_name}.csv"
-        table_arguments = [] if table_name == "final" else ["--table", "resampled"]
+        table_arguments = []
         exported = run_cli("export-csv", output, *table_arguments, "--out", destination)
         assert exported.returncode == 0, exported.stderr
         assert destination.read_text() == quantity_for_check(
@@ -402,8 +397,7 @@ def test_cli_saved_analysis_rerun_uses_original_counts_and_current_settings(
         cross_run_source,
         method="average",
         curves=cross_run_groups(),
-        output_step_C=0.05,
-        output_method="interpolate",
+        temperature_step_C=0.05,
     )
     previous_path = tmp_path / "previous.inptk"
     prior.save(previous_path)
@@ -417,7 +411,7 @@ def test_cli_saved_analysis_rerun_uses_original_counts_and_current_settings(
         retained(result).to_dataframe(), retained(expected).to_dataframe()
     )
     assert result.settings["estimation_method"] == "mle"
-    assert sampled(result) is None
+    assert not hasattr(next(iter(result.curves.values())), "resampled")
     assert set(fit_estimates(result).to_dataframe().curve_id) == {
         "007/R%2F1/01",
         "007/R%2F1/02",

@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from analysis_checks import retained, sampled
+from analysis_checks import retained
 
 import inptk
 
@@ -34,7 +34,7 @@ def saved_analysis(
     dilutions=(1,),
     method="mle",
     curves=None,
-    output_step_C=None,
+    temperature_step_C=None,
     temperatures=(-5, -6, -7, -8),
     frozen_counts=(0, 4, 8, 12),
 ):
@@ -70,7 +70,7 @@ def saved_analysis(
         decrease_policy=policy,
         method=method,
         curves=curves,
-        output_step_C=output_step_C,
+        temperature_step_C=temperature_step_C,
     )
     path = tmp_path / "result.inptk"
     result.save(path)
@@ -265,22 +265,20 @@ def test_cross_run_group_is_exported_as_one_whole_saved_curve(tmp_path, csu):
     np.testing.assert_allclose(actual.INPS_L, expected.concentration)
 
 
-def test_resampled_export_must_be_explicit_and_already_saved(tmp_path, csu):
-    path, result = saved_analysis(tmp_path, output_step_C=0.5)
-    for name, expected in (("final", retained(result)), ("resampled", sampled(result))):
-        output = tmp_path / f"{name}.csv"
-        args = [] if name == "final" else ["--table", "resampled"]
-        csu.main([str(path), "--out", str(output), "--allow-missing-header", *args])
-        _, actual = read_export(output)
-        assert actual.degC.tolist() == expected.to_dataframe().temperature_C.tolist()
-        np.testing.assert_allclose(actual.INPS_L, expected.to_dataframe().concentration)
-    assert len(sampled(result)) > len(retained(result))
+def test_export_uses_saved_analysis_grid_without_another_resampling(tmp_path, csu):
+    path, result = saved_analysis(tmp_path, temperature_step_C=0.5)
+    output = tmp_path / "grid.csv"
+    csu.main([str(path), "--out", str(output), "--allow-missing-header"])
+    _, actual = read_export(output)
+    expected = retained(result).to_dataframe()
+    assert actual.degC.tolist() == expected.temperature_C.tolist()
+    np.testing.assert_allclose(actual.INPS_L, expected.concentration)
 
 
 def test_export_cannot_generate_missing_resampled_data(tmp_path, csu):
     path, _ = saved_analysis(tmp_path)
     output = tmp_path / "missing-grid.csv"
-    with pytest.raises(ValueError, match="No resampled spectrum"):
+    with pytest.raises(SystemExit):
         csu.main(
             [str(path), "--out", str(output), "--table", "resampled", "--allow-missing-header"]
         )

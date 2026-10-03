@@ -133,7 +133,7 @@ def test_missing_blank_coverage_for_eligible_native_target_is_rejected():
 
 def test_repeated_count_states_reuse_fit_but_new_blank_state_or_cycle_does_not():
     source = experiment([-5, -6, -7], [8, 8, 8], blanks=[1, 1, 2], cycles=("01", "1"))
-    with patch("inptk.water_blank.estimate_point", wraps=estimate_point) as estimator:
+    with patch("inptk.estimation.estimate_point", wraps=estimate_point) as estimator:
         actual = cumulative_spectrum(
             frozen_fraction(source), experiment=source, method="average"
         ).to_dataframe()

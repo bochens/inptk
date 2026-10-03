@@ -89,6 +89,8 @@ def align_observations(
     water_blank_map: Mapping[str, Sequence[str]],
     temperature_ranges_C: Mapping[str, Mapping] | None,
     temperature_step_C: float | None = None,
+    temperature_start_C: float | None = None,
+    temperature_end_C: float | None = None,
     temperature_method: str = "latest",
     temperature_window_C: float | None = None,
 ) -> list[AlignedPoint]:
@@ -104,7 +106,8 @@ def align_observations(
     from .temperature_selection import grid_points, validate_temperature_selection
 
     validate_temperature_selection(
-        temperature_step_C, temperature_method, temperature_window_C
+        temperature_step_C, temperature_method, temperature_window_C,
+        temperature_start_C, temperature_end_C,
     )
     required = {
         "measurement_id",
@@ -143,7 +146,8 @@ def align_observations(
     if temperature_step_C is not None:
         return grid_points(
             frame, members, water_blank_map=water_blank_map, ranges=ranges,
-            step_C=temperature_step_C, method=temperature_method, window_C=temperature_window_C,
+            step_C=temperature_step_C, start_C=temperature_start_C, end_C=temperature_end_C,
+            method=temperature_method, window_C=temperature_window_C,
         )
 
     blank_streams: dict[tuple[str, str, str], pd.DataFrame] = {}

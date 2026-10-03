@@ -306,42 +306,38 @@ def result_for_archive():
                 "01", combined.select(point_id="001"),
                 sources=[{"measurement_id": "M", "run_id": "R", "cycle_id": "01"}],
                 excluded=combined.select(point_id="002"),
-                resampled=inptk.CurveSpectrumTable(
-                    combined_frame().assign(point_id=["grid0", "grid1"])
-                ),
             )
         },
     )
 
 
-def test_new_format_roundtrip_retains_original_ids_groups_and_optional_resampling(tmp_path):
+def test_new_format_roundtrip_retains_original_ids_and_named_curves(tmp_path):
     result = result_for_archive()
     target = tmp_path / "result.inptk"
     result.save(target)
-    assert json.loads((target / "analysis.json").read_text())["format_version"] == 3
+    assert json.loads((target / "analysis.json").read_text())["format_version"] == 4
     restored = inptk.load(target)
     assert restored.settings == result.settings
     assert restored.experiment.measurements == result.experiment.measurements
     pd.testing.assert_frame_equal(
         restored.experiment.counts.to_dataframe(), result.experiment.counts.to_dataframe()
     )
-    for name in ("cumulative", "excluded", "resampled"):
+    for name in ("cumulative", "excluded"):
         assert isinstance(getattr(restored.curves["01"], name), inptk.CurveSpectrumTable)
         pd.testing.assert_frame_equal(
             getattr(restored.curves["01"], name).to_dataframe(),
             getattr(result.curves["01"], name).to_dataframe(),
         )
     output = tmp_path / "sampled.csv"
-    restored.export_csv(output, table="resampled")
-    assert pd.read_csv(output).point_id.tolist() == ["grid0", "grid1"]
+    restored.export_csv(output, table="cumulative")
+    assert pd.read_csv(output, dtype={"point_id": str}).point_id.tolist() == ["001"]
     with pytest.raises(FileExistsError):
         restored.export_csv(output)
 
 
 def test_export_rejects_absent_resampled_table_and_unknown_table_choice(tmp_path):
     result = result_for_archive()
-    result = replace(result, curves={"01": replace(result.curves["01"], resampled=None)})
-    with pytest.raises(ValueError, match="No resampled"):
+    with pytest.raises(ValueError, match="table must be"):
         result.export_csv(tmp_path / "none.csv", table="resampled")
     with pytest.raises(ValueError, match="table must be"):
         result.export_csv(tmp_path / "other.csv", table="combined")
@@ -386,7 +382,6 @@ def test_icescopy_uses_only_real_image_columns_for_picture_identity(image_column
         ("cumulative", "frozen_fraction"),
         ("excluded", "frozen_fraction"),
         ("differential", "frozen_fraction"),
-        ("resampled", "frozen_fraction"),
     ],
 )
 def test_analysis_result_rejects_wrong_scientific_table_in_each_slot(slot, wrong_slot):
@@ -400,7 +395,6 @@ def test_analysis_result_rejects_wrong_scientific_table_in_each_slot(slot, wrong
     [
         ("cumulative", "frozen_fraction"),
         ("excluded", "frozen_fraction"),
-        ("resampled", "frozen_fraction"),
     ],
 )
 def test_saved_result_rejects_valid_table_payload_in_wrong_slot(tmp_path, slot, wrong_slot):

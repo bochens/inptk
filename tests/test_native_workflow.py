@@ -3,7 +3,6 @@
 import json
 from dataclasses import replace
 
-import numpy as np
 import pandas as pd
 import pytest
 from analysis_checks import (
@@ -12,7 +11,6 @@ from analysis_checks import (
     intervals,
     quantity_for_check,
     retained,
-    sampled,
 )
 
 import inptk
@@ -67,7 +65,7 @@ def test_original_observations_are_primary_and_identical_states_do_not_gain_prec
         result.frozen_fraction.to_dataframe().drop(columns="fraction_frozen"),
         source.counts.to_dataframe(),
     )
-    assert sampled(result) is None
+    assert not hasattr(next(iter(result.curves.values())), "resampled")
     combined = fit_estimates(result).to_dataframe()
     expected = [-5, -5.8, -6, -7] if method == "mle" else [-5, -6, -6, -5.8, -7]
     assert combined.temperature_C.tolist() == expected
@@ -149,18 +147,13 @@ def test_native_cutoff_follows_observation_order_through_temperature_wiggles():
     assert final.to_dataframe().segment_id.tolist() == ["0"] * 4
 
 
-def test_skipped_points_split_resampling_segments_and_native_values_remain():
+def test_grid_is_selected_before_estimation_and_has_no_second_output():
     source = experiment()
-    native = inptk.analyze_concentration(source)
-    resampled_result = inptk.analyze_concentration(
-        source, output_step_C=0.5, output_method="sample"
-    )
-    pd.testing.assert_frame_equal(
-        retained(native).to_dataframe(), retained(resampled_result).to_dataframe()
-    )
-    assert sampled(resampled_result) is not None
-    assert sampled(resampled_result).history[-1]["operation"] == "resample_spectrum"
-    assert np.isfinite(sampled(resampled_result).to_dataframe().concentration).all()
+    result = inptk.analyze_concentration(source, temperature_step_C=0.5)
+    assert result.to_dataframe().temperature_C.tolist() == [-5, -5.5, -6, -6.5, -7]
+    assert "temperature_step_C" in result.settings
+    assert not hasattr(next(iter(result.curves.values())), "resampled")
+    pd.testing.assert_frame_equal(result.counts.to_dataframe(), source.counts.to_dataframe())
 
 
 def test_native_full_and_stepwise_paths_agree():
@@ -180,7 +173,7 @@ def test_native_full_and_stepwise_paths_agree():
     )
 
 
-def test_native_and_resampled_results_round_trip(tmp_path):
+def test_initial_grid_results_round_trip(tmp_path):
     source = experiment(two_runs=True)
     groups = {
         "combined": {
@@ -190,7 +183,7 @@ def test_native_and_resampled_results_round_trip(tmp_path):
             ]
         }
     }
-    result = inptk.analyze_concentration(source, curves=groups, output_step_C=0.5)
+    result = inptk.analyze_concentration(source, curves=groups, temperature_step_C=0.5)
     result.save(tmp_path / "saved.inptk")
     restored = inptk.load(tmp_path / "saved.inptk")
     assert restored.settings["curves"] == result.settings["curves"]
@@ -200,7 +193,6 @@ def test_native_and_resampled_results_round_trip(tmp_path):
         "combined",
         "final_candidates",
         "final",
-        "resampled",
     ):
         pd.testing.assert_frame_equal(
             quantity_for_check(result, name).to_dataframe(),

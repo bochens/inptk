@@ -122,18 +122,20 @@ def test_cumulative_contains_retained_points_and_excluded_explains_the_rest(poli
 
 def test_names_and_empty_exclusions_roundtrip_and_exports_are_explicit(tmp_path):
     result = inptk.analyze_concentration(
-        source(), curves={"Name / 雪": {"inputs": ["first"]}}, output_step_C=0.5
+        source(), curves={"Name / 雪": {"inputs": ["first"]}}, temperature_step_C=0.5
     )
     path = tmp_path / "analysis.inptk"
     result.save(path)
     restored = inptk.load(path)
     assert list(restored.curves) == ["Name / 雪"]
     assert restored.curves["Name / 雪"].sources == result.curves["Name / 雪"].sources
-    for quantity in ("cumulative", "excluded", "resampled"):
+    for quantity in ("cumulative", "excluded"):
         pd.testing.assert_frame_equal(
             result.to_dataframe(table=quantity), restored.to_dataframe(table=quantity)
         )
-    replay = inptk.analyze_concentration(source(), curves=result.settings["curves"])
+    replay = inptk.analyze_concentration(
+        source(), curves=result.settings["curves"], temperature_step_C=0.5,
+    )
     pd.testing.assert_frame_equal(result.to_dataframe(), replay.to_dataframe())
     output = tmp_path / "one.csv"
     restored.export_csv(output, curve_id="Name / 雪")
@@ -145,7 +147,7 @@ def test_names_and_empty_exclusions_roundtrip_and_exports_are_explicit(tmp_path)
     assert not (tmp_path / "unknown.csv").exists()
 
 
-@pytest.mark.parametrize("version", [1, 2, 4])
+@pytest.mark.parametrize("version", [1, 2, 3, 5])
 def test_no_old_or_unknown_format_fallbacks(tmp_path, version):
     path = tmp_path / "analysis.inptk"
     inptk.analyze_concentration(source()).save(path)

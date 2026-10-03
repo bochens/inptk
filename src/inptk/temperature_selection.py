@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from numbers import Real
 
 import numpy as np
 import pandas as pd
 
-from .resampling import _grid
 
-
-def validate_temperature_selection(step_C, method, window_C):
+def validate_temperature_selection(step_C, method, window_C, start_C=None, end_C=None):
     """A window is its full width; no colder-observation tolerance is implicit."""
     if not isinstance(method, str) or method not in ("latest", "max", "window"):
         raise ValueError("temperature_method must be 'latest', 'max', or 'window'")
@@ -26,9 +25,38 @@ def validate_temperature_selection(step_C, method, window_C):
         raise ValueError("window requires temperature_window_C (full window width)")
     if method != "window" and window_C is not None:
         raise ValueError("temperature_window_C applies only to window")
+    for name, value in (("temperature_start_C", start_C), ("temperature_end_C", end_C)):
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            if step_C is None:
+                raise ValueError(f"{name} requires temperature_step_C")
+    if start_C is not None and end_C is not None and start_C < end_C:
+        raise ValueError("temperature_start_C must be warmer than or equal to temperature_end_C")
 
 
-def grid_points(frame, members, *, water_blank_map, ranges, step_C, method, window_C):
+def temperature_grid(temperatures, *, step_C, start_C=None, end_C=None):
+    """Build a cooling grid anchored at the requested or observed warm endpoint.
+
+    Both endpoints are included without rounding their temperatures. The final
+    interval is shorter when the span is not an exact multiple of the spacing.
+    Decimal arithmetic avoids moving a boundary through floating-point drift.
+    """
+    warm = Decimal(str(float(max(temperatures) if start_C is None else start_C)))
+    cold = Decimal(str(float(min(temperatures) if end_C is None else end_C)))
+    if warm < cold:
+        raise ValueError("Grid start must be warmer than or equal to grid end")
+    step = Decimal(str(float(step_C)))
+    size = int((warm - cold) // step)
+    targets = [float(warm - index * step) for index in range(size + 1)]
+    if targets[-1] != float(cold):
+        targets.append(float(cold))
+    return targets
+
+
+def grid_points(
+    frame, members, *, water_blank_map, ranges, step_C, method, window_C, start_C=None, end_C=None,
+):
     """Select each sample and blank independently; never pool repeated counts.
 
     Source rows retain measured temperatures and observation IDs. A separate
@@ -85,12 +113,7 @@ def grid_points(frame, members, *, water_blank_map, ranges, step_C, method, wind
     temperatures = pd.concat([streams[key][0].temperature_C for key in keys])
     empty = frame.iloc[:0].copy()
     points = []
-    targets = _grid(temperatures, step_C)
-    if not targets:
-        raise ValueError(
-            "No temperature grid points lie within the observed sample coverage; "
-            "use a finer temperature_step_C or original observations"
-        )
+    targets = temperature_grid(temperatures, step_C=step_C, start_C=start_C, end_C=end_C)
     for order, target in enumerate(targets):
         samples, needed = [], set()
         for key in keys:

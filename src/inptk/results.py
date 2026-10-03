@@ -15,8 +15,7 @@ def assemble_curves(
     groups: dict,
     *,
     experiment: Experiment,
-    resampled: CurveSpectrumTable | None = None,
-    differential: DifferentialSpectrumTable | None = None,
+    differential: dict[str, DifferentialSpectrumTable] | None = None,
 ) -> dict[str, CurveResult]:
     """Partition outputs by name; preserve original point order and error widths."""
     results = {}
@@ -41,11 +40,7 @@ def assemble_curves(
         ]
         intervals = None
         if differential is not None and len(sources) == 1:
-            source = sources[0]
-            intervals = differential.select(
-                measurement_id=source["measurement_id"],
-                cycle_id=source["cycle_id"],
-            )
+            intervals = differential[name]
             data = intervals.to_dataframe()
             joint_fit = any(
                 entry.get("estimation_method") == "mle" for entry in cumulative.history
@@ -76,7 +71,6 @@ def assemble_curves(
             cumulative=cumulative,
             sources=sources,
             excluded=excluded,
-            resampled=resampled.select(curve_id=name) if resampled is not None else None,
             differential=intervals,
         )
     return results

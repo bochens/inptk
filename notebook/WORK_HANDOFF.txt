@@ -1,40 +1,36 @@
 INP-toolkit handoff — 2026-10-02
-Current goal completed: add latest, max and window count-selection choices before blank correction.
-Repo /Users/C832577250/Project/inptk; branch codex/measurement-results; pre-edit checkpoint 95968e1.
-No background jobs, push or merge. These changes are checkpointed with this note.
-Core: src/inptk/temperature_selection.py; alignment.py delegates explicit grids to it.
-Public: analyze_concentration, estimate_concentration, cumulative_spectrum, differential_spectrum.
-temperature_step_C=None keeps native processing; supply 0.5 for a count-selection grid.
-temperature_method=latest by default; latest uses the last observation at target or warmer.
-max selects highest warmer frozen fraction, keeping the original frozen/total pair; latest wins ties.
-window selects maximum frozen count in a centered window; latest wins ties.
-temperature_window_C is full width, required only for window (0.5 means +/-0.25 C).
-No extra tolerance, invented zero counts, interpolation of counts or extrapolation.
-Ranges apply to sources and targets. Empty sample windows are missing; missing blanks error.
-Sample and blank are selected separately by the same rule before joint MLE or Average calculation.
-Shared blank wells count once; runs retain separate backgrounds; cycles are not pooled.
-Original temperatures/IDs remain in result source records and the unchanged experiment.
-curve_fit.py consumes selected grid states without reapplying latest or treating them as new wells.
-MLE checks raw eligible history too: selection cannot hide changing totals or decreasing counts.
-processing.py uses the common estimator for individual grid spectra; results.py retains grid intervals.
-CLI flags: --temperature-step-C, --temperature-method, --temperature-window-C; capabilities advertises them.
-README.md and ICESCOPY_HANDOFF.md document semantics and process-dialog/preference placement.
-154 relevant tests passed across grid, native, CLI, blank, differential, alignment and workflow checks.
-One expected invalid-timestamp warning; Ruff and git diff --check passed. No full-suite rerun.
-Raw M1 smoke check: 192 physical wells for all three rules with blank correction on.
-At -7 C: latest=max=0, window=0.000671 INP/L air (0.5 C full width).
-At -20 C: latest=max=1.091761, window=1.049187 INP/L air.
-That check used existing internal fit_step_C=output_step_C=0.5, separate from count selection.
-Notebook icescopy_raw_blank_comparison.ipynb and its prior outputs were not edited this turn.
-It reads /Volumes/Hailstone Data/Mentor data from Carson/(M1) 08.12.25 base rerun/freeze_count_timeseries.csv.
-Sample_0..4: dilutions 1,13,169,2197,28561; Sample_5 water blank; 32 wells each, 50 uL.
-Air conversion: 17829.1 L, 10 mL suspension, filter fraction 1, from adjacent OLAF reference.
-Import has 53286 rows; 2892 actual-image rows (482 images x6) supply the freezing histories.
-The notebook still fits original observations with 0.5 C curve knots and 0.5 C output targets.
-Prior no-selection values at -20: 1.147960 without blank, 1.073899 with blank INP/L air.
-Do not conflate selecting counts, curve-knot spacing and sampling the final fitted result.
-Still unvalidated: grid-model bias/interval coverage; earlier simulations thinned observations.
-No universal Vali resolution; its 0.5 C example had 507 droplets and concerned differential bins.
-Use Research/bin/python with PYTHONDONTWRITEBYTECODE=1, PYTHONPATH=src and BLAS threads=1.
-Ruff executable: /private/tmp/inptk-release-soxonxxd/quality/bin/ruff; use --no-cache.
-Do not reread grayscale arrays, full session JSON or notebook base64 outputs.
+Goal: simplify scientific Python/CLI design without changing grouping, cycles, or blank choices.
+Repo /Users/C832577250/Project/inptk; branch codex/measurement-results.
+Pre-refactor Git checkpoint: 55851aa; this note accompanies the completed refactor commit.
+No remote push, merge, Icescopy GUI edit, or live background analysis in this task.
+Decisions: one count-selection grid at the beginning; no final regridding or resampled result.
+Spacing: temperature_step_C; optional temperature_start_C / temperature_end_C are exact warm/cold endpoints.
+Endpoints default to None: use warmest/coldest temperatures of the curve's selected inputs, no rounding.
+Both endpoints included; the last interval can be shorter. Without spacing, native processing remains.
+Rules latest / max / window are unchanged; window requires full temperature_window_C width.
+Sample and blank independently use the same rule before estimation. No inferred blank roles.
+All supplied count/time/temperature rows remain available, with or without an image ID.
+Cycles remain separate. Shared physical blanks enter once; different runs retain their own backgrounds.
+fit_step_C controls MLE shape only, never reporting temperatures; it is rejected for Average.
+Core: estimation.py now owns shared concentration calculation; context.py validates inputs.
+settings.py owns scalar defaults/validation shared by Python and CLI.
+processing.py individual spectra use the same estimator; duplicate Average calculation path removed.
+Public differentiate_spectrum(cumulative) differences an existing individual spectrum without fitting.
+Workflow differential output reuses already calculated concentrations; no second fit.
+workflows.py orchestrates estimation, optional correction, units, final selection and result assembly.
+No processing/workflows circular imports remain.
+Saved format is 4; old versions rejected without fallback. CLI protocol remains 2, package 0.4.0.
+CLI preview, suggest-ranges, analyze, export-csv, capabilities remain; final-grid flags removed.
+README.md, ICESCOPY_HANDOFF.md and examples/standard_workflow.py match current interfaces.
+Both M1 notebooks executed successfully, all 53,286 raw CSV rows preserved; 102 analysis temperatures.
+Sample_0..4: dilutions 1,13,169,2197,28561; explicit Sample_5 blank; 32 wells each, 50 uL.
+Air conversion 17829.1 L, 10 mL suspension, filter fraction 1 from adjacent OLAF reference.
+Source CSV and reference hashes unchanged. External notebook export disabled.
+Verification: 710 tests passed; one expected invalid-timestamp parsing warning.
+Ruff, mypy (29 files), Bandit, Git whitespace review and executable standard example passed.
+Wheel built/installed in temporary directory; installed executable capabilities, blank fit, bounds and CSV passed.
+No known implementation failures remain. Statistical coverage of joint-model intervals is not validated broadly.
+Commands: Research/bin/python; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src OPENBLAS_NUM_THREADS=1.
+Quality tools: /private/tmp/inptk-release-soxonxxd/quality/bin; keep caches/builds outside repository.
+Next: integrate explicit choices and direct result plotting in Icescopy using ICESCOPY_HANDOFF.md.
+Do not reread archive image arrays, full notebook outputs, or obsolete image-only diagnostic numbers.

@@ -2,7 +2,6 @@
 
 import pandas as pd
 import pytest
-from analysis_checks import sampled
 
 import inptk
 
@@ -121,7 +120,7 @@ def test_average_workflow_keeps_native_corrected_states_without_a_grid():
     row = fractions.to_dataframe().set_index("temperature_C").loc[-10]
     assert (row.n_frozen, row.n_total) == (10, 20)
     result = inptk.analyze_concentration(source, method="average")
-    assert sampled(result) is None
+    assert not hasattr(next(iter(result.curves.values())), "resampled")
     assert result.settings["observation_processing"].startswith("native")
     pd.testing.assert_frame_equal(fractions.to_dataframe(), result.frozen_fraction.to_dataframe())
 

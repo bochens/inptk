@@ -388,11 +388,11 @@ def test_roundtrip_retains_discarded_final_values_and_uncertainty(tmp_path, poli
     )
 
 
-def test_saving_analysis_without_optional_resampled_output(tmp_path):
+def test_saved_analysis_has_one_cumulative_output_per_curve(tmp_path):
     result = inptk.analyze_concentration(experiment())
     result.save(tmp_path / "result.inptk")
     restored = inptk.load(tmp_path / "result.inptk")
-    assert all(curve.resampled is None for curve in restored.curves.values())
+    assert all(not hasattr(curve, "resampled") for curve in restored.curves.values())
     pd.testing.assert_frame_equal(
         retained(restored).to_dataframe(), retained(result).to_dataframe()
     )

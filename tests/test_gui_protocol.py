@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from analysis_checks import retained, sampled
+from analysis_checks import retained
 
 import inptk
 from inptk import cli
@@ -28,7 +28,7 @@ def call(*args):
     )
     payload = json.loads(process.stdout)
     assert payload["protocol_version"] == 2
-    assert payload["saved_format_version"] == 3
+    assert payload["saved_format_version"] == 4
     assert payload["toolkit_version"] == inptk.__version__
     return process, payload
 
@@ -72,7 +72,7 @@ def test_capabilities_describe_live_arguments_and_methods():
     analyze = {item["name"]: item for item in reply["commands"]["analyze"]["options"]}
     assert analyze["method"]["choices"] == ["mle", "average"]
     assert analyze["method"]["default"] == "mle"
-    assert analyze["output_step_C"]["default"] is None
+    assert analyze["temperature_step_C"]["default"] is None
     assert analyze["sample"]["repeatable"]
     assert analyze["no_water_blank_correction"]["type"] == "boolean"
     assert analyze["temperature_method"]["choices"] == ["latest", "max", "window"]
@@ -178,7 +178,7 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
         method,
         "--curves",
         json.dumps(groups),
-        "--output-step-C",
+        "--temperature-step-C",
         "0.5",
         "--out",
         output,
@@ -191,7 +191,7 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
         inptk.read_counts(frame, metadata=metadata),
         method=method,
         curves=groups,
-        output_step_C=0.5,
+        temperature_step_C=0.5,
     )
     pd.testing.assert_frame_equal(
         retained(result).to_dataframe(), retained(expected).to_dataframe()
@@ -204,9 +204,9 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
     assert process.returncode == 0
     assert saved_preview["table"]["rows"] == preview["table"]["rows"]
     csv = tmp_path / "grid.csv"
-    process, exported = call("export-csv", output, "--table", "resampled", "--out", csv, "--json")
-    assert process.returncode == 0 and exported["table"] == "resampled"
-    assert len(pd.read_csv(csv)) == len(sampled(result))
+    process, exported = call("export-csv", output, "--table", "cumulative", "--out", csv, "--json")
+    assert process.returncode == 0 and exported["table"] == "cumulative"
+    assert len(pd.read_csv(csv)) == len(retained(result))
     process, rejected = call("export-csv", output, "--out", csv, "--json")
     assert process.returncode == 1 and rejected["error"]["code"] == "output_exists"
     assert path.read_bytes() == original
