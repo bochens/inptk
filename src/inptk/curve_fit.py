@@ -12,30 +12,43 @@ from .resampling import _grid
 
 
 def _trajectory(rows, *, name):
-    rows = rows.drop_duplicates("observation_id")
-    if "time_s" in rows:
+    gridded = "fit_temperature_C" in rows
+    rows = rows.drop_duplicates(
+        ["observation_id", "fit_temperature_C"] if gridded else ["observation_id"]
+    )
+    if gridded:
+        rows = rows.sort_values("fit_temperature_C", ascending=False, kind="stable").copy()
+        rows["temperature_C"] = rows.fit_temperature_C
+    elif "time_s" in rows:
         rows = rows.sort_values("time_s", kind="stable")
     rows = rows.reset_index(drop=True)
-    if rows.n_total.nunique() != 1:
+    if rows.n_total.nunique() != 1 or (
+        gridded and not rows.source_total_is_fixed.all()
+    ):
         raise ValueError(
             f"Joint MLE requires a fixed set of wells: {name!r} has changing total counts. "
             "Supply raw counts or select a valid temperature range; corrected totals "
             "cannot be treated as independent freezing events."
         )
-    if rows.n_frozen.diff().lt(0).any():
+    if rows.n_frozen.diff().lt(0).any() or (
+        gridded and not rows.source_frozen_is_cumulative.all()
+    ):
         raise ValueError(
             f"Joint MLE requires cumulative first-freezing counts: {name!r} has a decrease. "
             "Review the raw freezing observations or select a valid temperature range."
         )
     # Use the established latest-warmer rule for holds and temperature reversals.
     # This is an analysis view only; the Experiment keeps every original row.
-    observed = rows.temperature_C.to_numpy(dtype=float)
-    targets = np.unique(observed)[::-1]
-    order = np.argsort(-observed, kind="stable")
-    last = np.searchsorted(-observed[order], -targets, side="right") - 1
-    positions = np.maximum.accumulate(order)[last]
-    selected = rows.iloc[positions].copy()
-    selected["temperature_C"] = targets
+    if gridded:
+        selected = rows
+    else:
+        observed = rows.temperature_C.to_numpy(dtype=float)
+        targets = np.unique(observed)[::-1]
+        order = np.argsort(-observed, kind="stable")
+        last = np.searchsorted(-observed[order], -targets, side="right") - 1
+        positions = np.maximum.accumulate(order)[last]
+        selected = rows.iloc[positions].copy()
+        selected["temperature_C"] = targets
     # Zero-event runs telescope exactly in the event likelihood. Keep both
     # edges of every observed increase and the observation-period endpoints.
     changed = np.flatnonzero(selected.n_frozen.diff().fillna(0).gt(0))
@@ -96,7 +109,11 @@ def fit_curve(points, experiment, *, z, fit_step_C=None, output_step_C=None):
         "observation_count": observation_count,
         "likelihood": "first_freezing_intervals_and_unfrozen_survivors",
         "monotonicity": "nonnegative_sample_and_background_increments_during_cooling",
-        "temperature_view": "latest_warmer; original rows remain in experiment",
+        "temperature_view": (
+            f"selected grid: {sample_pieces[0].temperature_selection.iloc[0]}"
+            if "fit_temperature_C" in sample_pieces[0]
+            else "latest_warmer; original rows remain in experiment"
+        ),
         "temperature_order": "warm_to_cold",
         "uncertainty": "pointwise_profile_bounds_from_joint_curve_likelihood",
         "confidence_drop": z**2 / 2,

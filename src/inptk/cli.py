@@ -125,6 +125,18 @@ def build_parser():
         type=float,
         help="Optional temperature spacing applied only to the final result",
     )
+    analyze.add_argument(
+        "--temperature-step-C", type=float,
+        help="Optional count-selection grid spacing before estimation and blank correction",
+    )
+    analyze.add_argument(
+        "--temperature-method", choices=("latest", "max", "window"), default="latest",
+        help="Select latest warmer counts, maximum warmer fraction, or maximum count in a window",
+    )
+    analyze.add_argument(
+        "--temperature-window-C", type=float,
+        help="Full centered window width in degrees C; required only for window",
+    )
     analyze.add_argument("--output-method", choices=("sample", "interpolate"), default="sample")
     analyze.add_argument("--z", type=float, default=1.96)
     analyze.add_argument("--differential", action="store_true")
@@ -503,6 +515,9 @@ def main(argv=None):
             experiment,
             method=args.method,
             temperature_ranges_C=temperature_ranges,
+            temperature_step_C=args.temperature_step_C,
+            temperature_method=args.temperature_method,
+            temperature_window_C=args.temperature_window_C,
             curves=curves,
             output_basis=args.output_basis,
             output_step_C=args.output_step_C,

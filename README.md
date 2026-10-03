@@ -800,10 +800,56 @@ rows; duplicate temperatures therefore have the same fitted concentration.
 History records the physical well count, selected observation identities, and
 the joint model for each named curve.
 
-The workflow does not round temperatures, add warm zero counts, select maxima,
-or cut observations off at the first temperature minimum. There are no public
-`temperature_method`, `temperature_tolerance_C`, or pre-calculation `step_C`
-arguments. Original counts stay available in the saved experiment.
+By default the workflow uses original temperatures. To select count observations
+on a regular grid **before** concentration estimation, supply `temperature_step_C`.
+The same rule is applied separately to every sample and blank, within each run
+and cycle. Original counts stay available in the saved experiment.
+
+| `temperature_method` | Observation used at each grid temperature |
+| --- | --- |
+| `latest` (default) | Last observation at that temperature or warmer; no colder allowance |
+| `max` | Largest observed frozen fraction at that temperature or warmer; latest observation wins ties |
+| `window` | Largest frozen count within a centered window; latest observation wins ties |
+
+All rules keep the selected row's frozen and total counts together. `max` and
+`latest` normally agree for cumulative first-freezing counts with fixed well totals.
+`window` requires `temperature_window_C`, the **full width**: `0.5` means ±0.25 °C.
+There is no additional temperature tolerance. Targets stay within observed
+temperature coverage, and both the source observation and target must satisfy
+any named input range. Empty sample windows give missing points, not invented
+zeros. A missing required blank window raises an error; it is not filled using
+another rule. No extrapolation or interpolation of counts is performed.
+
+```python
+result = inptk.analyze_concentration(
+    experiment,
+    method="mle",                 # also works with "average"
+    temperature_step_C=0.5,
+    temperature_method="latest", # "max" or "window"
+    # temperature_window_C=0.5,   # required only for "window"
+)
+```
+
+The same arguments work with `estimate_concentration`, `cumulative_spectrum`,
+and `differential_spectrum` for step-by-step processing. The CLI equivalents are
+`--temperature-step-C 0.5 --temperature-method latest` and, for `window`,
+`--temperature-window-C 0.5`. The CLI capability response advertises these choices.
+Using a nondefault rule without a selection grid, or a window width with another
+rule, raises an error instead of ignoring the setting.
+
+Selection precedes blank correction: MLE jointly fits selected sample and blank
+histories, including blank uncertainty; Average estimates background-corrected
+concentrations from the selected count pairs before combining them. Shared blank
+wells are counted once. MLE still requires fixed well totals and nondecreasing
+first-freezing counts; selection cannot hide a failure of those requirements in
+the original eligible observations. Saved source records identify both the actual
+observation temperature and the grid temperature used for calculation.
+
+This selection changes the observations used by the calculation and can change
+both estimates and uncertainty. The intervals do not account for uncertainty
+in the selected temperature or choice of window. It is separate from the
+experimental MLE curve-knot spacing, which controls the fitted curve's shape,
+and from the output grid below, which does not refit observations.
 
 To request a regular grid **after** calculation and final selection:
 

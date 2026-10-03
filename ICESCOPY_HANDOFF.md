@@ -21,6 +21,9 @@ for each analysis; changing Preferences must not change a saved result.
 | `curves` | Name each output and select its physical inputs and cycle | Never store session input names globally |
 | `method` | MLE or Average | Initial `mle` |
 | `temperature_ranges_C` | Inclusive cold/warm limits for each input | Never store input-specific ranges globally |
+| `temperature_step_C` | Optional grid for selecting counts before calculation | Initial off; offer 0.5 °C |
+| `temperature_method` | Latest warmer, maximum warmer fraction, or centered window | Initial `latest` |
+| `temperature_window_C` | Full window width, shown and required only for `window` | Optional initial width |
 | `water_blank_map` | Assign raw blank sets to inputs | Never store session assignments globally |
 | `water_blank_correction` | Apply blank correction checkbox, keeping assignments when off | Initial on; no map means no correction |
 | `output_basis` | Suspension, sampled air or dry soil with required metadata | Avoid assuming one basis for every sample |
@@ -109,8 +112,15 @@ Provide inclusive cold (`min_C`) and warm (`max_C`) handles and numeric fields f
 each input. Omitted boundaries are unlimited. Ranges apply to targets and source
 observations, shared across selected cycles. MLE fits all eligible histories
 together; Average combines eligible estimates at each temperature. Zero
-contributors leave a gap. There is no
-separate stitching control, temperature-selection mode or tolerance control.
+contributors leave a gap. There is no separate stitching or tolerance control.
+An optional **Count-selection grid** enables `latest`, `max`, or `window` through
+`--temperature-step-C` and `--temperature-method`. Window requires a full width
+through `--temperature-window-C` (0.5 °C means ±0.25 °C). Show that field only for
+window. Apply the same choice separately to sample and blank before correction.
+An empty sample window stays missing; an empty required blank window is an error.
+Keep this distinct from the final output grid: changing count selection refits
+the analysis. Preserve and display measured temperatures alongside selected grid
+temperatures in source details. CLI `capabilities` exposes flags and defaults.
 Automatic Average suggestions fill these same editable controls; MLE limits
 remain manually chosen.
 
@@ -149,7 +159,7 @@ the saved analysis records the applied ranges, not the discarded suggestions.
 Suggestions use count thresholds, not corrected-concentration peaks. They cannot
 guarantee a monotone Average curve when contributors change.
 
-Use original counts and temperatures. Matching observations retain their native
+Without a count-selection grid, use original counts and temperatures. Matching observations retain their native
 sequence. Alignment uses the latest observation at or warmer than the target
 only where matching is needed. Native order follows observation time or original
 row order. Independent streams use warm-to-cold target order. Sampling or

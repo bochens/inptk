@@ -1,38 +1,40 @@
 INP-toolkit handoff — 2026-10-02
-Goal completed this turn: test the requested raw Icescopy CSV with blank correction on/off.
-User resumed after the previous stopping point; no background work is scheduled.
-Repo /Users/C832577250/Project/inptk; branch codex/measurement-results.
-Before this turn: checkpoint 29b1297; current changes are checkpointed with this note.
-New notebook: notebook/icescopy_raw_blank_comparison.ipynb (executed).
-Input: /Volumes/Hailstone Data/Mentor data from Carson/(M1) 08.12.25 base rerun/freeze_count_timeseries.csv
-CSV is read directly with inptk.read_icescopy; no archive reconstruction is required.
-Sample_0..4 are one parent sample at dilutions 1,13,169,2197,28561.
-Sample_5 is explicitly labelled water blank; all inputs have 32 wells of 50 uL.
-CSV blanket dilution 28561 on Sample_5 is recorded then normalized to 1; blank role has no sample dilution.
-Missing air metadata comes from adjacent matching OLAF reference: 17829.1 L air, 10 mL suspension, filter fraction 1.
-Metadata source paths, overrides and SHA256 checksums are recorded in the notebook experiment.
-Imported 53286 rows (8881 timestamps x6); selected 2892 rows (482 actual images x6) for freezing histories.
-Temperature-only rows stay in imported counts; the fit uses actual image observations.
-Experimental sample and background fit use monotone cumulative concentrations linear between 0.5 C knots.
-Output concentrations AND profile bounds are evaluated directly every 0.5 C; original counts are unchanged.
-Correction off: 160 physical sample wells. Correction on: 160 sample +32 blank wells counted once.
-At -20 C: without blank 1.147960; with blank 1.073899; OLAF 1.199122 INP/L air.
-At -25 C: without blank 21.918152; with blank 16.322468; OLAF 17.082683 INP/L air.
-At -28 C: without blank 501.513497; with blank 284.553342; OLAF 324.103108 INP/L air.
-Corrected values match the earlier project's 0.5 C fit; these are the same freezing events, not independent validation.
-Importer fix: src/inptk/_engine/adapters.py now reads per-input well_volume_uL comment rows.
-Existing explicit session-wide volume remains supported; a supplied per-input field takes precedence.
-Regression test checks unequal sample/blank volumes through an actual blank-corrected concentration calculation.
-28 workflow tests passed (one expected invalid-timestamp warning); Ruff and diff check passed.
-Notebook executed successfully; input/reference checksums and original selected count equality passed.
-README links the executed comparison and explains per-input volumes and explicit blank assignment.
-Previous notebook icescopy_freeze_count_to_air_inp_demo.ipynb remains unchanged this turn.
-Latest figure /private/tmp/inptk-raw-blank-comparison.png; execution log same stem .log.
-Experimental grid fit remains internal; public workflow/CLI MLE defaults were not changed.
-Still unvalidated: grid model bias and interval coverage, especially blank-only simplification.
-Earlier simulations under /private/tmp/inptk-mle-assessment used thinned counts, not this linear-knot model.
-No universal Vali resolution; 0.5 C example had 507 droplets and concerned differential bins.
-No push, merge, full-suite rerun or package build this turn. No live analysis jobs remain.
+Current goal completed: add latest, max and window count-selection choices before blank correction.
+Repo /Users/C832577250/Project/inptk; branch codex/measurement-results; pre-edit checkpoint 95968e1.
+No background jobs, push or merge. These changes are checkpointed with this note.
+Core: src/inptk/temperature_selection.py; alignment.py delegates explicit grids to it.
+Public: analyze_concentration, estimate_concentration, cumulative_spectrum, differential_spectrum.
+temperature_step_C=None keeps native processing; supply 0.5 for a count-selection grid.
+temperature_method=latest by default; latest uses the last observation at target or warmer.
+max selects highest warmer frozen fraction, keeping the original frozen/total pair; latest wins ties.
+window selects maximum frozen count in a centered window; latest wins ties.
+temperature_window_C is full width, required only for window (0.5 means +/-0.25 C).
+No extra tolerance, invented zero counts, interpolation of counts or extrapolation.
+Ranges apply to sources and targets. Empty sample windows are missing; missing blanks error.
+Sample and blank are selected separately by the same rule before joint MLE or Average calculation.
+Shared blank wells count once; runs retain separate backgrounds; cycles are not pooled.
+Original temperatures/IDs remain in result source records and the unchanged experiment.
+curve_fit.py consumes selected grid states without reapplying latest or treating them as new wells.
+MLE checks raw eligible history too: selection cannot hide changing totals or decreasing counts.
+processing.py uses the common estimator for individual grid spectra; results.py retains grid intervals.
+CLI flags: --temperature-step-C, --temperature-method, --temperature-window-C; capabilities advertises them.
+README.md and ICESCOPY_HANDOFF.md document semantics and process-dialog/preference placement.
+154 relevant tests passed across grid, native, CLI, blank, differential, alignment and workflow checks.
+One expected invalid-timestamp warning; Ruff and git diff --check passed. No full-suite rerun.
+Raw M1 smoke check: 192 physical wells for all three rules with blank correction on.
+At -7 C: latest=max=0, window=0.000671 INP/L air (0.5 C full width).
+At -20 C: latest=max=1.091761, window=1.049187 INP/L air.
+That check used existing internal fit_step_C=output_step_C=0.5, separate from count selection.
+Notebook icescopy_raw_blank_comparison.ipynb and its prior outputs were not edited this turn.
+It reads /Volumes/Hailstone Data/Mentor data from Carson/(M1) 08.12.25 base rerun/freeze_count_timeseries.csv.
+Sample_0..4: dilutions 1,13,169,2197,28561; Sample_5 water blank; 32 wells each, 50 uL.
+Air conversion: 17829.1 L, 10 mL suspension, filter fraction 1, from adjacent OLAF reference.
+Import has 53286 rows; 2892 actual-image rows (482 images x6) supply the freezing histories.
+The notebook still fits original observations with 0.5 C curve knots and 0.5 C output targets.
+Prior no-selection values at -20: 1.147960 without blank, 1.073899 with blank INP/L air.
+Do not conflate selecting counts, curve-knot spacing and sampling the final fitted result.
+Still unvalidated: grid-model bias/interval coverage; earlier simulations thinned observations.
+No universal Vali resolution; its 0.5 C example had 507 droplets and concerned differential bins.
 Use Research/bin/python with PYTHONDONTWRITEBYTECODE=1, PYTHONPATH=src and BLAS threads=1.
-Ruff: /private/tmp/inptk-release-soxonxxd/quality/bin/ruff --no-cache.
+Ruff executable: /private/tmp/inptk-release-soxonxxd/quality/bin/ruff; use --no-cache.
 Do not reread grayscale arrays, full session JSON or notebook base64 outputs.

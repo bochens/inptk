@@ -109,6 +109,9 @@ def cumulative_spectrum(
     *,
     experiment: Experiment,
     temperature_ranges_C=None,
+    temperature_step_C: float | None = None,
+    temperature_method: str = "latest",
+    temperature_window_C: float | None = None,
     z: float = 1.96,
     method: str = "mle",
     water_blank_correction: bool = True,
@@ -117,15 +120,28 @@ def cumulative_spectrum(
 
     MLE fits each physical input's full freezing trajectory and its raw blanks.
     Average retains separate temperature estimates. All original observation
-    rows remain in this table; fitted values are evaluated at their temperatures.
+    rows remain in this table by default; fitted values use their temperatures.
+    With temperature_step_C, return selected grid states with original source
+    identities and observed temperatures recorded separately.
     """
     from urllib.parse import quote
 
     from .methods import validate_combination_method
+    from .temperature_selection import validate_temperature_selection
     from .water_blank import sample_rows
     from .workflows import estimate_concentration
 
     method = validate_combination_method(method)
+    validate_temperature_selection(
+        temperature_step_C, temperature_method, temperature_window_C
+    )
+    if temperature_step_C is not None:
+        return _gridded_cumulative_spectrum(
+            fractions, experiment=experiment, temperature_ranges_C=temperature_ranges_C,
+            temperature_step_C=temperature_step_C, temperature_method=temperature_method,
+            temperature_window_C=temperature_window_C, method=method, z=z,
+            water_blank_correction=water_blank_correction,
+        )
     if method == "average":
         return _pointwise_cumulative_spectrum(
             fractions, experiment=experiment, temperature_ranges_C=temperature_ranges_C,
@@ -173,6 +189,44 @@ def cumulative_spectrum(
                 row["blank_n_total"] = (
                     sum(item.n_total for item in observed) if observed else np.nan
                 )
+            records.append(row)
+    settings = {**estimated.history[-1], "operation": "cumulative_spectrum"}
+    return CumulativeSpectrumTable(pd.DataFrame(records), history=fractions.history + [settings])
+
+
+def _gridded_cumulative_spectrum(fractions, *, experiment, **options):
+    """Use the named-curve estimator for individual grid curves too."""
+    from .water_blank import sample_rows
+    from .workflows import estimate_concentration
+
+    fractions, view = prepare_fraction_analysis(
+        fractions, experiment, water_blank_correction=options["water_blank_correction"],
+    )
+    frame = fractions.to_dataframe()
+    keys = ["measurement_id", "run_id", "cycle_id"]
+    inputs = list(sample_rows(frame, view).groupby(keys, sort=False))
+    choices = {str(i): {"inputs": [identity[0]], "cycle": identity[2]}
+               for i, (identity, _) in enumerate(inputs)}
+    estimated = estimate_concentration(fractions, experiment=experiment, curves=choices, **options)
+    originals = frame.set_index([*keys, "observation_id"])
+    records = []
+    for i, (identity, _) in enumerate(inputs):
+        for values in estimated.select(curve_id=str(i)).to_dataframe().to_dict("records"):
+            values.pop("curve_id")
+            sources = json.loads(values["source_observations"])
+            samples = [item for item in sources if item["role"] == "sample"]
+            row = dict(zip(keys, identity, strict=True))
+            if samples:
+                item = samples[0]
+                row.update(originals.loc[tuple(item[k] for k in (*keys, "observation_id"))])
+                row["source_observation_id"] = item["observation_id"]
+                row["observed_temperature_C"] = item["observed_temperature_C"]
+            # A selected state is distinct from its original observation and can
+            # reuse it at several grid targets. Original IDs remain in sources.
+            row.update(values, observation_id=f"grid:{values['point_order']}")
+            row["selection_status"] = (
+                "selected" if samples else "no_eligible_observation"
+            )
             records.append(row)
     settings = {**estimated.history[-1], "operation": "cumulative_spectrum"}
     return CumulativeSpectrumTable(pd.DataFrame(records), history=fractions.history + [settings])
@@ -314,6 +368,9 @@ def differential_spectrum(
     *,
     experiment: Experiment,
     temperature_ranges_C=None,
+    temperature_step_C: float | None = None,
+    temperature_method: str = "latest",
+    temperature_window_C: float | None = None,
     method: str = "mle",
     z: float = 1.96,
     water_blank_correction: bool = True,
@@ -330,6 +387,9 @@ def differential_spectrum(
         fractions,
         experiment=experiment,
         temperature_ranges_C=temperature_ranges_C,
+        temperature_step_C=temperature_step_C,
+        temperature_method=temperature_method,
+        temperature_window_C=temperature_window_C,
         method=method,
         z=z,
         water_blank_correction=water_blank_correction,

@@ -50,10 +50,13 @@ def assemble_curves(
             joint_fit = any(
                 entry.get("estimation_method") == "mle" for entry in cumulative.history
             )
-            if joint_fit:
+            selected_grid = any(
+                entry.get("temperature_step_C") is not None for entry in cumulative.history
+            )
+            if joint_fit or selected_grid:
                 # A fitted temperature can represent several original images.
-                # Keep an original cooling interval whenever both fitted
-                # temperatures survived, not just its chosen representative ID.
+                # Grid selection also has its own state IDs. Keep an interval
+                # when both endpoints survived, not by original image IDs.
                 temperatures = cumulative.to_dataframe().temperature_C
                 keep = data.temperature_bin_left_C.isin(temperatures) & (
                     data.temperature_bin_right_C.isin(temperatures)

@@ -158,8 +158,11 @@ def _sources(point) -> list[dict]:
             item.update(
                 role=role,
                 observed_temperature_C=float(row["temperature_C"]),
-                alignment="exact" if row["temperature_C"] == point.temperature_C else "latest",
+                alignment=row.get("temperature_selection", "exact"
+                                  if row["temperature_C"] == point.temperature_C else "latest"),
             )
+            if "fit_temperature_C" in row:
+                item["selected_temperature_C"] = float(row["fit_temperature_C"])
             if "time_s" in row and pd.notna(row["time_s"]):
                 item["time_s"] = float(row["time_s"])
             records.append(item)
@@ -172,6 +175,9 @@ def estimate_concentration(
     experiment: Experiment,
     method: Literal["mle", "average"] = "mle",
     temperature_ranges_C=None,
+    temperature_step_C: float | None = None,
+    temperature_method: Literal["latest", "max", "window"] = "latest",
+    temperature_window_C: float | None = None,
     curves=None,
     z: float = 1.96,
     water_blank_correction: bool = True,
@@ -183,6 +189,9 @@ def estimate_concentration(
     align only where needed, using latest warmer states at observed targets.
     MLE fits complete freezing histories with monotone sample and blank curves;
     Average estimates each target separately. Original count rows stay unchanged.
+    temperature_step_C instead selects count pairs on a regular grid before
+    either estimator. latest/max use warmer states; window uses a full-width
+    centered window. Sample and blank use the same rule, before correction.
     """
     method = validate_combination_method(method)
     if not np.isfinite(z) or z <= 0:
@@ -215,7 +224,9 @@ def estimate_concentration(
                 float(selected.temperature_C.max()),
             )
         points = align_observations(
-            frame, members, water_blank_map=experiment.water_blank_map, temperature_ranges_C=ranges
+            frame, members, water_blank_map=experiment.water_blank_map, temperature_ranges_C=ranges,
+            temperature_step_C=temperature_step_C, temperature_method=temperature_method,
+            temperature_window_C=temperature_window_C,
         )
         if method == "mle":
             from dataclasses import replace
@@ -312,9 +323,13 @@ def estimate_concentration(
         "curves": curve_specifications(groups),
         "curve_sources": groups,
         "temperature_ranges_C": ranges,
+        "temperature_step_C": temperature_step_C,
+        "temperature_method": temperature_method,
+        "temperature_window_C": temperature_window_C,
         "range_boundaries": "inclusive; source and target",
         "alignment": group_alignment,
-        "alignment_rule": "latest observation at or warmer than target, only where needed",
+        "alignment_rule": temperature_method if temperature_step_C is not None else
+        "latest observation at or warmer than target, only where needed",
         "z": float(z),
         "confidence_drop": float(z**2 / 2),
         "water_blank_correction": water_blank_correction,
@@ -450,6 +465,9 @@ def analyze_concentration(
     *,
     method: Literal["mle", "average"] = "mle",
     temperature_ranges_C=None,
+    temperature_step_C: float | None = None,
+    temperature_method: Literal["latest", "max", "window"] = "latest",
+    temperature_window_C: float | None = None,
     curves=None,
     output_basis: str = "suspension",
     z: float = 1.96,
@@ -460,7 +478,7 @@ def analyze_concentration(
     output_step_C: float | None = None,
     output_method: Literal["sample", "interpolate"] = "sample",
 ) -> AnalysisResult:
-    """Use original observations, align only when needed, and optionally grid the result."""
+    """Analyze native or explicitly selected counts; optionally grid the final result."""
     from .water_blank import analysis_experiment
 
     _validate_decrease_policy(decrease_policy)
@@ -491,6 +509,9 @@ def analyze_concentration(
         experiment=experiment,
         method=method,
         temperature_ranges_C=temperature_ranges_C,
+        temperature_step_C=temperature_step_C,
+        temperature_method=temperature_method,
+        temperature_window_C=temperature_window_C,
         curves=curves,
         z=z,
         water_blank_correction=water_blank_correction,
@@ -549,6 +570,9 @@ def analyze_concentration(
             analysis_fractions,
             experiment=experiment,
             temperature_ranges_C=temperature_ranges_C,
+            temperature_step_C=temperature_step_C,
+            temperature_method=temperature_method,
+            temperature_window_C=temperature_window_C,
             method=method,
             z=z,
             water_blank_correction=water_blank_correction,
@@ -559,8 +583,15 @@ def analyze_concentration(
     settings = {
         "estimation_method": method,
         "temperature_ranges_C": combined.history[-1]["temperature_ranges_C"],
+        "temperature_step_C": temperature_step_C,
+        "temperature_method": temperature_method,
+        "temperature_window_C": temperature_window_C,
         "curves": combined.history[-1]["curves"],
-        "observation_processing": "native; latest warmer alignment only where required",
+        "observation_processing": (
+            f"selected {temperature_step_C:g} C grid; {temperature_method}; before blank correction"
+            if temperature_step_C is not None else
+            "native; latest warmer alignment only where required"
+        ),
         "output_basis": output_basis,
         "output_step_C": output_step_C,
         "output_method": output_method if sampled is not None else None,

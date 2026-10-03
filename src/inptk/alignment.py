@@ -88,15 +88,24 @@ def align_observations(
     *,
     water_blank_map: Mapping[str, Sequence[str]],
     temperature_ranges_C: Mapping[str, Mapping] | None,
+    temperature_step_C: float | None = None,
+    temperature_method: str = "latest",
+    temperature_window_C: float | None = None,
 ) -> list[AlignedPoint]:
-    """Keep native matched sequences; otherwise select latest warmer observed states.
+    """Keep native sequences, or explicitly select counts on a regular grid.
 
     Sample members identify one physical set and one cycle. An aligned target is
-    drawn from the union of original sample temperatures, never an invented grid.
+    drawn from original sample temperatures unless temperature_step_C is supplied.
     Native rows keep their actual temperature, counts, time and observation ID.
     Each physical blank enters a point once. Matching sample/blank acquisitions
     move together for synchronized runs. No source sequence is cooling-trimmed.
+    An explicit grid selects samples and blanks independently by the same rule.
     """
+    from .temperature_selection import grid_points, validate_temperature_selection
+
+    validate_temperature_selection(
+        temperature_step_C, temperature_method, temperature_window_C
+    )
     required = {
         "measurement_id",
         "run_id",
@@ -130,6 +139,12 @@ def align_observations(
         len({cycle for run_id, cycle in run_members if run_id == run}) > 1 for run, _ in run_members
     ):
         raise ValueError("One calculation group cannot combine cycles from the same run")
+
+    if temperature_step_C is not None:
+        return grid_points(
+            frame, members, water_blank_map=water_blank_map, ranges=ranges,
+            step_C=temperature_step_C, method=temperature_method, window_C=temperature_window_C,
+        )
 
     blank_streams: dict[tuple[str, str, str], pd.DataFrame] = {}
     for measurement, run, cycle in streams:
