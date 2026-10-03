@@ -196,11 +196,11 @@ def test_water_blank_analysis_rejects_synthetic_window_rows_even_when_disabled(
 
 
 @pytest.mark.parametrize("correction", [False, True])
-def test_full_analysis_no_longer_accepts_temperature_selection_options(
+def test_full_analysis_rejects_unknown_temperature_selection_rule(
     incomplete_blank_source, correction
 ):
     source, _ = incomplete_blank_source
-    with pytest.raises(TypeError, match="temperature_method"):
+    with pytest.raises(ValueError, match="temperature_method"):
         inptk.analyze_concentration(
             source, temperature_method="window_max_count", water_blank_correction=correction
         )

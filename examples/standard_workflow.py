@@ -5,7 +5,7 @@ import pandas as pd
 import inptk
 
 observations = []
-for measurement, counts in (("A_neat", [0, 4, 12]), ("A_diluted", [0, 1, 3])):
+for measurement, counts in (("A_neat", [0, 4, 30]), ("A_diluted", [0, 1, 3])):
     for cycle in ("1", "2"):
         for temperature, frozen in zip((-5, -6, -7), counts):
             observations.append(

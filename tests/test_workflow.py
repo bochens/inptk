@@ -219,13 +219,10 @@ def test_icescopy_reads_individual_sample_and_blank_well_volumes(tmp_path):
         "temperature_C,cycle,sample number total,sample number frozen,"
         "water number total,water number frozen\n-10,0,20,10,20,10\n"
     )
-    imported = inptk.read_icescopy(source)
+    imported = inptk.read_icescopy(source, water_blank_map={"sample": ["water"]})
     assert imported.measurements["sample"].droplet_volume_uL == 50
     assert imported.measurements["water"].droplet_volume_uL == 100
-    paired = inptk.Experiment(
-        counts=imported.counts, samples=imported.samples, measurements=imported.measurements,
-        water_blank_map={"sample": ["water"]},
-    )
+    paired = imported
     spectrum = inptk.estimate_concentration(inptk.frozen_fraction(paired), experiment=paired)
     # Equal frozen fractions at different well volumes do not imply zero sample INP.
     assert spectrum.to_dataframe().concentration.iloc[0] == pytest.approx(

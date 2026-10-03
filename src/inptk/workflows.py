@@ -174,6 +174,7 @@ def estimate_concentration(
     *,
     experiment: Experiment,
     method: Literal["mle", "average"] = "mle",
+    fit_step_C: float | None = None,
     temperature_ranges_C=None,
     temperature_step_C: float | None = None,
     temperature_method: Literal["latest", "max", "window"] = "latest",
@@ -194,6 +195,9 @@ def estimate_concentration(
     centered window. Sample and blank use the same rule, before correction.
     """
     method = validate_combination_method(method)
+    from .curve_fit import validate_fit_step
+
+    validate_fit_step(fit_step_C, method=method)
     if not np.isfinite(z) or z <= 0:
         raise ValueError("z must be finite and positive")
     fractions, experiment = prepare_fraction_analysis(
@@ -233,14 +237,44 @@ def estimate_concentration(
 
             from .curve_fit import fit_curve
 
-            estimates, joint_fits[curve_id] = fit_curve(points, experiment, z=z)
-            # A fitted temperature curve has one state per native temperature.
-            # Original image order and every count row stay in the experiment.
+            estimates, joint_fits[curve_id] = fit_curve(
+                points, experiment, z=z, fit_step_C=fit_step_C, output_step_C=fit_step_C
+            )
+            # A regular fitting grid is also the reporting grid. All selected
+            # input rows enter the fit above at their unchanged temperatures.
+            # A warmer state supplies display provenance, not a refitted count.
             by_temperature = {point.temperature_C: point for point in points}
-            points = [
-                replace(by_temperature[temperature], point_order=index, point_id=f"point:{index}")
-                for index, temperature in enumerate(sorted(by_temperature, reverse=True))
-            ]
+            native_temperatures = np.array(sorted(by_temperature, reverse=True))
+            report_temperatures = (
+                sorted(estimates, reverse=True) if fit_step_C is not None else native_temperatures
+            )
+            reported = []
+            for index, temperature in enumerate(report_temperatures):
+                position = np.searchsorted(-native_temperatures, -temperature, side="right") - 1
+                point = by_temperature[native_temperatures[position]]
+                if fit_step_C is not None:
+                    from .alignment import _in_range
+
+                    eligible = np.array([
+                        _in_range(temperature, ranges.get(name, {}))
+                        and supports[name][0] <= temperature <= supports[name][1]
+                        for name in point.samples.measurement_id
+                    ], dtype=bool)
+                    samples = point.samples.loc[eligible].copy()
+                    blank_names = {
+                        name for measurement in samples.measurement_id
+                        for name in experiment.water_blank_map.get(measurement, [])
+                    }
+                    point = replace(
+                        point, samples=samples,
+                        blanks=point.blanks.loc[point.blanks.measurement_id.isin(blank_names)].copy(),
+                    )
+                reported.append(replace(
+                    point, temperature_C=float(temperature), point_order=index,
+                    point_id=f"point:{index}",
+                    alignment="model_evaluation" if fit_step_C is not None else point.alignment,
+                ))
+            points = reported
         empty_count = 0
         group_alignment[curve_id] = sorted({point.alignment for point in points})
         for point in points:
@@ -320,6 +354,7 @@ def estimate_concentration(
     settings = {
         "operation": "estimate_concentration",
         "estimation_method": method,
+        "fit_step_C": fit_step_C,
         "curves": curve_specifications(groups),
         "curve_sources": groups,
         "temperature_ranges_C": ranges,
@@ -464,6 +499,7 @@ def analyze_concentration(
     experiment: Experiment,
     *,
     method: Literal["mle", "average"] = "mle",
+    fit_step_C: float | None = None,
     temperature_ranges_C=None,
     temperature_step_C: float | None = None,
     temperature_method: Literal["latest", "max", "window"] = "latest",
@@ -508,6 +544,7 @@ def analyze_concentration(
         fractions,
         experiment=experiment,
         method=method,
+        fit_step_C=fit_step_C,
         temperature_ranges_C=temperature_ranges_C,
         temperature_step_C=temperature_step_C,
         temperature_method=temperature_method,
@@ -574,6 +611,7 @@ def analyze_concentration(
             temperature_method=temperature_method,
             temperature_window_C=temperature_window_C,
             method=method,
+            fit_step_C=fit_step_C,
             z=z,
             water_blank_correction=water_blank_correction,
         )
@@ -582,6 +620,7 @@ def analyze_concentration(
     )
     settings = {
         "estimation_method": method,
+        "fit_step_C": fit_step_C,
         "temperature_ranges_C": combined.history[-1]["temperature_ranges_C"],
         "temperature_step_C": temperature_step_C,
         "temperature_method": temperature_method,

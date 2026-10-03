@@ -301,18 +301,21 @@ def _icescopy_observations(
 
 
 def read_icescopy(
-    source, *, sample_map: dict[str, str] | None = None, metadata=None, run_id: str = "1"
+    source, *, sample_map: dict[str, str] | None = None, metadata=None, run_id: str = "1",
+    water_blank_map: dict[str, list[str]] | None = None,
 ) -> Experiment:
     """Read Icescopy counts with the physical metadata required for concentration.
 
     Map exact measurement names to parent samples explicitly. Supplied metadata
     overrides only the named fields; missing values retain export-header values.
     Use read_observations for counts/fractions before physical metadata is ready.
+    For raw exports, water_blank_map assigns physical blank sets explicitly.
+    Every complete count row is retained; an image ID is not required.
     """
     data, records = _icescopy_observations(
         source, sample_map=sample_map, metadata=metadata, run_id=run_id, require_metadata=True
     )
-    experiment = read_counts(data, metadata=records)
+    experiment = read_counts(data, metadata=records, water_blank_map=water_blank_map)
     return Experiment(
         experiment.counts,
         experiment.samples,
@@ -321,6 +324,7 @@ def read_icescopy(
             "format": "icescopy",
             "path": str(source) if isinstance(source, (str, Path)) else None,
         },
+        water_blank_map=experiment.water_blank_map,
     )
 
 

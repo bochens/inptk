@@ -640,8 +640,9 @@ inptk analyze raw_counts.csv --format native --metadata measurements.csv \
 Sample/cycle selection retains the associated blank observations and metadata
 without producing blank samples as analysis results. Saved experiments preserve
 the assignment, so `--format saved` uses it directly and rejects an override.
-The current `--format icescopy` adapter does not carry raw blank context and
-rejects `--water-blank-map`; use raw native input for the joint model.
+Raw Icescopy CSV input also accepts `--water-blank-map`. Assign blanks explicitly
+in the analysis dialog or input settings. Short names, long names and text such
+as "water blank" never assign a processing role.
 
 Numerical and regression checks cover the raw-blank calculations, optional
 correction, saved results, and CLI behavior. These checks verify the implemented
@@ -650,11 +651,13 @@ intervals contain the true concentration across all experimental conditions.
 
 ## Icescopy integration
 
-The following importer reads the existing count export, which may already contain
-water correction. Its uncertainty is conditional on the supplied counts; it
-does not reconstruct raw sample/blank counts or infer blank uncertainty. For the
-new Icescopy analysis dialog, pass raw session counts through the native contract
-above and make the water-blank assignment in that dialog.
+The importer accepts raw Icescopy count exports and retains every row with time,
+temperature and freezing counts, including rows without an image ID. The user
+selects blank inputs explicitly in the analysis dialog. Pass that selection as
+`water_blank_map=` in Python or `--water-blank-map` on the command line. A map
+references selected input IDs; it never interprets descriptive names as roles.
+Already corrected exports cannot recover missing raw-blank uncertainty and must
+not receive another raw-blank correction.
 
 ```python
 experiment = inptk.read_icescopy(
@@ -677,7 +680,7 @@ records, for example `[{"sample_id":"Sample_0","well_volume_uL":50}]`.
 
 Per-input volume rows such as `# well_volume_uL,50,100` are read in the same
 input order as `# sample_name,...`; sample and blank volumes may differ. When
-the CSV contains raw counts, explicitly assign `Experiment.water_blank_map`
+the CSV contains raw counts, explicitly supply `read_icescopy(..., water_blank_map=...)`
 before calculating blank-corrected concentrations. A label such as "water blank"
 does not automatically enable correction. See the executed
 [raw CSV blank comparison](notebook/icescopy_raw_blank_comparison.ipynb) for a
@@ -848,8 +851,23 @@ observation temperature and the grid temperature used for calculation.
 This selection changes the observations used by the calculation and can change
 both estimates and uncertainty. The intervals do not account for uncertainty
 in the selected temperature or choice of window. It is separate from the
-experimental MLE curve-knot spacing, which controls the fitted curve's shape,
+MLE curve spacing (`fit_step_C`), which controls the fitted curve's shape,
 and from the output grid below, which does not refit observations.
+
+For the 0.5 °C joint sample-and-blank fit, use:
+
+```python
+result = inptk.analyze_concentration(experiment, method="mle", fit_step_C=0.5)
+```
+
+The CLI equivalent is `--method mle --fit-step-C 0.5`. This fits every selected
+count row at its supplied temperature and evaluates both concentration and its
+profile uncertainty bounds every 0.5 °C. Concentration is linear between fitting
+grid points and monotone during cooling. It does not select or round input rows.
+The same `fit_step_C` argument is available in the step-by-step spectrum functions.
+Omitting it retains the native-temperature model; Average rejects this MLE-only
+setting. The saved result records the choice. Statistical interval coverage for
+this resolution is not established across all experimental conditions.
 
 To request a regular grid **after** calculation and final selection:
 

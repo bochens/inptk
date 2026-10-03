@@ -242,3 +242,50 @@ def test_output_grid_evaluates_same_fit_without_resampling_observed_counts():
     assert details["observation_count"] == 6
     for temperature, values in original.items():
         np.testing.assert_allclose(gridded[temperature], values, rtol=1e-7)
+
+
+def test_public_grid_fit_matches_complete_likelihood_and_profile_at_output_targets(tmp_path):
+    from inptk.alignment import align_observations
+    from inptk.curve_fit import fit_curve
+    from inptk.methods import resolve_curves
+
+    data = experiment([("A", 20, [1, 5, 12], 1, 50), ("W", 10, [0, 1, 3], 1, 100)],
+                      blanks={"A": ["W"]})
+    frame = data.counts.to_dataframe()
+    frame["temperature_C"] += .07  # observations intentionally off the reporting grid
+    data = inptk.Experiment(inptk.CountsTable(frame), data.samples, data.measurements,
+                            water_blank_map=data.water_blank_map)
+    members = next(iter(resolve_curves(None, data, frame).values()))["members"]
+    points = align_observations(frame, members, water_blank_map=data.water_blank_map,
+                                temperature_ranges_C=None)
+    expected, details = fit_curve(points, data, z=1.96, fit_step_C=.5, output_step_C=.5)
+    result = inptk.analyze_concentration(data, fit_step_C=.5, differential=True)
+    actual = result.to_dataframe().set_index("temperature_C")
+    assert actual.index.tolist() == list(expected)
+    for temperature, estimate in expected.items():
+        np.testing.assert_allclose(
+            actual.loc[temperature, ["concentration", "lower_error", "upper_error"]]
+            .to_numpy(dtype=float), estimate, rtol=1e-7,
+        )
+    assert details["physical_droplets"] == 30
+    pd.testing.assert_frame_equal(result.counts.to_dataframe(), frame)
+    assert result.settings["fit_step_C"] == .5
+    individual = inptk.cumulative_spectrum(
+        inptk.frozen_fraction(data), experiment=data, fit_step_C=.5
+    )
+    np.testing.assert_allclose(individual.to_dataframe().concentration, actual.concentration)
+    inptk.save(result, tmp_path / "fit.inptk")
+    assert inptk.load(tmp_path / "fit.inptk").settings["fit_step_C"] == .5
+
+
+@pytest.mark.parametrize("step", [0, -1, True, np.inf, "0.5"])
+def test_public_workflow_rejects_invalid_fit_spacing(step):
+    data = experiment([("A", 20, [1, 5], 1, 50)])
+    with pytest.raises(ValueError, match="fit_step_C"):
+        inptk.analyze_concentration(data, fit_step_C=step)
+
+
+def test_average_does_not_silently_ignore_fit_spacing():
+    data = experiment([("A", 20, [1, 5], 1, 50)])
+    with pytest.raises(ValueError, match="only to method='mle'"):
+        inptk.analyze_concentration(data, method="average", fit_step_C=.5)

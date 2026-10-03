@@ -20,6 +20,7 @@ for each analysis; changing Preferences must not change a saved result.
 | Executable | Show connection failures | Executable path and connection test |
 | `curves` | Name each output and select its physical inputs and cycle | Never store session input names globally |
 | `method` | MLE or Average | Initial `mle` |
+| `fit_step_C` | MLE curve spacing and reporting grid; e.g. 0.5 °C | Initial unset; hide for Average |
 | `temperature_ranges_C` | Inclusive cold/warm limits for each input | Never store input-specific ranges globally |
 | `temperature_step_C` | Optional grid for selecting counts before calculation | Initial off; offer 0.5 °C |
 | `temperature_method` | Latest warmer, maximum warmer fraction, or centered window | Initial `latest` |
@@ -39,6 +40,13 @@ background constrained to increase or stay constant during cooling. Average take
 an equal-weight mean of eligible concentration estimates at each temperature.
 Both retain blank uncertainty when raw sample and blank counts are supplied.
 Average uses conservative bounds that allow shared blank uncertainty.
+`--fit-step-C 0.5` fits every selected input row and evaluates concentration and
+profile bounds on that grid. It does not thin or round the input counts.
+It is separate from optional count selection and later display resampling.
+
+Blank inputs are always selected explicitly by the user. Send their selected
+input IDs through `--water-blank-map` for native or raw Icescopy CSV input.
+Short names and long names are display text only; never infer a blank role from them.
 
 Use every row with time, temperature and freezing counts, including rows without
 an image ID. An image ID is optional source information, not an eligibility rule.

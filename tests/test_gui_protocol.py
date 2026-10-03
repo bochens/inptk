@@ -75,7 +75,9 @@ def test_capabilities_describe_live_arguments_and_methods():
     assert analyze["output_step_C"]["default"] is None
     assert analyze["sample"]["repeatable"]
     assert analyze["no_water_blank_correction"]["type"] == "boolean"
-    assert "temperature_method" not in analyze
+    assert analyze["temperature_method"]["choices"] == ["latest", "max", "window"]
+    assert analyze["temperature_method"]["default"] == "latest"
+    assert analyze["fit_step_C"]["default"] is None
 
 
 def test_python_observations_need_no_suspension_metadata(inputs):

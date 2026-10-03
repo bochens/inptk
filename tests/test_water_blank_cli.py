@@ -152,10 +152,9 @@ def test_cli_raw_blank_analysis_preserves_context_without_outputting_blank_sampl
     "input_format,message",
     [
         ("saved", "already contains its water-blank mapping"),
-        ("icescopy", "requires raw sample and blank counts in --format native"),
     ],
 )
-def test_cli_water_blank_map_requires_raw_native_input(tmp_path, raw_source, input_format, message):
+def test_cli_saved_blank_map_cannot_be_overridden(tmp_path, raw_source, input_format, message):
     output = tmp_path / "result.inptk"
     process = run_cli(
         "analyze",
@@ -170,6 +169,37 @@ def test_cli_water_blank_map_requires_raw_native_input(tmp_path, raw_source, inp
     assert process.returncode == 1
     assert message in process.stderr
     assert not output.exists()
+
+
+def test_icescopy_blank_role_requires_explicit_selection_and_keeps_nonimage_rows(tmp_path):
+    path = tmp_path / "counts.csv"
+    path.write_text(
+        "# sample_name,A,B\n# sample_long_name,water blank,ordinary sample\n"
+        "# dilution,1,1\n# well_volume_uL,50,100\n"
+        "timestamp,picture,temperature_C,cycle,A number total,A number frozen,"
+        "B number total,B number frozen\n"
+        "2026-01-01T00:00:00,image_0,-5.1,0,20,1,10,0\n"
+        "2026-01-01T00:00:01,,-5.5,0,20,3,10,1\n"
+        "2026-01-01T00:00:02,image_1,-6.1,0,20,8,10,2\n"
+    )
+    unassigned = inptk.read_icescopy(path)
+    assert unassigned.water_blank_map == {}  # descriptive names assign no roles
+    mapping = {"A": ["B"]}  # user selects B, regardless of either descriptive name
+    source = inptk.read_icescopy(path, water_blank_map=mapping)
+    assert source.water_blank_map == mapping
+    assert len(source.counts) == 6
+    assert source.counts.to_dataframe().picture_id.isna().sum() == 2
+    output = tmp_path / "selected.inptk"
+    process = run_cli(
+        "analyze", path, "--format", "icescopy", "--water-blank-map", json.dumps(mapping),
+        "--fit-step-C", ".5", "--out", output,
+    )
+    assert process.returncode == 0, process.stderr
+    actual = inptk.load(output)
+    expected = inptk.analyze_concentration(source, fit_step_C=.5)
+    pd.testing.assert_frame_equal(actual.to_dataframe(), expected.to_dataframe())
+    assert actual.experiment.water_blank_map == mapping
+    assert len(actual.counts) == 6
 
 
 def test_cli_rejects_blank_only_parent_sample_selection(tmp_path, raw_source):

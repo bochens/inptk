@@ -61,7 +61,7 @@ def _analysis_input_arguments(parser):
     )
     parser.add_argument(
         "--water-blank-map",
-        help="JSON object or file mapping native measurements to lists of blank measurements",
+        help="JSON object or file mapping raw native or Icescopy inputs to blank input names",
     )
     parser.add_argument(
         "--no-water-blank-correction",
@@ -138,6 +138,10 @@ def build_parser():
         help="Full centered window width in degrees C; required only for window",
     )
     analyze.add_argument("--output-method", choices=("sample", "interpolate"), default="sample")
+    analyze.add_argument(
+        "--fit-step-C", type=float,
+        help="MLE curve spacing (e.g. 0.5 C); fits unchanged sample/blank input temperatures",
+    )
     analyze.add_argument("--z", type=float, default=1.96)
     analyze.add_argument("--differential", action="store_true")
     analyze.add_argument(
@@ -418,11 +422,7 @@ def _read_analysis_input(args):
             water_blank_map=water_blank_map,
         )
     elif args.format == "icescopy":
-        if args.water_blank_map:
-            raise ValueError(
-                "The Icescopy CSV adapter does not include raw blank context. "
-                "--water-blank-map requires raw sample and blank counts in --format native."
-            )
+        water_blank_map = _json_object(args.water_blank_map, "--water-blank-map")
         mapping = _json_object(args.sample_map, "--sample-map")
         overrides = None
         if args.metadata:
@@ -430,7 +430,8 @@ def _read_analysis_input(args):
 
             overrides = _frame(args.metadata)
         experiment = read_icescopy(
-            args.input, sample_map=mapping, metadata=overrides, run_id=args.run_id
+            args.input, sample_map=mapping, metadata=overrides, run_id=args.run_id,
+            water_blank_map=water_blank_map,
         )
     else:
         if args.water_blank_map:
@@ -514,6 +515,7 @@ def main(argv=None):
         result = analyze_concentration(
             experiment,
             method=args.method,
+            fit_step_C=args.fit_step_C,
             temperature_ranges_C=temperature_ranges,
             temperature_step_C=args.temperature_step_C,
             temperature_method=args.temperature_method,

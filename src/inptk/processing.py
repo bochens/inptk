@@ -114,6 +114,7 @@ def cumulative_spectrum(
     temperature_window_C: float | None = None,
     z: float = 1.96,
     method: str = "mle",
+    fit_step_C: float | None = None,
     water_blank_correction: bool = True,
 ) -> CumulativeSpectrumTable:
     """Estimate individual spectra using the same method as the named-curve workflow.
@@ -126,20 +127,23 @@ def cumulative_spectrum(
     """
     from urllib.parse import quote
 
+    from .curve_fit import validate_fit_step
     from .methods import validate_combination_method
     from .temperature_selection import validate_temperature_selection
     from .water_blank import sample_rows
     from .workflows import estimate_concentration
 
     method = validate_combination_method(method)
+    validate_fit_step(fit_step_C, method=method)
     validate_temperature_selection(
         temperature_step_C, temperature_method, temperature_window_C
     )
-    if temperature_step_C is not None:
+    if temperature_step_C is not None or fit_step_C is not None:
         return _gridded_cumulative_spectrum(
             fractions, experiment=experiment, temperature_ranges_C=temperature_ranges_C,
             temperature_step_C=temperature_step_C, temperature_method=temperature_method,
             temperature_window_C=temperature_window_C, method=method, z=z,
+            fit_step_C=fit_step_C,
             water_blank_correction=water_blank_correction,
         )
     if method == "average":
@@ -161,6 +165,7 @@ def cumulative_spectrum(
     estimated = estimate_concentration(
         fractions, experiment=experiment, temperature_ranges_C=temperature_ranges_C,
         curves=choices, z=z, method=method, water_blank_correction=water_blank_correction,
+        fit_step_C=fit_step_C,
     )
     records = []
     originals = frame.set_index([*keys, "observation_id"])
@@ -372,6 +377,7 @@ def differential_spectrum(
     temperature_method: str = "latest",
     temperature_window_C: float | None = None,
     method: str = "mle",
+    fit_step_C: float | None = None,
     z: float = 1.96,
     water_blank_correction: bool = True,
 ) -> DifferentialSpectrumTable:
@@ -391,6 +397,7 @@ def differential_spectrum(
         temperature_method=temperature_method,
         temperature_window_C=temperature_window_C,
         method=method,
+        fit_step_C=fit_step_C,
         z=z,
         water_blank_correction=water_blank_correction,
     )

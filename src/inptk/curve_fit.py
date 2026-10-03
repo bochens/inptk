@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
+from numbers import Real
 
 import numpy as np
 import pandas as pd
 
 from ._engine.curve_likelihood import CurveLikelihood, FreezingSeries
 from .resampling import _grid
+
+
+def validate_fit_step(step, *, method):
+    """Reject ignored or invalid fitting resolutions before doing any analysis."""
+    if step is not None:
+        if isinstance(step, bool) or not isinstance(step, Real) or not np.isfinite(step) or step <= 0:
+            raise ValueError("fit_step_C must be finite and positive")
+        if method != "mle":
+            raise ValueError("fit_step_C applies only to method='mle'")
 
 
 def _trajectory(rows, *, name):
