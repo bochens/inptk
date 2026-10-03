@@ -64,6 +64,16 @@ mode. Commands and defaults are identical to terminal use, and responses are
 always JSON. Requests run sequentially; computation-heavy MLE fits retain their
 normal scientific cost. EOF ends the process. Use `capabilities` for discovery.
 
+Repeated count states reuse their point estimates and confidence limits. Range
+reports retain every original observation, even when the calculation uses a grid;
+report construction and temperature selection avoid repeated table conversions.
+To measure processing time on generated counts, run
+`python examples/benchmark_processing.py --rows 6000 --repeat 3`.
+It reports separate times for range suggestions, Average and MLE, with a combined
+curve and two individual curves on a 0.5 °C grid. Add `--native` to also time
+Average at every original observation, or `--wells 96` for more freezing events.
+The benchmark writes no files and excludes CLI transport and file I/O.
+
 ## Install
 
 ```bash

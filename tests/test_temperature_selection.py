@@ -134,3 +134,25 @@ def test_single_observed_temperature_is_kept_without_rounding_to_a_threshold():
     assert fractions.temperature_C.tolist() == [-10.2]
     assert fractions.n_total.tolist() == [32]
     assert fractions.n_frozen.tolist() == [1]
+
+
+@pytest.mark.parametrize("method,observation", [("latest", "3"), ("max", "3"), ("window", "2")])
+def test_grid_selection_handles_unlimited_bounds_and_keeps_count_pairs(method, observation):
+    # At -10 C: latest/max select 10/20; window selects the observed 11/31.
+    # Unlimited bounds must keep all source rows, including changing totals.
+    source = temperature_selection_experiment()
+    from inptk.alignment import align_observations
+
+    points = align_observations(
+        source.counts.to_dataframe(),
+        [{"measurement_id": "M", "run_id": "R1", "cycle_id": "01"}],
+        water_blank_map={}, temperature_ranges_C={"M": {"min_C": None, "max_C": None}},
+        temperature_step_C=.5, temperature_start_C=-10, temperature_end_C=-10,
+        temperature_method=method, temperature_window_C=.5 if method == "window" else None,
+    )
+    selected = points[0].samples.iloc[0]
+    assert selected.observation_id == observation
+    original = source.counts.to_dataframe().set_index("observation_id").loc[observation]
+    assert (selected.n_frozen, selected.n_total) == (original.n_frozen, original.n_total)
+    assert not selected.source_total_is_fixed
+    assert not selected.source_frozen_is_cumulative

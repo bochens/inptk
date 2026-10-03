@@ -18,17 +18,13 @@ from .water_blank import estimate_point, sample_rows
 
 
 def _state_key(point) -> tuple:
-    columns = ["measurement_id", "run_id", "cycle_id", "n_frozen", "n_total"]
-    return tuple(
-        tuple(sorted(frame[columns].itertuples(index=False, name=None)))
-        for frame in (point.samples, point.blanks)
-    )
+    return point.count_key()
 
 
 def _sources(point) -> list[dict]:
     records = []
-    for role, frame in (("sample", point.samples), ("blank", point.blanks)):
-        for row in frame.to_dict("records"):
+    for role, rows in (("sample", point.sample_records), ("blank", point.blank_records)):
+        for row in rows:
             item: dict[str, object] = {
                 key: str(row[key])
                 for key in ("measurement_id", "run_id", "cycle_id", "observation_id")
@@ -145,7 +141,7 @@ def estimate_concentration(
         empty_count = 0
         group_alignment[curve_id] = sorted({point.alignment for point in points})
         for point in points:
-            contributors = sorted(point.samples.measurement_id.astype(str).tolist())
+            contributors = sorted(str(row["measurement_id"]) for row in point.sample_records)
             available = sorted(
                 key for key, (cold, warm) in supports.items() if cold <= point.temperature_C <= warm
             )
@@ -176,7 +172,7 @@ def estimate_concentration(
                 if len(contributors) == 1
                 else np.nan,
                 "water_blank_ids": json.dumps(
-                    sorted(point.blanks.measurement_id.astype(str).tolist())
+                    sorted(str(row["measurement_id"]) for row in point.blank_records)
                 ),
                 "source_observations": json.dumps(_sources(point)),
                 "uncertainty_method": "joint_curve_profile_likelihood"

@@ -235,6 +235,9 @@ Release superseded results with `{"id":ID,"release":["@name"]}`. A reference
 cannot be overwritten until released. Closing stdin ends the process and drops
 its in-memory results. `save @result --out result.inptk` writes a retained result
 without recalculating. File outputs remain explicit through ordinary paths.
+The installed editable package uses the current source, but a running process
+keeps its already imported code. Restart the toolkit process after package updates.
+`examples/benchmark_processing.py` measures calculation time separately from transport.
 Requests are sequential; send current settings after the preceding calculation
 finishes. To cancel a running calculation, SIGINT produces the existing cancelled
 response where handled; terminating the process also discards its references.

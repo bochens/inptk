@@ -77,35 +77,39 @@ def grid_points(
             frame.measurement_id.eq(measurement) & frame.run_id.eq(run) & frame.cycle_id.eq(cycle)
         ])
         limits = ranges.get(measurement, {}) if key not in blank_keys else {}
-        eligible = rows.loc[
-            rows.temperature_C.map(lambda t, bounds=limits: _in_range(t, bounds))
-        ].copy()
+        minimum, maximum = limits.get("min_C"), limits.get("max_C")
+        eligible = rows.loc[rows.temperature_C.between(
+            -np.inf if minimum is None else minimum,
+            np.inf if maximum is None else maximum,
+        )].copy()
         # Preserve these checks across selection: max must not conceal invalid
         # raw trajectories from the whole-curve likelihood.
         eligible["source_total_is_fixed"] = eligible.n_total.nunique() <= 1
         eligible["source_frozen_is_cumulative"] = not eligible.n_frozen.diff().lt(0).any()
-        streams[key] = (rows, eligible, limits)
+        streams[key] = (
+            rows, eligible, limits,
+            (rows.temperature_C.min(), rows.temperature_C.max()),
+            eligible.temperature_C.to_numpy(), eligible.n_frozen.to_numpy(),
+            (eligible.n_frozen / eligible.n_total).to_numpy(),
+        )
 
     def select(key, target):
-        rows, eligible, limits = streams[key]
-        if rows.empty or not rows.temperature_C.min() <= target <= rows.temperature_C.max():
-            return None
-        if not _in_range(target, limits):
+        rows, eligible, limits, (cold, warm), temperatures, frozen, fractions = streams[key]
+        if rows.empty or not cold <= target <= warm or not _in_range(target, limits):
             return None
         if method == "window":
-            candidates = eligible.loc[
-                eligible.temperature_C.between(target - window_C / 2, target + window_C / 2)
-            ]
+            selected = (temperatures >= target - window_C / 2) & (
+                temperatures <= target + window_C / 2
+            )
         else:
-            candidates = eligible.loc[eligible.temperature_C.ge(target)]
-        if candidates.empty:
+            selected = temperatures >= target
+        positions = np.flatnonzero(selected)
+        if not positions.size:
             return None
-        if method == "max":
-            fraction = candidates.n_frozen / candidates.n_total
-            candidates = candidates.loc[fraction.eq(fraction.max())]
-        elif method == "window":
-            candidates = candidates.loc[candidates.n_frozen.eq(candidates.n_frozen.max())]
-        chosen = candidates.iloc[-1].copy()  # latest observation wins ties
+        if method in ("max", "window"):
+            scores = fractions[positions] if method == "max" else frozen[positions]
+            positions = positions[scores == scores.max()]
+        chosen = eligible.iloc[positions[-1]].copy()  # latest observation wins ties
         chosen["fit_temperature_C"] = target
         chosen["temperature_selection"] = method
         return chosen

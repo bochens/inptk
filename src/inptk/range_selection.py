@@ -41,9 +41,7 @@ class RangePlanner:
         for point in self.points(ranges):
             if point.samples.empty:
                 continue
-            key = tuple(tuple(rows[["measurement_id", "run_id", "cycle_id", "n_frozen", "n_total"]]
-                              .itertuples(index=False, name=None))
-                        for rows in (point.samples, point.blanks))
+            key = point.count_key()
             if key not in self.estimates:
                 self.estimates[key] = estimate_point(
                     point.samples, point.blanks, self.experiment, method="average",

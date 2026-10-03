@@ -348,3 +348,33 @@ def test_unselected_cycles_do_not_change_handoff_limits():
                             data.samples, data.measurements)
     actual = inptk.suggest_temperature_ranges(both, curves=curves)
     assert actual.temperature_ranges_C == expected.temperature_ranges_C
+
+
+def test_report_keeps_observation_identity_with_shuffled_input_rows():
+    data = source((0, 4, 8, 12, 16),
+                  blank=([0, 0, 1, 1, 2], [-5, -6, -7, -8, -9], 32, 50))
+    original = data.counts.to_dataframe().sample(frac=1, random_state=7)
+    shuffled = inptk.Experiment(
+        inptk.CountsTable(original), data.samples, data.measurements,
+        water_blank_map=data.water_blank_map,
+    )
+    report = inptk.suggest_temperature_ranges(
+        shuffled, temperature_step_C=.5
+    ).observations.to_dataframe()
+    expected = inptk.cumulative_spectrum(
+        inptk.frozen_fraction(shuffled), experiment=shuffled, method="average"
+    ).to_dataframe().set_index("observation_id")
+    assert report.observation_id.tolist() == original.loc[
+        original.measurement_id.eq("001"), "observation_id"
+    ].tolist()
+    assert len(report) == 5
+    columns = ["concentration", "lower_error", "upper_error"]
+    pd.testing.assert_frame_equal(
+        report.set_index("observation_id")[columns].sort_index(),
+        expected[columns].sort_index(),
+    )
+    for row in report.itertuples():
+        assert json.loads(row.blank_observation_ids) == [{
+            "measurement_id": "water", "run_id": "R", "cycle_id": "01",
+            "observation_id": row.observation_id,
+        }]

@@ -231,7 +231,16 @@ def suggest_temperature_ranges(
         for column in ("concentration", "lower_error", "upper_error"):
             rows[column] = np.nan
         rows["blank_observation_ids"] = "[]"
-        if limits is not None:
+        if limits is not None and not view.water_blank_map:
+            rows.loc[rows.in_suggested_range, "blank_status"] = "not_applied"
+        elif limits is not None:
+            # Observation IDs are unique within this selected measurement/cycle.
+            # Build the report in arrays instead of searching and assigning
+            # individual DataFrame cells for every original image.
+            positions = {observation: i for i, observation in enumerate(rows.observation_id)}
+            concentrations = np.full((len(rows), 3), np.nan)
+            statuses = rows.blank_status.to_numpy(copy=True)
+            blank_ids = rows.blank_observation_ids.to_numpy(copy=True)
             points = align_observations(
                 frame, [member], water_blank_map=view.water_blank_map,
                 temperature_ranges_C={name: limits},
@@ -239,21 +248,16 @@ def suggest_temperature_ranges(
             for point in points:
                 if point.samples.empty:
                     continue
-                sample = point.samples.iloc[0]
-                index = rows.index[rows.observation_id.eq(sample.observation_id)][0]
-                if not view.water_blank_map:
-                    rows.loc[index, "blank_status"] = "not_applied"
-                    continue
-                key = (name, member["cycle_id"], int(sample.n_frozen), int(sample.n_total),
-                       tuple((r.measurement_id, r.n_frozen, r.n_total)
-                             for r in point.blanks.itertuples()))
+                sample = point.sample_records[0]
+                index = positions[sample["observation_id"]]
+                key = point.count_key()
                 if key not in cache:
                     cache[key] = estimate_point(
                         point.samples, point.blanks, view, method="average",
                         confidence_drop=float(z)**2 / 2,
                     )
                 concentration, lower, upper, finite = cache[key]
-                rows.loc[index, ["concentration", "lower_error", "upper_error"]] = (
+                concentrations[index] = (
                     concentration, lower, upper
                 )
                 lower_bound = concentration - lower
@@ -262,12 +266,15 @@ def suggest_temperature_ranges(
                         lower_bound, 0, rtol=0, atol=1e-12
                     ) else "distinguished_from_blank"
                 )
-                rows.loc[index, "blank_status"] = status
-                rows.loc[index, "blank_observation_ids"] = json.dumps([
-                    {key: str(getattr(r, key)) for key in
+                statuses[index] = status
+                blank_ids[index] = json.dumps([
+                    {key: str(r[key]) for key in
                      ("measurement_id", "run_id", "cycle_id", "observation_id")}
-                    for r in point.blanks.itertuples()
+                    for r in point.blank_records
                 ])
+            rows[["concentration", "lower_error", "upper_error"]] = concentrations
+            rows["blank_status"] = statuses
+            rows["blank_observation_ids"] = blank_ids
         proposals[name] = {
             "run_id": member["run_id"], "cycle_id": member["cycle_id"], "range_C": limits,
             "dilution": view.measurements[name].dilution,

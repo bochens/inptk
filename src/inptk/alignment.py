@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,27 @@ class AlignedPoint:
     blanks: pd.DataFrame
     alignment: str
     point_order: int
+
+    @cached_property
+    def sample_records(self):
+        return _records(self.samples)
+
+    @cached_property
+    def blank_records(self):
+        return _records(self.blanks)
+
+    def count_key(self):
+        """Physical identities and counts; temperature does not change a point fit."""
+        keys = ("measurement_id", "run_id", "cycle_id", "n_frozen", "n_total")
+        return tuple(tuple(sorted(tuple(row[key] for key in keys) for row in records))
+                     for records in (self.sample_records, self.blank_records))
+
+
+def _records(frame):
+    # Small aligned tables dominate native-row workflows. Convert their values
+    # once, without pandas building a Series for every column of every point.
+    columns = tuple(frame.columns)
+    return [dict(zip(columns, row)) for row in frame.to_numpy()]
 
 
 def _ordered_rows(rows: pd.DataFrame) -> pd.DataFrame:
@@ -266,9 +288,18 @@ def align_observations(
                     raise ValueError(f"Blank {blank_key!r} has no state at {temperature:g} C")
                 match = latest
                 alignment = "latest"
-            selected_blanks[blank_key] = blank.iloc[match]
-        samples = pd.DataFrame([row for row, _ in selected.values()]) if selected else empty.copy()
-        blanks = pd.DataFrame(list(selected_blanks.values())) if selected_blanks else empty.copy()
+            selected_blanks[blank_key] = (blank.iloc[match], match)
+        if len(selected) == 1:
+            key, (_, position) = next(iter(selected.items()))
+            samples = streams[key].iloc[position:position + 1]
+        else:
+            samples = pd.DataFrame([row for row, _ in selected.values()]) if selected else empty
+        if len(selected_blanks) == 1:
+            key, (_, position) = next(iter(selected_blanks.items()))
+            blanks = blank_streams[key].iloc[position:position + 1]
+        else:
+            blanks = (pd.DataFrame([row for row, _ in selected_blanks.values()])
+                      if selected_blanks else empty)
         points.append(
             AlignedPoint(
                 point_id=f"point:{point_order}",
