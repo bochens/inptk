@@ -1,42 +1,30 @@
-INP-toolkit handoff — 2026-10-03
-Goal: remove avoidable interface/copy/report costs and support a fully in-memory client session.
+INP-toolkit release handoff — 2026-10-03
+Goal: push/merge reviewed toolkit work; prepare installable Mac CLI and Windows handoff.
 Repo: /Users/C832577250/Project/inptk; branch codex/measurement-results.
-Pre-edit checkpoint: 70cbf33. No Icescopy edits, source-data edits, push or merge.
-Pre-existing untracked ICESCOPY_PERFORMANCE_HANDOFF.md remains untouched/uncommitted.
-Key files: src/inptk/cli.py, cli_store.py, cli_steps.py, io.py.
-Calculation housekeeping: context.py, ranges.py, range_selection.py, workflows.py.
-Tests: tests/test_cli_steps.py and tests/test_range_suggestions.py.
-Integration instructions and working JSON examples: ICESCOPY_HANDOFF.md.
-Reproducible no-file benchmarks: examples/benchmark_client.py and benchmark_processing.py.
-serve now accepts id + import with out, native counts, metadata, optional run_id/water_blank_map.
-JSON counts/metadata accept row records or column arrays; standard read_counts validation applies.
-Blank/sample relationships remain explicit. Counts are never inferred from names or pooled cycles.
-Upload once to @input; analyze/estimate from @input to @result; table reads retained results.
-Input metadata or blank assignment edits require a new import; no in-place mutation command.
-Existing commands cover steps, whole analysis, save, export and release; no scientific path duplicated.
-Failed imports do not replace valid inputs; release frees unreferenced experiments during service.
-Client must release superseded results; results can retain their source experiment after input release.
-suggest-ranges --summary / include_observations=False omit only the detailed observation report.
-Range limits, reasons and settings match full reports; selection still computes needed estimates.
-Range planning and diagnostic reports share complete estimates keyed by physical count states.
-table --columns ... --no-history returns requested display data; default full tables remain available.
-Direct named-curve access and table summaries no longer assemble/copy all unrelated result tables.
-Validation copies are reused; final selection writes arrays in bulk with identical decisions.
-Saved format 4 retained; JSON whitespace reduced. No numerical precision changes.
-Exact before/after serialized output comparison passed: large full suggestion, Average, MLE, native Average.
-Full suite: 755 passed, one existing invalid-timestamp pandas warning.
-After adding memory-release regression: final CLI-step suite 26 passed (one extra test).
-Ruff, mypy (32 files), Bandit passed. Handoff's six JSON requests executed successfully.
-Benchmark: 6000 rows/input; two sample inputs plus shared blank; three output curves; 0.5 C.
-Median 3 real subprocess requests: full suggestion 1.349 s/8.65 MB; summary 0.289 s/2.15 KB.
-Average 0.501 s; MLE 1.319 s; plot columns 0.0005 s/5.31 KB; one-time JSON upload 0.044 s.
-Those measurements include JSON exchange and parsing; startup separately 0.349 s.
-Existing file-path boundary example: saved JSON 14.636 -> 8.709 MB; no schema/data deletion.
-MLE profile-confidence fitting remains essential statistical work; no relaxed accuracy or omitted bounds.
-Current Icescopy still passes file paths; toolkit changes alone do not migrate that client.
-Next client work: direct JSON import, named result references, summary suggestions, projected plots.
-Keep unchanged-request caching; coalesce edits; preserve last good result; release old refs after success.
-Research/bin/python; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1.
-Quality tools: /private/tmp/inptk-release-soxonxxd/quality/bin; Ruff --no-cache.
-Editable executable: /Users/C832577250/miniforge3/envs/Research/bin/inptk; restart process after updating.
-Known errors: none. Do not reread full notebooks, image arrays, or legacy UFOLAF for this work.
+Pre-release checkpoint: a1f44ec; Mac packaging checkpoint: 721e293.
+Current runtime: version 0.4.0, CLI protocol 2, saved format 4.
+Mac builder: scripts/build_macos.py; comparison check: scripts/check_executable.py.
+Mac build dependencies and entrypoint: packaging/macos/requirements.txt, entrypoint.py.
+Release instructions: packaging/macos/README.md; Windows handoff: packaging/windows/README.md.
+CI: .github/workflows/macos-package.yml builds arm64 and x86_64 unsigned candidates.
+Mac installation path: /Applications/INP-toolkit/inptk; no GUI or shell changes.
+Uses a folder bundle with Python/NumPy/pandas/SciPy; no extraction at every startup.
+Builder includes exact tracked source, dependency licenses, versions, commit and checksum.
+Public builds need Developer ID Application/Installer certificates and notarytool profile.
+Only Apple Development identity was found locally; public signing/notarization not completed.
+Unsigned arm64 package built successfully, 53 MB, from 721e293.
+Local artifact: dist/macos/inptk-0.4.0-macos-arm64-unsigned.pkg (and .sha256).
+Packaged process matched Python Average/MLE concentrations and uncertainty in clean working dir.
+Installer upgrade/clean-Mac Gatekeeper checks remain release requirements.
+Windows builder deliberately left to PC Codex; recommended per-user Inno Setup installer.
+Windows path: %LOCALAPPDATA%\Programs\INP-toolkit\inptk.exe.
+Full toolkit suite before packaging: 755 passed; final memory-release CLI suite: 26 passed.
+Ruff and mypy passed; no scientific estimator changed for packaging.
+Icescopy code remains unchanged. Its memory integration is specified in ICESCOPY_HANDOFF.md.
+Existing source performance: JSON upload 44 ms; summary limits 0.289 s; Average 0.501 s; MLE 1.319 s.
+Benchmark: 6000 rows/input, two samples plus blank, 0.5 C, three curves; not a universal guarantee.
+Pre-existing untracked ICESCOPY_PERFORMANCE_HANDOFF.md remains untouched; do not stage it.
+Build scratch: /private/tmp/inptk-macos-build-wuq17f0p (remove after final checks).
+Research Python: /Users/C832577250/miniforge3/envs/Research/bin/python.
+No notebook data or external experiment files changed. Do not reread full notebooks.
+Next: complete GitHub checks and merge; build signed release from chosen version tag later.

@@ -80,6 +80,8 @@ For Mac users linking INP-toolkit to Icescopy, the standalone installer uses
 `/Applications/INP-toolkit/inptk`. The runtime is bundled; Python is not required.
 See [Mac packaging and release instructions](packaging/macos/README.md).
 Unsigned test installers are not yet a signed public release.
+A [Windows release handoff](packaging/windows/README.md) describes the equivalent
+`inptk.exe` installer to build and test on a PC.
 
 For Python development from this repository:
 
