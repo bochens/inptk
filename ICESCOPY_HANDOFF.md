@@ -9,6 +9,9 @@ files have changed in this work.
 
 Preferences → INP toolkit should contain an executable chooser, Browse, Test
 connection, detected version and connection status. Test with `inptk capabilities`.
+The standalone Mac installer provides `/Applications/INP-toolkit/inptk` as a stable,
+user-visible executable path. Invoke it directly, without Python or a shell.
+See `packaging/macos/README.md` for release signing and installer checks.
 INP-toolkit **0.4.0** uses CLI protocol **2** and saved format **4**. Other formats must
 be rejected explicitly. There are no compatibility flags or old-format loaders.
 

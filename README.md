@@ -76,6 +76,13 @@ The benchmark writes no files and excludes CLI transport and file I/O.
 
 ## Install
 
+For Mac users linking INP-toolkit to Icescopy, the standalone installer uses
+`/Applications/INP-toolkit/inptk`. The runtime is bundled; Python is not required.
+See [Mac packaging and release instructions](packaging/macos/README.md).
+Unsigned test installers are not yet a signed public release.
+
+For Python development from this repository:
+
 ```bash
 python -m pip install -e ".[dev]"
 inptk --help
