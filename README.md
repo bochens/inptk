@@ -361,12 +361,18 @@ result = inptk.analyze_concentration(
 )
 ```
 
-Automatic Average limits now enforce a nondecreasing concentration curve by
-selecting ranges before combination. Start with the least diluted input and end
-its range before saturation or the first decrease in blank-corrected concentration.
-Switch only when the next input is at least as high as the last retained value.
-If that fails, try a shorter preceding interval. Stop and report an unavailable
-continuation if no valid handoff exists; no concentration value is adjusted.
+Automatic Average limits select contiguous input ranges before combination so
+the reported combined concentrations are nonnegative and do not decrease. Start
+with the least diluted input. From its first observed sample freeze, move past
+negative values at the warm end. Once a value is retained, end that input's
+range before saturation, a negative value,
+or a decrease, even if later values rise again. Zero is retained. Values before
+the first observed sample freeze do not set the first input's cutoff because
+they are outside the reported curve. Move a later input's warm limit past any
+value below the previous input's last retained concentration. If needed, try a
+shorter preceding interval; report an unavailable continuation when no handoff
+works. Individual input spectra keep their original values, including negatives.
+Uncertainty bounds crossing zero do not determine these limits.
 
 All automatic ranges are nonoverlapping, including equal-dilution inputs (ties
 follow the input order in the requested curve). Manual ranges can still overlap

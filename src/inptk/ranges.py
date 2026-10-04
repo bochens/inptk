@@ -128,11 +128,11 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
                     "no_monotone_continuation"
                 )
             else:
-                outside = ~rows.temperature_C.between(limits["min_C"], limits["max_C"])
-                rows.loc[
-                    outside & rows.temperature_eligible & ~rows.previous_dilution_active,
-                    "monotone_limit_reason",
-                ] = selected["reason"]
+                eligible = rows.temperature_eligible & ~rows.previous_dilution_active
+                rows.loc[eligible & rows.temperature_C.gt(limits["max_C"]),
+                         "monotone_limit_reason"] = selected["warm_reason"]
+                rows.loc[eligible & rows.temperature_C.lt(limits["min_C"]),
+                         "monotone_limit_reason"] = selected["cold_reason"]
                 previous_cold = limits["min_C"]
             first = experiment.measurements[name].dilution == first_dilution
             plans[name] = (rows, limits, first)
@@ -154,10 +154,13 @@ def suggest_temperature_ranges(
     temperature_method: str = DEFAULTS.temperature_method,
     temperature_window_C: float | None = DEFAULTS.temperature_window_C,
 ) -> RangeSuggestions:
-    """Suggest nonoverlapping Average ranges with nondecreasing concentration.
+    """Suggest nonoverlapping Average ranges for nonnegative, nondecreasing output.
 
     Exhaust the least diluted input's initial eligible interval, stopping before
-    saturation or a decrease in blank-corrected concentration. A later input must
+    saturation, a negative value or a decrease in directly corrected concentration.
+    Initial negative values move the warm limit forward; zero remains eligible.
+    Values before the first sample freeze cannot set the first input's cutoff,
+    because they are outside the reported combined spectrum. A later input must
     continue at or above the preceding concentration; shorten the preceding range
     if needed for a handoff. Stop when no such continuation exists. Equal dilution
     inputs are ordered as supplied in the curve and also receive nonoverlapping ranges.
@@ -336,7 +339,9 @@ def suggest_temperature_ranges(
         "min_unfrozen": min_unfrozen,
         "z": float(z),
         "water_blank_correction": water_blank_correction,
-        "rule": "ascending dilution; nonoverlapping monotone intervals and handoffs",
+        "rule": "ascending dilution; nonoverlapping nonnegative monotone intervals and handoffs",
+        "negative_concentrations": "adjust contiguous input limits; retain individual values",
+        "range_check_starts": "first sample freezing event for the first input",
         **grid,
         "first_dilution": "preserve initial observations; no minimum frozen count",
         "same_dilution": "nonoverlapping; curve input order breaks dilution ties",

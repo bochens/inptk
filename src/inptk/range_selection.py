@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .alignment import align_observations
+from .reporting import freezing_intervals
 from .water_blank import estimate_point
 
 
@@ -26,6 +27,10 @@ class RangePlanner:
         self.estimates = estimates
         self.trials = {}
         self.outside = float(frame.temperature_C.max()) + 1
+        intervals = freezing_intervals(
+            frame, {m["measurement_id"]: {"members": [m]} for m in members}, {}
+        )
+        self.first_freeze = {name: limits["max_C"] for name, limits in intervals.items()}
 
     def points(self, ranges):
         disabled = {"min_C": self.outside, "max_C": self.outside}
@@ -36,10 +41,10 @@ class RangePlanner:
             **self.grid,
         )
 
-    def profile(self, ranges):
+    def profile(self, ranges, *, warm_limit=None):
         records = []
         for point in self.points(ranges):
-            if point.samples.empty:
+            if point.samples.empty or (warm_limit is not None and point.temperature_C > warm_limit):
                 continue
             key = point.count_key()
             if key not in self.estimates:
@@ -58,7 +63,9 @@ class RangePlanner:
             # A block containing actual calculation points must not be replaced
             # by a colder block for the first input. Blocks between grid targets
             # have no calculation points and cannot determine a grid range.
-            if previous is None and self.profile({name: base}):
+            if previous is None and self.profile(
+                {name: base}, warm_limit=self.first_freeze[name]
+            ):
                 break
         return None
 
@@ -79,12 +86,20 @@ class RangePlanner:
             if candidates.empty:
                 return None
             warm = min(warm, float(candidates.max()))
-        reference = previous["profile"][-1][1] if previous is not None else -np.inf
-        reason = "count_or_coverage_limit"
+        reference = previous["profile"][-1][1] if previous is not None else 0.0
+        # Before the first sample freeze these points are outside the reported
+        # combined spectrum. Later inputs must still meet the previous value at
+        # their warm end, even before their own first freeze.
+        warm_limit = self.first_freeze[name] if previous is None else None
+        if previous is None and warm_limit is None:
+            return None
+        warm_reason = cold_reason = "count_or_coverage_limit"
         while cold <= warm:
-            key = (name, cold, warm)
+            key = (name, cold, warm, warm_limit)
             if key not in self.trials:
-                self.trials[key] = self.profile({name: {"min_C": cold, "max_C": warm}})
+                self.trials[key] = self.profile(
+                    {name: {"min_C": cold, "max_C": warm}}, warm_limit=warm_limit
+                )
             profile = self.trials[key]
             if not profile:
                 return None
@@ -95,20 +110,27 @@ class RangePlanner:
                 if not colder:
                     return None
                 warm = min(warm, max(colder))
-                reason = "below_previous_concentration"
+                warm_reason = ("negative_corrected_concentration" if profile[0][1] < 0
+                               else "below_previous_concentration")
                 continue
-            bad = next((i for i, (_, value) in enumerate(profile)
-                        if not np.isfinite(value) or (i and value < profile[i - 1][1])), None)
+            bad = next(
+                (i for i, (_, value) in enumerate(profile)
+                 if not np.isfinite(value) or value < 0
+                 or (i and value < profile[i - 1][1])),
+                None,
+            )
             if bad is None:
                 return {"limits": {"min_C": cold, "max_C": warm},
-                        "profile": profile, "reason": reason}
+                        "profile": profile, "warm_reason": warm_reason,
+                        "cold_reason": cold_reason}
             # An interval cannot distinguish repeated observations at one T.
             # Exclude the entire failing temperature and everything colder.
             warmer = [t for t, _ in profile[:bad] if t > profile[bad][0]]
             if not warmer:
                 return None
             cold = max(cold, min(warmer))
-            reason = "concentration_decrease"
+            cold_reason = ("negative_corrected_concentration" if profile[bad][1] < 0
+                           else "concentration_decrease")
         return None
 
     def choose(self, names):
@@ -128,7 +150,7 @@ class RangePlanner:
                         continue
                     selected = self.interval(name, shortened)
                     if selected is not None:
-                        shortened["reason"] = "shortened_for_monotone_handoff"
+                        shortened["cold_reason"] = "shortened_for_monotone_handoff"
                         chosen[previous_name] = shortened
                         break
             if selected is None:
@@ -138,9 +160,13 @@ class RangePlanner:
         # actual combined sequence as well as each proposed interval.
         while chosen:
             ranges = {name: item["limits"] for name, item in chosen.items()}
-            profile = self.profile(ranges)
-            bad = next((i for i, (_, value) in enumerate(profile)
-                        if not np.isfinite(value) or (i and value < profile[i - 1][1])), None)
+            profile = self.profile(ranges, warm_limit=self.first_freeze[next(iter(chosen))])
+            bad = next(
+                (i for i, (_, value) in enumerate(profile)
+                 if not np.isfinite(value) or value < 0
+                 or (i and value < profile[i - 1][1])),
+                None,
+            )
             if bad is None:
                 break
             warmer = [t for t, _ in profile[:bad] if t > profile[bad][0]]
@@ -154,5 +180,8 @@ class RangePlanner:
                     del chosen[name]
                 elif limits["min_C"] < cutoff:
                     chosen[name]["limits"] = dict(limits, min_C=cutoff)
-                    chosen[name]["reason"] = "concentration_decrease"
+                    chosen[name]["cold_reason"] = (
+                        "negative_corrected_concentration" if profile[bad][1] < 0
+                        else "concentration_decrease"
+                    )
         return chosen
