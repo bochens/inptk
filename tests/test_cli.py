@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from analysis_checks import all_points
 
 import inptk
 
@@ -85,9 +86,11 @@ def test_cli_temperature_ranges_match_python_and_keep_inclusive_boundaries(
     expected = inptk.analyze_concentration(
         range_source, method=method or "mle", temperature_ranges_C=ranges
     )
-    pd.testing.assert_frame_equal(result.combined.to_dataframe(), expected.combined.to_dataframe())
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
-    rows = result.combined.to_dataframe().set_index("temperature_C")
+    pd.testing.assert_frame_equal(
+        all_points(result).to_dataframe(), all_points(expected).to_dataframe()
+    )
+    pd.testing.assert_frame_equal(result.to_dataframe(), expected.to_dataframe())
+    rows = all_points(result).to_dataframe().set_index("temperature_C")
     assert rows.contributor_count.to_dict() == {-5.0: 0, -6.0: 1, -7.0: 2, -8.0: 2, -9.0: 1}
     assert rows.loc[-5, "selection_status"] == "no_eligible_measurements"
     assert rows.loc[-6, "source_measurement_id"] == "001"
@@ -124,7 +127,6 @@ def test_cli_rejects_invalid_ranges_without_saving(tmp_path, range_source, range
         ("--dilution-method", "mle"),
         ("--method-options", "{}"),
         ("--step-C", "1"),
-        ("--temperature-method", "latest"),
         ("--temperature-tolerance-C", "0.05"),
     ],
 )
@@ -140,12 +142,33 @@ def test_cli_does_not_offer_synthetic_window_counts_for_concentration():
     process = run_cli("analyze", "--help")
     assert process.returncode == 0
     assert "--temperature-ranges" in process.stdout
-    assert "--combination-groups" in process.stdout
-    assert "--output-step-C" in process.stdout
-    assert "--output-method {sample,interpolate}" in process.stdout
-    assert "--temperature-method" not in process.stdout
+    assert "--curves" in process.stdout
+    assert "--temperature-step-C" in process.stdout
+    assert "--output-method" not in process.stdout
+    assert "--temperature-method {latest,max,window}" in process.stdout
+    assert "--temperature-step-C" in process.stdout
+    assert "--temperature-window-C" in process.stdout
     assert "--method {mle,average}" in process.stdout
     assert "window_max_count" not in process.stdout
     assert "--dilution-method" not in process.stdout
     assert "--method-options" not in process.stdout
     assert "--water-blank-model" not in process.stdout
+
+
+@pytest.mark.parametrize("selection", ["latest", "max", "window"])
+def test_cli_count_selection_matches_python(tmp_path, range_source, selection):
+    output = tmp_path / "grid.inptk"
+    extra = ["--temperature-window-C", ".5"] if selection == "window" else []
+    process = run_cli(
+        "analyze", tmp_path / "counts.csv", "--metadata", tmp_path / "metadata.csv",
+        "--temperature-step-C", "1", "--temperature-method", selection,
+        *extra, "--out", output,
+    )
+    assert process.returncode == 0, process.stderr
+    result = inptk.load(output)
+    expected = inptk.analyze_concentration(
+        range_source, temperature_step_C=1, temperature_method=selection,
+        temperature_window_C=.5 if selection == "window" else None,
+    )
+    pd.testing.assert_frame_equal(result.to_dataframe(), expected.to_dataframe())
+    assert result.settings["temperature_method"] == selection

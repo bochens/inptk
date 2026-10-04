@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 import inptk
-from inptk.methods import validate_combination_groups
+from inptk.methods import resolve_curves
 
 
 def counts_frame():
@@ -104,7 +104,7 @@ def combined_frame():
     return pd.DataFrame(
         {
             "sample_id": ["S", "S"],
-            "group_id": ["01", "01"],
+            "curve_id": ["01", "01"],
             "point_id": ["001", "002"],
             "temperature_C": [-5, -5],
             "concentration": [1.0, 2.0],
@@ -139,16 +139,16 @@ def test_individual_spectra_use_point_identity_and_preserve_explicit_temperature
 
 
 def test_combined_spectrum_has_group_point_identity_without_physical_run_or_cycle():
-    table = inptk.CombinedSpectrumTable(combined_frame())
+    table = inptk.CurveSpectrumTable(combined_frame())
     assert isinstance(table, inptk.CumulativeSpectrumTable)
     assert not {"run_id", "cycle_id"} & set(table.columns)
-    assert table.select(group_id="01", point_id="002").to_dataframe().concentration.tolist() == [2]
+    assert table.select(curve_id="01", point_id="002").to_dataframe().concentration.tolist() == [2]
     with pytest.raises(ValueError, match="unique identity/point"):
-        inptk.CombinedSpectrumTable(combined_frame().assign(point_id="same"))
+        inptk.CurveSpectrumTable(combined_frame().assign(point_id="same"))
     with pytest.raises(ValueError, match="one parent sample"):
-        inptk.CombinedSpectrumTable(combined_frame().assign(sample_id=["S", "other"]))
+        inptk.CurveSpectrumTable(combined_frame().assign(sample_id=["S", "other"]))
     with pytest.raises(ValueError, match="point_id"):
-        inptk.CombinedSpectrumTable(combined_frame().drop(columns="point_id"))
+        inptk.CurveSpectrumTable(combined_frame().drop(columns="point_id"))
 
 
 @pytest.fixture
@@ -189,7 +189,7 @@ def grouped_source():
 
 
 def test_default_groups_separate_runs_and_cycles_and_escape_ids(grouped_source):
-    groups = validate_combination_groups(None, grouped_source, grouped_source.counts.to_dataframe())
+    groups = resolve_curves(None, grouped_source, grouped_source.counts.to_dataframe())
     assert set(groups) == {
         "A%2FB/R%2F1/01",
         "A%2FB/R%2F1/02",
@@ -212,13 +212,13 @@ def test_default_groups_separate_runs_and_cycles_and_escape_ids(grouped_source):
 
 def test_explicit_groups_select_members_without_changing_source_or_caller(grouped_source):
     values = {
-        "combined": [
+        "combined": {"inputs": [
             {"measurement_id": "M1", "cycle_id": "01"},
             {"measurement_id": "M2", "cycle_id": "02"},
-        ]
+        ]}
     }
     before = grouped_source.counts.to_dataframe()
-    groups = validate_combination_groups(values, grouped_source, before)
+    groups = resolve_curves(values, grouped_source, before)
     assert list(groups) == ["combined"]
     assert groups["combined"] == {
         "sample_id": "A/B",
@@ -228,7 +228,7 @@ def test_explicit_groups_select_members_without_changing_source_or_caller(groupe
         ],
     }
     groups["combined"]["members"][0]["cycle_id"] = "changed"
-    assert values["combined"][0]["cycle_id"] == "01"
+    assert values["combined"]["inputs"][0]["cycle_id"] == "01"
     pd.testing.assert_frame_equal(grouped_source.counts.to_dataframe(), before)
 
 
@@ -265,22 +265,22 @@ def test_explicit_groups_select_members_without_changing_source_or_caller(groupe
 )
 def test_groups_reject_invalid_or_nonindependent_members(grouped_source, members, message):
     with pytest.raises((ValueError, TypeError), match=message):
-        validate_combination_groups(
-            {"g": members}, grouped_source, grouped_source.counts.to_dataframe()
+        resolve_curves(
+            {"g": {"inputs": members}}, grouped_source, grouped_source.counts.to_dataframe()
         )
 
 
 @pytest.mark.parametrize("groups", [{}, [], {"": []}, {"g": []}, {"g": {"members": []}}])
 def test_invalid_group_shapes_are_rejected(grouped_source, groups):
     with pytest.raises((ValueError, TypeError)):
-        validate_combination_groups(groups, grouped_source, grouped_source.counts.to_dataframe())
+        resolve_curves(groups, grouped_source, grouped_source.counts.to_dataframe())
 
 
 def test_filtered_out_members_cannot_reenter_through_group_configuration(grouped_source):
     frame = grouped_source.counts.select(cycle_id="01").to_dataframe()
     with pytest.raises(ValueError, match="Unknown or absent"):
-        validate_combination_groups(
-            {"g": [{"measurement_id": "M1", "cycle_id": "02"}]}, grouped_source, frame
+        resolve_curves(
+            {"g": {"inputs": [{"measurement_id": "M1", "cycle_id": "02"}]}}, grouped_source, frame
         )
 
 
@@ -297,59 +297,47 @@ def result_for_archive():
             }
         ],
     )
-    combined = inptk.CombinedSpectrumTable(combined_frame())
+    combined = inptk.CurveSpectrumTable(combined_frame())
     return inptk.AnalysisResult(
         source,
         inptk.FrozenFractionTable(source.counts.to_dataframe()),
-        inptk.CumulativeSpectrumTable(individual_frame()),
-        combined,
-        combined.select(point_id="001"),
-        final_candidates=combined,
-        resampled=inptk.CombinedSpectrumTable(combined_frame().assign(point_id=["grid0", "grid1"])),
-        settings={
-            "combination_groups": {
-                "01": {
-                    "sample_id": "S",
-                    "members": [{"measurement_id": "M", "run_id": "R", "cycle_id": "01"}],
-                }
-            }
+        curves={
+            "01": inptk.CurveResult(
+                "01", combined.select(point_id="001"),
+                sources=[{"measurement_id": "M", "run_id": "R", "cycle_id": "01"}],
+                excluded=combined.select(point_id="002"),
+            )
         },
     )
 
 
-def test_new_format_roundtrip_retains_original_ids_groups_and_optional_resampling(tmp_path):
+def test_new_format_roundtrip_retains_original_ids_and_named_curves(tmp_path):
     result = result_for_archive()
     target = tmp_path / "result.inptk"
     result.save(target)
-    assert json.loads((target / "analysis.json").read_text())["format_version"] == 2
+    assert json.loads((target / "analysis.json").read_text())["format_version"] == 4
     restored = inptk.load(target)
     assert restored.settings == result.settings
     assert restored.experiment.measurements == result.experiment.measurements
     pd.testing.assert_frame_equal(
         restored.experiment.counts.to_dataframe(), result.experiment.counts.to_dataframe()
     )
-    for name in ("combined", "final", "final_candidates", "resampled"):
-        assert isinstance(getattr(restored, name), inptk.CombinedSpectrumTable)
+    for name in ("cumulative", "excluded"):
+        assert isinstance(getattr(restored.curves["01"], name), inptk.CurveSpectrumTable)
         pd.testing.assert_frame_equal(
-            getattr(restored, name).to_dataframe(), getattr(result, name).to_dataframe()
+            getattr(restored.curves["01"], name).to_dataframe(),
+            getattr(result.curves["01"], name).to_dataframe(),
         )
     output = tmp_path / "sampled.csv"
-    restored.export_csv(output, table="resampled")
-    assert pd.read_csv(output).point_id.tolist() == ["grid0", "grid1"]
+    restored.export_csv(output, table="cumulative")
+    assert pd.read_csv(output, dtype={"point_id": str}).point_id.tolist() == ["001"]
     with pytest.raises(FileExistsError):
         restored.export_csv(output)
 
 
 def test_export_rejects_absent_resampled_table_and_unknown_table_choice(tmp_path):
     result = result_for_archive()
-    result = inptk.AnalysisResult(
-        result.experiment,
-        result.frozen_fraction,
-        result.per_dilution,
-        result.combined,
-        result.final,
-    )
-    with pytest.raises(ValueError, match="No resampled"):
+    with pytest.raises(ValueError, match="table must be"):
         result.export_csv(tmp_path / "none.csv", table="resampled")
     with pytest.raises(ValueError, match="table must be"):
         result.export_csv(tmp_path / "other.csv", table="combined")
@@ -391,27 +379,22 @@ def test_icescopy_uses_only_real_image_columns_for_picture_identity(image_column
 @pytest.mark.parametrize(
     "slot, wrong_slot",
     [
-        ("frozen_fraction", "per_dilution"),
-        ("per_dilution", "combined"),
-        ("combined", "per_dilution"),
-        ("final", "frozen_fraction"),
-        ("differential", "per_dilution"),
-        ("final_candidates", "per_dilution"),
-        ("resampled", "per_dilution"),
+        ("cumulative", "frozen_fraction"),
+        ("excluded", "frozen_fraction"),
+        ("differential", "frozen_fraction"),
     ],
 )
 def test_analysis_result_rejects_wrong_scientific_table_in_each_slot(slot, wrong_slot):
     result = result_for_archive()
-    with pytest.raises(TypeError, match=f"AnalysisResult {slot} must be"):
-        replace(result, **{slot: getattr(result, wrong_slot)})
+    with pytest.raises(TypeError, match=f"CurveResult {slot} must be"):
+        replace(result.curves["01"], **{slot: result.frozen_fraction})
 
 
 @pytest.mark.parametrize(
     "slot, wrong_slot",
     [
-        ("final", "frozen_fraction"),
-        ("per_dilution", "combined"),
-        ("resampled", "per_dilution"),
+        ("cumulative", "frozen_fraction"),
+        ("excluded", "frozen_fraction"),
     ],
 )
 def test_saved_result_rejects_valid_table_payload_in_wrong_slot(tmp_path, slot, wrong_slot):
@@ -419,7 +402,7 @@ def test_saved_result_rejects_valid_table_payload_in_wrong_slot(tmp_path, slot, 
     result_for_archive().save(target)
     path = target / "analysis.json"
     payload = json.loads(path.read_text())
-    payload["tables"][slot] = payload["tables"][wrong_slot]
+    payload["curves"]["01"]["tables"][slot] = payload[wrong_slot]
     path.write_text(json.dumps(payload))
-    with pytest.raises(TypeError, match=f"AnalysisResult {slot} must be"):
+    with pytest.raises(TypeError, match=f"CurveResult {slot} must be"):
         inptk.load(target)

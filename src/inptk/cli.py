@@ -3,6 +3,8 @@
 import argparse
 import json
 import sys
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path
 
@@ -11,17 +13,32 @@ import pandas as pd
 from . import (
     __version__,
     analyze_concentration,
+    cumulative_spectrum,
+    estimate_concentration,
     frozen_fraction,
-    load,
     read_counts,
     read_icescopy,
     read_observations,
+    suggest_temperature_ranges,
 )
-from .experiment import AnalysisResult, Experiment
-from .io import FORMAT_VERSION, _encode, _table_payload
+from .cli_steps import (
+    complete_step_metadata,
+    counts_from_step,
+    fraction_step,
+    select_table,
+    table_summary,
+    transform_step,
+)
+from .cli_store import ResultStore
+from .experiment import Experiment, ProcessingResult
+from .io import FORMAT_VERSION, _encode, _table_frame, _table_payload
+from .settings import DEFAULTS
 from .tables import CountsTable
 
-CLI_PROTOCOL_VERSION = 1
+CLI_PROTOCOL_VERSION = 2
+_CLIENT_WRITER: ContextVar[Callable[[dict], None] | None] = ContextVar(
+    "inptk_client_writer", default=None
+)
 
 
 class _UsageError(Exception):
@@ -29,6 +46,13 @@ class _UsageError(Exception):
 
 
 class _Parser(argparse.ArgumentParser):
+    def _print_message(self, message, file=None):
+        # argparse can accept abbreviated or combined help/version flags. Those
+        # must not print prose or exit the persistent client's request loop.
+        if _CLIENT_WRITER.get() is not None:
+            raise _UsageError("Use capabilities for client discovery")
+        super()._print_message(message, file)
+
     def error(self, message):
         raise _UsageError(message)
 
@@ -42,101 +66,243 @@ def _json_flag(parser):
     )
 
 
+def _analysis_input_arguments(parser):
+    parser.add_argument("input")
+    parser.add_argument("--metadata", help="Native metadata or Icescopy metadata overrides")
+    parser.add_argument(
+        "--format",
+        choices=("native", "icescopy", "saved"),
+        default="native",
+        help=(
+            "Icescopy input accepts CSV or .icescopy projects. "
+            "Saved analyses reuse original observations; processing settings use "
+            "this command's arguments, not prior settings"
+        ),
+    )
+    parser.add_argument(
+        "--sample-map",
+        help="JSON object or file mapping Icescopy measurement names to parent samples",
+    )
+    parser.add_argument(
+        "--water-blank-map",
+        help="JSON object or file mapping raw native or Icescopy inputs to blank input names",
+    )
+    parser.add_argument(
+        "--no-water-blank-correction",
+        action="store_true",
+        help="Analyze sample counts without water correction while retaining raw blank context",
+    )
+    parser.add_argument("--run-id", default="1")
+    parser.add_argument(
+        "--sample",
+        action="append",
+        help="Exact parent sample ID to analyze; repeat to select several",
+    )
+    parser.add_argument(
+        "--cycle", action="append", help="Exact cycle ID to analyze; repeat to select several"
+    )
+
+
 def build_parser():
     parser = _Parser(prog="inptk", description="INP-toolkit droplet-freezing analysis")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     _json_flag(parser)
     commands = parser.add_subparsers(dest="command", required=True)
+    serve = commands.add_parser(
+        "serve", help="Keep Python and in-memory results alive for a client"
+    )
+    _json_flag(serve)
     capabilities = commands.add_parser("capabilities", help="Describe the installed CLI as JSON")
     _json_flag(capabilities)
     preview = commands.add_parser(
         "preview", help="Read original counts and fractions without fitting concentrations"
     )
-    preview.add_argument("input")
-    preview.add_argument("--format", choices=("native", "icescopy", "saved"), default="native")
-    preview.add_argument("--metadata", help="Optional or incomplete measurement metadata")
-    preview.add_argument(
-        "--sample-map", help="JSON object or file mapping Icescopy measurement names to samples"
-    )
-    preview.add_argument("--run-id", default="1")
+    _observation_arguments(preview)
     _json_flag(preview)
     analyze = commands.add_parser(
-        "analyze", help="Combine original observations into explicit sample groups"
+        "analyze", help="Calculate named concentration curves from original observations"
     )
     _json_flag(analyze)
-    analyze.add_argument("input")
-    analyze.add_argument("--metadata", help="Native metadata or Icescopy metadata overrides")
-    analyze.add_argument(
-        "--format",
-        choices=("native", "icescopy", "saved"),
-        default="native",
-        help=(
-            "Saved analyses reuse original observations; processing settings use "
-            "this command's arguments, not prior settings"
-        ),
-    )
-    analyze.add_argument(
-        "--sample-map",
-        help="JSON object or file mapping Icescopy measurement names to parent samples",
-    )
-    analyze.add_argument(
-        "--water-blank-map",
-        help="JSON object or file mapping native measurements to lists of blank measurements",
-    )
-    analyze.add_argument(
-        "--no-water-blank-correction",
-        action="store_true",
-        help="Analyze sample counts without water correction while retaining raw blank context",
-    )
-    analyze.add_argument("--run-id", default="1")
-    analyze.add_argument(
-        "--sample",
-        action="append",
-        help="Exact parent sample ID to analyze; repeat to select several",
-    )
-    analyze.add_argument(
-        "--cycle", action="append", help="Exact cycle ID to analyze; repeat to select several"
-    )
+    _analysis_input_arguments(analyze)
     analyze.add_argument("--out", required=True)
+    _estimation_arguments(analyze)
     analyze.add_argument(
-        "--method",
-        choices=("mle", "average"),
-        default="mle",
-        help="Fit eligible counts together (mle) or average their concentration estimates",
+        "--output-basis",
+        choices=("suspension", "sampled_air", "dry_soil"),
+        default=DEFAULTS.output_basis,
     )
-    analyze.add_argument(
-        "--temperature-ranges",
-        help="JSON object or file mapping measurement IDs to inclusive min_C/max_C limits",
-    )
-    analyze.add_argument(
-        "--output-basis", choices=("suspension", "sampled_air", "dry_soil"), default="suspension"
-    )
-    analyze.add_argument(
-        "--combination-groups",
-        help="JSON object or file mapping group IDs to lists of measurement_id/cycle_id members",
-    )
-    analyze.add_argument(
-        "--output-step-C",
-        type=float,
-        help="Optional temperature spacing applied only to the final result",
-    )
-    analyze.add_argument("--output-method", choices=("sample", "interpolate"), default="sample")
-    analyze.add_argument("--z", type=float, default=1.96)
     analyze.add_argument("--differential", action="store_true")
     analyze.add_argument(
         "--decrease-policy",
         choices=("stop_at_decrease", "skip_decreases"),
-        default="stop_at_decrease",
+        default=DEFAULTS.decrease_policy,
         help="Select final cumulative points without changing calculated values",
     )
-    export = commands.add_parser(
-        "export-csv", help="Export final concentration rows from a saved analysis"
+    suggest = commands.add_parser(
+        "suggest-ranges", help="Suggest Average ranges and flag weak blank-corrected signals"
     )
+    _json_flag(suggest)
+    _analysis_input_arguments(suggest)
+    suggest.add_argument(
+        "--summary",
+        action="store_true",
+        help="Return limits and reasons without the per-observation report",
+    )
+    suggest.add_argument("--curves", help="JSON object or file selecting named curves and cycles")
+    suggest.add_argument(
+        "--min-frozen",
+        type=int,
+        default=3,
+        help="Minimum frozen sample wells after the first dilution (default: 3)",
+    )
+    suggest.add_argument(
+        "--min-unfrozen", type=int, default=3, help="Minimum liquid sample wells (default: 3)"
+    )
+    suggest.add_argument("--z", type=float, default=DEFAULTS.z)
+    _temperature_arguments(suggest)
+    fractions = commands.add_parser(
+        "fractions", help="Calculate and save original frozen fractions"
+    )
+    _observation_arguments(fractions)
+    fractions.add_argument(
+        "--water-blank-map", help="Explicit blank assignments with complete metadata"
+    )
+    fractions.add_argument("--out", required=True)
+    _json_flag(fractions)
+    estimate = commands.add_parser(
+        "estimate", help="Estimate concentrations without final selection"
+    )
+    _analysis_input_arguments(estimate)
+    _estimation_arguments(estimate, individual=True)
+    estimate.add_argument("--out", required=True)
+    _json_flag(estimate)
+    for name, help_text in (
+        ("convert", "Convert existing suspension concentrations to air or soil units"),
+        ("finalize", "Select final cumulative points without repeating estimation"),
+        ("differentiate", "Differentiate existing individual suspension spectra without fitting"),
+    ):
+        step = commands.add_parser(name, help=help_text)
+        step.add_argument("input", help="Saved .inptk calculation step or analysis")
+        step.add_argument("--out", required=True)
+        _json_flag(step)
+        if name == "convert":
+            step.add_argument(
+                "--output-basis", required=True, choices=("suspension", "sampled_air", "dry_soil")
+            )
+        if name == "finalize":
+            step.add_argument(
+                "--decrease-policy",
+                choices=("stop_at_decrease", "skip_decreases"),
+                default=DEFAULTS.decrease_policy,
+            )
+    save = commands.add_parser("save", help="Save an existing result without recalculating")
+    save.add_argument("input", help="Saved input path or an in-memory @reference")
+    save.add_argument("--out", required=True)
+    _json_flag(save)
+    table = commands.add_parser("table", help="List saved quantities or read a table for plotting")
+    table.add_argument("input", help="Saved .inptk experiment, step or analysis")
+    table.add_argument(
+        "--table", choices=("counts", "frozen_fraction", "cumulative", "excluded", "differential")
+    )
+    table.add_argument("--curve", help="Select one exact named curve")
+    table.add_argument(
+        "--columns", nargs="+", help="Return only these table columns, in this order"
+    )
+    table.add_argument(
+        "--no-history", action="store_true", help="Omit processing history from JSON"
+    )
+    _json_flag(table)
+    export = commands.add_parser("export-csv", help="Export a quantity from named saved curves")
     _json_flag(export)
     export.add_argument("input")
     export.add_argument("--out", required=True)
-    export.add_argument("--table", choices=("final", "resampled"), default="final")
+    export.add_argument("--curve", help="Export one exact curve name; otherwise export all curves")
+    export.add_argument(
+        "--table",
+        choices=("counts", "frozen_fraction", "cumulative", "excluded", "differential"),
+        default="cumulative",
+    )
     return parser
+
+
+def _observation_arguments(parser):
+    parser.add_argument("input")
+    parser.add_argument("--format", choices=("native", "icescopy", "saved"), default="native")
+    parser.add_argument("--metadata", help="Optional or incomplete measurement metadata")
+    parser.add_argument(
+        "--sample-map", help="JSON object or file mapping Icescopy inputs to samples"
+    )
+    parser.add_argument("--run-id", default="1")
+
+
+def _estimation_arguments(parser, *, individual=False):
+    parser.add_argument(
+        "--method",
+        choices=("mle", "average"),
+        default=DEFAULTS.method,
+        help="Joint monotone curve fit (mle) or pointwise concentration average",
+    )
+    parser.add_argument(
+        "--temperature-ranges", help="JSON object or file mapping input names to min_C/max_C limits"
+    )
+    choices = parser.add_mutually_exclusive_group() if individual else parser
+    choices.add_argument("--curves", help="JSON object or file selecting named curves and cycles")
+    if individual:
+        choices.add_argument(
+            "--individual",
+            action="store_true",
+            help="Calculate each physical input separately, including for differentiation",
+        )
+    _temperature_arguments(parser)
+    parser.add_argument("--fit-step-C", type=float, help="MLE curve shape spacing in degrees C")
+    parser.add_argument("--z", type=float, default=DEFAULTS.z)
+
+
+def _estimation_settings(args):
+    return {
+        "method": args.method,
+        "fit_step_C": args.fit_step_C,
+        "temperature_step_C": args.temperature_step_C,
+        "temperature_start_C": args.temperature_start_C,
+        "temperature_end_C": args.temperature_end_C,
+        "temperature_method": args.temperature_method,
+        "temperature_window_C": args.temperature_window_C,
+        "temperature_ranges_C": _json_object(args.temperature_ranges, "--temperature-ranges"),
+        "curves": _json_object(args.curves, "--curves"),
+        "z": args.z,
+        "water_blank_correction": not args.no_water_blank_correction,
+    }
+
+
+def _temperature_arguments(parser):
+    parser.add_argument(
+        "--temperature-step-C",
+        type=float,
+        help="Optional count-selection grid spacing before estimation and blank correction",
+    )
+    parser.add_argument(
+        "--temperature-start-C",
+        type=float,
+        default=DEFAULTS.temperature_start_C,
+        help="Warm grid endpoint; defaults to the warmest selected input temperature",
+    )
+    parser.add_argument(
+        "--temperature-end-C",
+        type=float,
+        default=DEFAULTS.temperature_end_C,
+        help="Cold grid endpoint; defaults to the coldest selected input temperature",
+    )
+    parser.add_argument(
+        "--temperature-method",
+        choices=("latest", "max", "window"),
+        default=DEFAULTS.temperature_method,
+        help="Select latest warmer counts, maximum warmer fraction, or maximum count in a window",
+    )
+    parser.add_argument(
+        "--temperature-window-C",
+        type=float,
+        help="Full centered window width in degrees C; required only for window",
+    )
 
 
 def _select_experiment(experiment, sample_ids, cycle_ids):
@@ -198,7 +364,16 @@ def _json_object(value, option):
     payload = value
     if not payload.lstrip().startswith(("{", "[")):
         payload = Path(payload).read_text(encoding="utf-8")
-    result = json.loads(payload)
+
+    def unique_keys(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"{option} contains a duplicate name: {key!r}")
+            result[key] = item
+        return result
+
+    result = json.loads(payload, object_pairs_hook=unique_keys)
     if not isinstance(result, dict):
         raise TypeError(f"{option} must contain a JSON object")
     return result
@@ -217,7 +392,11 @@ def _response(command, *, status="ok", warnings=None, **payload):
 
 
 def _print_json(payload):
-    print(json.dumps(_encode(payload), allow_nan=False))
+    writer = _CLIENT_WRITER.get()
+    if writer is not None:
+        writer(payload)
+    else:
+        print(json.dumps(_encode(payload), allow_nan=False))
 
 
 def _capabilities(parser):
@@ -252,34 +431,69 @@ def _capabilities(parser):
     return _response(
         "capabilities",
         commands=commands,
-        result_tables=[
-            "frozen_fraction",
-            "per_dilution",
-            "combined",
-            "final_candidates",
-            "final",
-            "differential",
-            "resampled",
-        ],
+        observation_tables=["counts", "frozen_fraction"],
+        curve_tables=["cumulative", "excluded", "differential"],
+        saved_kinds=["experiment", "processing", "analysis"],
+        client_mode={
+            "command": "serve",
+            "transport": "one JSON object per line on stdin/stdout",
+            "request": {"id": "request ID", "args": ["command", "arguments"]},
+            "memory_reference_prefix": "@",
+            "import": {
+                "id": "request ID",
+                "import": {
+                    "out": "@input",
+                    "counts": "Native count records or an object of column arrays",
+                    "metadata": "Complete measurement metadata records or column arrays",
+                    "water_blank_map": "Optional explicit sample-to-blank mapping",
+                    "run_id": "Optional default run identity",
+                },
+            },
+            "release": {"id": "request ID", "release": ["@result"]},
+        },
+        step_sequence=["fractions", "estimate", "convert", "finalize"],
+        individual_sequence=["fractions", "estimate --individual", "differentiate"],
+        estimation_methods={
+            "mle": {
+                "fit": "joint_monotone_first_freezing_curve",
+                "input": "fixed well totals and cumulative first-freezing counts per cycle",
+                "uncertainty": "pointwise profile bounds from the complete curve likelihood",
+                "output_order": "selected analysis temperatures, warm to cold",
+            },
+            "average": {
+                "fit": "equal-weight concentration mean at each temperature",
+                "output_order": "native observation order, latest-warmer alignment when needed",
+            },
+        },
+        curve_specification={
+            "inputs": "Nonempty list of input names or measurement_id/cycle_id objects",
+            "cycle": "Optional exact label for input names; required if several cycles exist",
+            "default": "One curve per original sample, run and cycle",
+        },
         json_number_encoding={"nonfinite_key": "$nonfinite", "values": ["nan", "inf", "-inf"]},
         exit_codes={"success": 0, "processing_error": 1, "usage_error": 2, "cancelled": 130},
     )
 
 
-def _preview(args):
+def _preview(args, store):
     blank_map = {}
     if args.format == "saved":
         if args.metadata or args.sample_map:
             raise ValueError("Saved input already contains its metadata and sample mapping")
-        source = load(args.input)
-        experiment = source.experiment if isinstance(source, AnalysisResult) else source
-        counts = experiment.counts
-        metadata = [
-            {**asdict(experiment.samples[item.sample_id]), **asdict(item)}
-            for item in experiment.measurements.values()
-        ]
-        provisional = []
-        blank_map = experiment.water_blank_map
+        source = store.load(args.input)
+        experiment = source if isinstance(source, Experiment) else source.experiment
+        counts = counts_from_step(source)
+        if experiment is not None:
+            metadata = [
+                {**asdict(experiment.samples[item.sample_id]), **asdict(item)}
+                for item in experiment.measurements.values()
+            ]
+            provisional = []
+            blank_map = experiment.water_blank_map
+        else:
+            imported = next(step for step in counts.history if "measurement_metadata" in step)
+            metadata = imported["measurement_metadata"]
+            provisional = imported["provisional_sample_assignments"]
     else:
         mapping = _json_object(args.sample_map, "--sample-map")
         counts = read_observations(
@@ -356,9 +570,238 @@ def _error_code(error):
     return "invalid_input"
 
 
-def main(argv=None):
+def _read_analysis_input(args, store, *, saved=None):
+    if args.format == "native":
+        if args.sample_map:
+            raise ValueError("--sample-map applies only to Icescopy input")
+        if not args.metadata:
+            raise ValueError("Native input requires --metadata")
+        water_blank_map = _json_object(args.water_blank_map, "--water-blank-map")
+        experiment = read_counts(
+            args.input,
+            metadata=args.metadata,
+            run_id=args.run_id,
+            water_blank_map=water_blank_map,
+        )
+    elif args.format == "icescopy":
+        water_blank_map = _json_object(args.water_blank_map, "--water-blank-map")
+        mapping = _json_object(args.sample_map, "--sample-map")
+        overrides = None
+        if args.metadata:
+            from .readers import _frame
+
+            overrides = _frame(args.metadata)
+        experiment = read_icescopy(
+            args.input,
+            sample_map=mapping,
+            metadata=overrides,
+            run_id=args.run_id,
+            water_blank_map=water_blank_map,
+        )
+    else:
+        source = store.load(args.input) if saved is None else saved
+        if isinstance(source, ProcessingResult) and source.experiment is None:
+            if args.sample_map:
+                raise ValueError("--sample-map applies only to Icescopy input")
+            if not args.metadata:
+                raise ValueError(
+                    "This fraction step needs --metadata before concentration estimation"
+                )
+            experiment = complete_step_metadata(
+                source, args.metadata, _json_object(args.water_blank_map, "--water-blank-map")
+            )
+        else:
+            if args.water_blank_map:
+                raise ValueError("Saved input already contains its water-blank mapping")
+            if args.metadata or args.sample_map:
+                raise ValueError("Saved input already contains its metadata and sample mapping")
+            experiment = source if isinstance(source, Experiment) else source.experiment
+    return _select_experiment(experiment, args.sample, args.cycle)
+
+
+def _fraction_input(args, store):
+    blank_map = _json_object(args.water_blank_map, "--water-blank-map")
+    if args.format == "saved":
+        source = store.load(args.input)
+        experiment = source if isinstance(source, Experiment) else source.experiment
+        if args.sample_map:
+            raise ValueError("Saved input already contains its sample mapping")
+        if experiment is not None:
+            if args.metadata or args.water_blank_map:
+                raise ValueError(
+                    "Saved input already contains its metadata and water-blank mapping"
+                )
+            return fraction_step(experiment.counts, experiment=experiment)
+        if args.metadata:
+            experiment = complete_step_metadata(source, args.metadata, blank_map)
+            return fraction_step(experiment.counts, experiment=experiment)
+        if blank_map:
+            raise ValueError(
+                "Complete physical metadata before assigning blanks; fractions use raw counts"
+            )
+        return fraction_step(counts_from_step(source))
+    counts = read_observations(
+        args.input,
+        format=args.format,
+        metadata=args.metadata,
+        sample_map=_json_object(args.sample_map, "--sample-map"),
+        run_id=args.run_id,
+    )
+    records = counts.history[-1]["measurement_metadata"]
+    complete = all(
+        record.get(key) is not None
+        for record in records
+        for key in ("dilution", "droplet_volume_uL")
+    )
+    if complete:
+        imported = read_counts(counts.to_dataframe(), metadata=records, water_blank_map=blank_map)
+        experiment = Experiment(
+            counts,
+            imported.samples,
+            imported.measurements,
+            source=counts.history[-1],
+            water_blank_map=imported.water_blank_map,
+        )
+    else:
+        if blank_map:
+            raise ValueError(
+                "Complete physical metadata before assigning blanks; fractions use raw counts"
+            )
+        experiment = None
+    return fraction_step(counts, experiment=experiment)
+
+
+def _estimate_step(args, store):
+    source = store.load(args.input) if args.format == "saved" else None
+    experiment = _read_analysis_input(args, store, saved=source)
+    tables = table_summary(source) if source is not None else {}
+    if "frozen_fraction" in tables and getattr(source, "experiment", None) is not None:
+        fractions = select_table(source, "frozen_fraction")
+        if args.sample or args.cycle:
+            selected = experiment.counts.to_dataframe()
+            fractions = fractions.select(
+                measurement_id=list(experiment.measurements),
+                cycle_id=selected.cycle_id.unique().tolist(),
+            )
+    else:
+        fractions = frozen_fraction(experiment)
+    settings = _estimation_settings(args)
+    if args.individual:
+        settings.pop("curves")
+        estimated = cumulative_spectrum(fractions, experiment=experiment, **settings)
+    else:
+        estimated = estimate_concentration(fractions, experiment=experiment, **settings)
+    return ProcessingResult({"frozen_fraction": fractions, "cumulative": estimated}, experiment)
+
+
+def _save_step(result, args, json_mode, store):
+    store.save(result, args.out)
+    warnings = list(
+        dict.fromkeys(warning for table in result.tables.values() for warning in table.warnings)
+    )
+    if json_mode:
+        _print_json(
+            _response(
+                args.command,
+                output=store.output_name(args.out),
+                tables=table_summary(result),
+                warnings=warnings,
+            )
+        )
+    else:
+        print(f"Saved {args.command} result to {args.out}")
+        for name, table in result.tables.items():
+            print(f"  {name}: {len(table)} rows")
+        for warning in warnings:
+            print(f"Warning: {warning}")
+
+
+def serve_client(parser):
+    store = ResultStore(memory=True)
+    for line in sys.stdin:
+        request_id = None
+        try:
+            request = json.loads(line)
+            if not isinstance(request, dict):
+                raise TypeError("Client request must be a JSON object")
+            request_id = request.get("id")
+            if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
+                raise TypeError("Client request id must be a string or integer")
+            if set(request) == {"id", "release"}:
+                store.release(request["release"])
+                reply = _response("release", released=request["release"])
+                print(
+                    json.dumps(
+                        _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
+                    ),
+                    flush=True,
+                )
+                continue
+            if set(request) == {"id", "import"}:
+                try:
+                    experiment = store.import_counts(request["import"])
+                    reply = _response(
+                        "import",
+                        output=request["import"]["out"],
+                        tables=table_summary(experiment),
+                        measurements=list(experiment.measurements),
+                    )
+                    del experiment  # The store alone owns the uploaded experiment.
+                except (ValueError, TypeError, KeyError, OSError, AttributeError) as error:
+                    reply = _response(
+                        "import",
+                        status="error",
+                        error={"code": _error_code(error), "message": str(error)},
+                    )
+                print(
+                    json.dumps(
+                        _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
+                    ),
+                    flush=True,
+                )
+                continue
+            if set(request) != {"id", "args"}:
+                raise ValueError("Client request requires id and one of args, import or release")
+            args = request["args"]
+            if not isinstance(args, list) or not args or any(not isinstance(a, str) for a in args):
+                raise ValueError("args must be a nonempty list of command-line strings")
+            if args[0] == "serve" or any(a in ("-h", "--help", "--version") for a in args):
+                raise ValueError(
+                    "Use capabilities for client discovery; nested serve is not allowed"
+                )
+
+            def write_reply(payload, request_id=request_id):
+                print(
+                    json.dumps(
+                        _encode({**payload, "id": request_id}),
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
+
+            token = _CLIENT_WRITER.set(write_reply)
+            try:
+                main(["--json", *args], store=store, parser=parser)
+            finally:
+                _CLIENT_WRITER.reset(token)
+        except (ValueError, TypeError) as error:
+            reply = _response(
+                None, status="error", error={"code": "invalid_request", "message": str(error)}
+            )
+            print(
+                json.dumps(
+                    _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
+                ),
+                flush=True,
+            )
+    return 0
+
+
+def main(argv=None, *, store=None, parser=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
-    parser = build_parser()
+    parser = build_parser() if parser is None else parser
+    store = ResultStore() if store is None else store
     # An invalid invocation still needs a machine-readable response. Honor the
     # flag only before a '--' separator, where it is an option rather than data.
     option_arguments = arguments[: arguments.index("--")] if "--" in arguments else arguments
@@ -368,11 +811,15 @@ def main(argv=None):
         args = parser.parse_args(arguments)
         command = args.command
         json_mode = bool(getattr(args, "json", json_mode))
+        if command == "serve":
+            if store.memory:
+                raise ValueError("Nested serve is not allowed")
+            return serve_client(parser)
         if command == "capabilities":
             _print_json(_capabilities(parser))
             return 0
         if command == "preview":
-            preview = _preview(args)
+            preview = _preview(args, store)
             if json_mode:
                 _print_json(preview)
             else:
@@ -387,96 +834,160 @@ def main(argv=None):
                     )
                 print("No concentrations calculated. Use --json for plot data and metadata.")
             return 0
-        if Path(args.out).exists():
+        if command == "suggest-ranges":
+            proposal = suggest_temperature_ranges(
+                _read_analysis_input(args, store),
+                curves=_json_object(args.curves, "--curves"),
+                include_observations=not args.summary,
+                min_frozen=args.min_frozen,
+                min_unfrozen=args.min_unfrozen,
+                z=args.z,
+                temperature_step_C=args.temperature_step_C,
+                temperature_start_C=args.temperature_start_C,
+                temperature_end_C=args.temperature_end_C,
+                temperature_method=args.temperature_method,
+                temperature_window_C=args.temperature_window_C,
+                water_blank_correction=not args.no_water_blank_correction,
+            )
+            complete = all(item["range_C"] is not None for item in proposal.inputs.values())
+            _print_json(
+                _response(
+                    command,
+                    complete=complete,
+                    temperature_ranges_C=proposal.temperature_ranges_C if complete else None,
+                    inputs=proposal.inputs,
+                    settings=proposal.settings,
+                    **(
+                        {"table": _table_payload(proposal.observations)}
+                        if proposal.observations is not None
+                        else {}
+                    ),
+                    warnings=[]
+                    if complete
+                    else [
+                        "Some inputs have no usable range. Review thresholds or selected inputs."
+                    ],
+                )
+            )
+            return 0
+        if command == "table":
+            value = store.load(args.input)
+            if args.table is None:
+                if args.curve or args.columns is not None or args.no_history:
+                    raise ValueError("--curve, --columns and --no-history require --table")
+                summary = table_summary(value)
+                if json_mode:
+                    _print_json(_response(command, tables=summary))
+                else:
+                    for name, info in summary.items():
+                        print(f"{name}: {info['row_count']} rows ({info['type']})")
+            else:
+                table = select_table(value, args.table, args.curve)
+                if json_mode:
+                    _print_json(
+                        _response(
+                            command,
+                            table_name=args.table,
+                            curve_id=args.curve,
+                            table=_table_payload(
+                                table, columns=args.columns, include_history=not args.no_history
+                            ),
+                            warnings=table.warnings,
+                        )
+                    )
+                else:
+                    print(_table_frame(table, args.columns).to_string(index=False))
+            return 0
+        if store.exists(args.out):
             raise FileExistsError(f"Output already exists: {args.out}")
+        if command == "save":
+            result = store.load(args.input)
+            store.save(result, args.out)
+            if json_mode:
+                _print_json(_response(command, output=store.output_name(args.out)))
+            else:
+                print(f"Saved result to {args.out}")
+            return 0
+        if command == "fractions":
+            _save_step(_fraction_input(args, store), args, json_mode, store)
+            return 0
+        if command == "estimate":
+            _save_step(_estimate_step(args, store), args, json_mode, store)
+            return 0
+        if command in ("convert", "finalize", "differentiate"):
+            result = transform_step(
+                store.load(args.input),
+                command,
+                basis=getattr(args, "output_basis", None),
+                decrease_policy=getattr(args, "decrease_policy", None),
+            )
+            _save_step(result, args, json_mode, store)
+            return 0
         if command == "export-csv":
-            result = load(args.input)
-            if not isinstance(result, AnalysisResult):
-                raise TypeError("CSV export requires a saved AnalysisResult")
-            result.export_csv(args.out, table=args.table)
+            if str(args.out).startswith("@"):
+                raise ValueError(
+                    "CSV export requires a file path; use table --json for client data"
+                )
+            result = store.load(args.input)
+            table = select_table(result, args.table, args.curve)
+            table.to_dataframe().to_csv(args.out, index=False, mode="x")
             if json_mode:
                 _print_json(
-                    _response(command, output=str(Path(args.out).resolve()), table=args.table)
+                    _response(
+                        command,
+                        output=store.output_name(args.out),
+                        table=args.table,
+                        curve_id=args.curve,
+                    )
                 )
             return 0
-        temperature_ranges = _json_object(args.temperature_ranges, "--temperature-ranges")
-        combination_groups = _json_object(args.combination_groups, "--combination-groups")
-        if args.format == "native":
-            if args.sample_map:
-                raise ValueError("--sample-map applies only to Icescopy input")
-            if not args.metadata:
-                raise ValueError("Native input requires --metadata")
-            water_blank_map = _json_object(args.water_blank_map, "--water-blank-map")
-            experiment = read_counts(
-                args.input,
-                metadata=args.metadata,
-                run_id=args.run_id,
-                water_blank_map=water_blank_map,
-            )
-        elif args.format == "icescopy":
-            if args.water_blank_map:
-                raise ValueError(
-                    "The Icescopy CSV adapter does not include raw blank context. "
-                    "--water-blank-map requires raw sample and blank counts in --format native."
-                )
-            mapping = _json_object(args.sample_map, "--sample-map")
-            overrides = None
-            if args.metadata:
-                from .readers import _frame
-
-                overrides = _frame(args.metadata)
-            experiment = read_icescopy(
-                args.input, sample_map=mapping, metadata=overrides, run_id=args.run_id
-            )
-        else:
-            if args.water_blank_map:
-                raise ValueError("Saved input already contains its water-blank mapping")
-            if args.metadata or args.sample_map:
-                raise ValueError("Saved input already contains its metadata and sample mapping")
-            experiment = load(args.input)
-            if isinstance(experiment, AnalysisResult):
-                experiment = experiment.experiment
-        experiment = _select_experiment(experiment, args.sample, args.cycle)
+        experiment = _read_analysis_input(args, store)
         result = analyze_concentration(
             experiment,
-            method=args.method,
-            temperature_ranges_C=temperature_ranges,
-            combination_groups=combination_groups,
+            **_estimation_settings(args),
             output_basis=args.output_basis,
-            output_step_C=args.output_step_C,
-            output_method=args.output_method,
-            z=args.z,
             differential=args.differential,
-            water_blank_correction=not args.no_water_blank_correction,
             decrease_policy=args.decrease_policy,
         )
-        result.save(args.out)
+        store.save(result, args.out)
         if json_mode:
             _print_json(
                 _response(
                     command,
-                    output=str(Path(args.out).resolve()),
+                    output=store.output_name(args.out),
                     warnings=result.warnings,
                     settings=result.settings,
-                    tables={
-                        name: {"type": type(table).__name__, "row_count": len(table)}
-                        for name in (
-                            "frozen_fraction",
-                            "per_dilution",
-                            "combined",
-                            "final_candidates",
-                            "final",
-                            "differential",
-                            "resampled",
-                        )
-                        if (table := getattr(result, name)) is not None
+                    observation_tables={
+                        "counts": {"type": "CountsTable", "row_count": len(result.counts)},
+                        "frozen_fraction": {
+                            "type": "FrozenFractionTable",
+                            "row_count": len(result.frozen_fraction),
+                        },
+                    },
+                    curves={
+                        name: {
+                            "curve_id": curve.curve_id,
+                            "kind": curve.kind,
+                            "sources": curve.sources,
+                            "tables": {
+                                quantity: {"type": type(table).__name__, "row_count": len(table)}
+                                for quantity in (
+                                    "cumulative",
+                                    "excluded",
+                                    "differential",
+                                )
+                                if (table := getattr(curve, quantity)) is not None
+                            },
+                        }
+                        for name, curve in result.curves.items()
                     },
                 )
             )
         else:
             for warning in result.warnings:
                 print(f"Warning: {warning}")
-            print(f"Saved {len(result.final)} concentration rows to {args.out}")
+            count = sum(len(curve.cumulative) for curve in result.curves.values())
+            print(f"Saved {count} concentration rows in {len(result.curves)} curves to {args.out}")
     except _UsageError as error:
         if json_mode:
             _print_json(

@@ -56,11 +56,16 @@ def test_fraction_no_longer_accepts_temperature_selection_options(option):
         frozen_fraction(source, **{option: 0.5})
 
 
-def test_individual_estimates_keep_all_native_rows_and_do_not_pool_repeated_temperatures():
+@pytest.mark.parametrize("method", ["mle", "average"])
+def test_individual_estimates_keep_native_rows_without_pooling_repeated_temperatures(method):
     source = experiment([-5, -6, -6, -5.9, -7, -6.9], [0, 4, 8, 9, 16, 16])
-    actual = cumulative_spectrum(frozen_fraction(source), experiment=source).to_dataframe()
-    expected = -np.log1p(-np.array([0, 4, 8, 9, 16, 16]) / 32) / 0.05
-    np.testing.assert_allclose(actual.concentration, expected, atol=0, rtol=1e-10)
+    actual = cumulative_spectrum(
+        frozen_fraction(source), experiment=source, method=method
+    ).to_dataframe()
+    fitted_counts = [0, 9, 9, 9, 16, 16] if method == "mle" else [0, 4, 8, 9, 16, 16]
+    expected = -np.log1p(-np.array(fitted_counts) / 32) / 0.05
+    np.testing.assert_allclose(actual.concentration, expected, atol=1e-7, rtol=1e-7)
+    assert actual.n_frozen.tolist() == [0, 4, 8, 9, 16, 16]
     assert actual.observation_id.tolist() == source.counts.to_dataframe().observation_id.tolist()
     assert actual.point_order.tolist() == list(range(6))
     assert actual.point_id.is_unique
@@ -80,7 +85,9 @@ def test_native_estimates_follow_actual_time_without_mutating_source_row_order()
 
 def test_matching_blank_acquisitions_remain_paired_at_duplicate_temperatures():
     source = experiment([-5, -6, -6, -7], [4, 8, 16, 20], blanks=[0, 1, 5, 8])
-    actual = cumulative_spectrum(frozen_fraction(source), experiment=source).to_dataframe()
+    actual = cumulative_spectrum(
+        frozen_fraction(source), experiment=source, method="average"
+    ).to_dataframe()
     expected = [
         fit_concentration(x, 32, 1, 50, blank_frozen=b, blank_total=32, confidence_drop=1.96**2 / 2)
         for x, b in zip([4, 8, 16, 20], [0, 1, 5, 8])
@@ -126,8 +133,10 @@ def test_missing_blank_coverage_for_eligible_native_target_is_rejected():
 
 def test_repeated_count_states_reuse_fit_but_new_blank_state_or_cycle_does_not():
     source = experiment([-5, -6, -7], [8, 8, 8], blanks=[1, 1, 2], cycles=("01", "1"))
-    with patch("inptk.water_blank.estimate_point", wraps=estimate_point) as estimator:
-        actual = cumulative_spectrum(frozen_fraction(source), experiment=source).to_dataframe()
+    with patch("inptk.estimation.estimate_point", wraps=estimate_point) as estimator:
+        actual = cumulative_spectrum(
+            frozen_fraction(source), experiment=source, method="average"
+        ).to_dataframe()
     assert estimator.call_count == 4
     assert len(actual) == 6
     assert set(actual.cycle_id) == {"01", "1"}

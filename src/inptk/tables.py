@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 IDENTITY_COLUMNS = ("run_id", "sample_id", "cycle_id")
-IDENTIFIER_COLUMNS = (*IDENTITY_COLUMNS, "measurement_id", "observation_id", "group_id", "point_id")
+IDENTIFIER_COLUMNS = (*IDENTITY_COLUMNS, "measurement_id", "observation_id", "curve_id", "point_id")
 UNITS = {
     "suspension": "INP_per_mL_suspension",
     "sampled_air": "INP_per_L_air",
@@ -146,12 +146,12 @@ class CumulativeSpectrumTable(ScientificTable):
         return keys
 
 
-class CombinedSpectrumTable(CumulativeSpectrumTable):
-    """Concentrations for explicit groups, with no invented physical run or cycle."""
+class CurveSpectrumTable(CumulativeSpectrumTable):
+    """Named concentration curves with no invented physical run or cycle."""
 
     required = (
         "sample_id",
-        "group_id",
+        "curve_id",
         "point_id",
         "temperature_C",
         "concentration",
@@ -160,12 +160,12 @@ class CombinedSpectrumTable(CumulativeSpectrumTable):
     )
 
     def _row_keys(self, frame: pd.DataFrame) -> list[str]:
-        return ["group_id", "point_id"]
+        return ["curve_id", "point_id"]
 
     def _validate(self, frame: pd.DataFrame) -> None:
         super()._validate(frame)
-        if frame.groupby("group_id", sort=False).sample_id.nunique().gt(1).any():
-            raise ValueError("Each combined group must refer to exactly one parent sample")
+        if frame.groupby("curve_id", sort=False).sample_id.nunique().gt(1).any():
+            raise ValueError("Each curve must refer to exactly one parent sample")
 
 
 class DifferentialSpectrumTable(ScientificTable):

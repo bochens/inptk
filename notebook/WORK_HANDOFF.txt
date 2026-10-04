@@ -1,0 +1,30 @@
+INP-toolkit release handoff — 2026-10-03
+Goal: push/merge reviewed toolkit work; prepare installable Mac CLI and Windows handoff.
+Repo: /Users/C832577250/Project/inptk; branch codex/measurement-results.
+Pre-release checkpoint: a1f44ec; Mac packaging checkpoint: 721e293.
+Current runtime: version 0.4.0, CLI protocol 2, saved format 4.
+Mac builder: scripts/build_macos.py; comparison check: scripts/check_executable.py.
+Mac build dependencies and entrypoint: packaging/macos/requirements.txt, entrypoint.py.
+Release instructions: packaging/macos/README.md; Windows handoff: packaging/windows/README.md.
+CI: .github/workflows/macos-package.yml builds arm64 and x86_64 unsigned candidates.
+Mac installation path: /Applications/INP-toolkit/inptk; no GUI or shell changes.
+Uses a folder bundle with Python/NumPy/pandas/SciPy; no extraction at every startup.
+Builder includes exact tracked source, dependency licenses, versions, commit and checksum.
+Public builds need Developer ID Application/Installer certificates and notarytool profile.
+Only Apple Development identity was found locally; public signing/notarization not completed.
+Unsigned arm64 package built successfully, 53 MB, from 721e293.
+Local artifact: dist/macos/inptk-0.4.0-macos-arm64-unsigned.pkg (and .sha256).
+Packaged process matched Python Average/MLE concentrations and uncertainty in clean working dir.
+Installer upgrade/clean-Mac Gatekeeper checks remain release requirements.
+Windows builder deliberately left to PC Codex; recommended per-user Inno Setup installer.
+Windows path: %LOCALAPPDATA%\Programs\INP-toolkit\inptk.exe.
+Full toolkit suite before packaging: 755 passed; final memory-release CLI suite: 26 passed.
+Ruff and mypy passed; no scientific estimator changed for packaging.
+Icescopy code remains unchanged. Its memory integration is specified in ICESCOPY_HANDOFF.md.
+Existing source performance: JSON upload 44 ms; summary limits 0.289 s; Average 0.501 s; MLE 1.319 s.
+Benchmark: 6000 rows/input, two samples plus blank, 0.5 C, three curves; not a universal guarantee.
+Pre-existing untracked ICESCOPY_PERFORMANCE_HANDOFF.md remains untouched; do not stage it.
+Build scratch: /private/tmp/inptk-macos-build-wuq17f0p (remove after final checks).
+Research Python: /Users/C832577250/miniforge3/envs/Research/bin/python.
+No notebook data or external experiment files changed. Do not reread full notebooks.
+Next: complete GitHub checks and merge; build signed release from chosen version tag later.

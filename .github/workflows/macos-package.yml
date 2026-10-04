@@ -1,0 +1,46 @@
+name: Mac installer
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'pyproject.toml'
+      - 'packaging/macos/**'
+      - 'scripts/build_macos.py'
+      - 'scripts/check_executable.py'
+      - '.github/workflows/macos-package.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install build requirements
+        run: python -m pip install -r packaging/macos/requirements.txt .
+      - name: Build and check standalone installer
+        env:
+          OPENBLAS_NUM_THREADS: '1'
+          OMP_NUM_THREADS: '1'
+        run: python scripts/build_macos.py --unsigned
+      - name: Retain test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: inptk-macos-${{ matrix.arch }}-unsigned
+          path: dist/macos/*
+          if-no-files-found: error
+          retention-days: 14

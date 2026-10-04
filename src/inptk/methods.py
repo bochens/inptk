@@ -93,15 +93,15 @@ class CombinationGroup(TypedDict):
     members: list[CombinationMember]
 
 
-def validate_combination_groups(
+def resolve_curves(
     value, experiment: Experiment, frame: pd.DataFrame
 ) -> dict[str, CombinationGroup]:
-    """Resolve exact measurement/cycle members without combining repeated cycles.
+    """Resolve named curves to physical inputs without combining repeated cycles.
 
-    None produces one group per observed parent sample/run/cycle. An explicit
-    mapping uses group names as keys and nonempty lists of measurement_id/cycle_id
-    objects as values. It defines only the requested output groups. Run and parent
-    sample identities always come from measurement metadata.
+    Each specification contains inputs and an optional cycle. Input names need
+    a cycle when several were observed. To select different cycle labels across
+    runs, give measurement_id/cycle_id objects in inputs instead. None preserves
+    the default of one curve per original sample, run and cycle.
     """
     required = {"measurement_id", "sample_id", "run_id", "cycle_id"}
     missing = required - set(frame.columns)
@@ -131,59 +131,105 @@ def validate_combination_groups(
         defaults: dict[str, CombinationGroup] = {}
         for (measurement_id, _), member in sorted(available.items()):
             sample_id = experiment.measurements[measurement_id].sample_id
-            group_id = "/".join(
+            curve_id = "/".join(
                 quote(name, safe="") for name in (sample_id, member["run_id"], member["cycle_id"])
             )
-            defaults.setdefault(group_id, {"sample_id": sample_id, "members": []})[
+            defaults.setdefault(curve_id, {"sample_id": sample_id, "members": []})[
                 "members"
             ].append(member.copy())
         return defaults
     if not isinstance(value, Mapping):
         raise TypeError(
-            "combination_groups must map group names to lists of measurement/cycle members"
+            "curves must map curve names to objects containing inputs and an optional cycle"
         )
     if not value:
-        raise ValueError("combination_groups must contain at least one group")
+        raise ValueError("curves must contain at least one curve")
     groups: dict[str, CombinationGroup] = {}
-    for group_id, members in value.items():
-        if not isinstance(group_id, str) or not group_id.strip():
-            raise ValueError("Combination group names must be non-empty strings")
-        if not isinstance(members, list) or not members:
-            raise TypeError(f"Combination group {group_id!r} requires a nonempty list of members")
+    for curve_id, specification in value.items():
+        if not isinstance(curve_id, str) or not curve_id.strip():
+            raise ValueError("Curve names must be non-empty strings")
+        if not isinstance(specification, Mapping):
+            raise TypeError(f"Curve {curve_id!r} requires an object containing inputs")
+        unknown = set(specification) - {"inputs", "cycle"}
+        if unknown:
+            raise ValueError(
+                f"Unknown settings for curve {curve_id!r}: {sorted(map(str, unknown))}"
+            )
+        inputs = specification.get("inputs")
+        if not isinstance(inputs, list) or not inputs:
+            raise TypeError(f"Curve {curve_id!r} requires a nonempty inputs list")
+        cycle = specification.get("cycle")
+        if "cycle" in specification and (not isinstance(cycle, str) or not cycle.strip()):
+            raise ValueError(f"Curve {curve_id!r} cycle must be non-empty text")
+        members: list[Mapping] = []
+        for item in inputs:
+            if isinstance(item, str):
+                if item in blank_ids:
+                    raise ValueError(f"Water-blank input {item!r} cannot be a curve input")
+                cycles = sorted(label for name, label in available if name == item)
+                if not cycles:
+                    raise ValueError(f"Unknown or absent curve input: {item!r}")
+                if cycle is None and len(cycles) > 1:
+                    raise ValueError(
+                        f"Input {item!r} has several cycles {cycles}; specify a cycle "
+                        f"for curve {curve_id!r}. Repeated cycles cannot be combined."
+                    )
+                chosen = cycle if cycle is not None else cycles[0]
+                members.append({"measurement_id": item, "cycle_id": chosen})
+            elif isinstance(item, Mapping):
+                if cycle is not None:
+                    raise ValueError("Omit curve cycle when inputs specify their own cycle_id")
+                members.append(item)
+            else:
+                raise TypeError("Curve inputs must be names or measurement_id/cycle_id objects")
         normalized: list[CombinationMember] = []
         seen: set[tuple[str, str]] = set()
         cycles_by_run: dict[str, str] = {}
         parents = set()
-        for member in members:
-            if not isinstance(member, Mapping) or set(member) != {"measurement_id", "cycle_id"}:
+        for requested_member in members:
+            if set(requested_member) != {"measurement_id", "cycle_id"}:
                 raise ValueError(
-                    "Each combination member requires exactly measurement_id and cycle_id"
+                    "Each curve input object requires exactly measurement_id and cycle_id"
                 )
-            measurement_id, cycle_id = member["measurement_id"], member["cycle_id"]
+            measurement_id = requested_member["measurement_id"]
+            cycle_id = requested_member["cycle_id"]
             if any(
                 not isinstance(name, str) or not name.strip() for name in (measurement_id, cycle_id)
             ):
                 raise ValueError(
-                    "Combination member measurement_id and cycle_id must be non-empty strings"
+                    "Curve input measurement_id and cycle_id must be non-empty strings"
                 )
             if measurement_id in blank_ids:
                 raise ValueError(
-                    f"Water-blank measurement {measurement_id!r} cannot be a combination member"
+                    f"Water-blank input {measurement_id!r} cannot be a curve input"
                 )
             key = (measurement_id, cycle_id)
             if key not in available:
-                raise ValueError(f"Unknown or absent combination member: {key!r}")
+                raise ValueError(f"Unknown or absent curve input: {key!r}")
             if key in seen:
-                raise ValueError(f"Duplicate combination member in {group_id!r}: {key!r}")
+                raise ValueError(f"Duplicate curve input in {curve_id!r}: {key!r}")
             seen.add(key)
             resolved = available[key]
             run_id = resolved["run_id"]
             if run_id in cycles_by_run and cycles_by_run[run_id] != cycle_id:
-                raise ValueError(f"Combination group {group_id!r} must use only one cycle per run")
+                raise ValueError(f"Curve {curve_id!r} must use only one cycle per run")
             cycles_by_run[run_id] = cycle_id
             parents.add(experiment.measurements[measurement_id].sample_id)
             normalized.append(resolved.copy())
         if len(parents) != 1:
-            raise ValueError(f"Combination group {group_id!r} must contain one parent sample")
-        groups[group_id] = {"sample_id": parents.pop(), "members": normalized}
+            raise ValueError(f"Curve {curve_id!r} must contain one parent sample")
+        groups[curve_id] = {"sample_id": parents.pop(), "members": normalized}
     return groups
+
+
+def curve_specifications(groups: dict[str, CombinationGroup]) -> dict[str, dict]:
+    """Return reusable Python/CLI choices; run identities come from metadata."""
+    return {
+        name: {
+            "inputs": [
+                {"measurement_id": member["measurement_id"], "cycle_id": member["cycle_id"]}
+                for member in group["members"]
+            ]
+        }
+        for name, group in groups.items()
+    }

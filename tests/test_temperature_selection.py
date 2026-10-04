@@ -79,7 +79,7 @@ def test_legacy_synthetic_window_rows_cannot_be_used_as_likelihood_observations(
         "operation": "frozen_fraction", "temperature_method": "window_max_count",
     }])
     for operation in (
-        inptk.cumulative_spectrum, inptk.combine_dilutions, inptk.differential_spectrum,
+        inptk.cumulative_spectrum, inptk.estimate_concentration, inptk.differential_spectrum,
     ):
         with pytest.raises(ValueError, match="synthetic warm zero rows are not raw measurements"):
             operation(fractions, experiment=source)
@@ -107,20 +107,20 @@ def test_stepwise_spectra_reject_wrong_sample_or_run_context():
         )
         for operation in (
             inptk.cumulative_spectrum,
-            inptk.combine_dilutions,
+            inptk.estimate_concentration,
             inptk.differential_spectrum,
         ):
             with pytest.raises(ValueError, match="identities disagree"):
                 operation(changed, experiment=source)
 
 
-def test_default_workflow_keeps_native_corrected_states_without_a_grid():
+def test_average_workflow_keeps_native_corrected_states_without_a_grid():
     source = temperature_selection_experiment()
     fractions = inptk.frozen_fraction(source)
     row = fractions.to_dataframe().set_index("temperature_C").loc[-10]
     assert (row.n_frozen, row.n_total) == (10, 20)
-    result = inptk.analyze_concentration(source)
-    assert result.resampled is None
+    result = inptk.analyze_concentration(source, method="average")
+    assert not hasattr(next(iter(result.curves.values())), "resampled")
     assert result.settings["observation_processing"].startswith("native")
     pd.testing.assert_frame_equal(fractions.to_dataframe(), result.frozen_fraction.to_dataframe())
 
@@ -134,3 +134,25 @@ def test_single_observed_temperature_is_kept_without_rounding_to_a_threshold():
     assert fractions.temperature_C.tolist() == [-10.2]
     assert fractions.n_total.tolist() == [32]
     assert fractions.n_frozen.tolist() == [1]
+
+
+@pytest.mark.parametrize("method,observation", [("latest", "3"), ("max", "3"), ("window", "2")])
+def test_grid_selection_handles_unlimited_bounds_and_keeps_count_pairs(method, observation):
+    # At -10 C: latest/max select 10/20; window selects the observed 11/31.
+    # Unlimited bounds must keep all source rows, including changing totals.
+    source = temperature_selection_experiment()
+    from inptk.alignment import align_observations
+
+    points = align_observations(
+        source.counts.to_dataframe(),
+        [{"measurement_id": "M", "run_id": "R1", "cycle_id": "01"}],
+        water_blank_map={}, temperature_ranges_C={"M": {"min_C": None, "max_C": None}},
+        temperature_step_C=.5, temperature_start_C=-10, temperature_end_C=-10,
+        temperature_method=method, temperature_window_C=.5 if method == "window" else None,
+    )
+    selected = points[0].samples.iloc[0]
+    assert selected.observation_id == observation
+    original = source.counts.to_dataframe().set_index("observation_id").loc[observation]
+    assert (selected.n_frozen, selected.n_total) == (original.n_frozen, original.n_total)
+    assert not selected.source_total_is_fixed
+    assert not selected.source_frozen_is_cumulative

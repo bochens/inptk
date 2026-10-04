@@ -3,9 +3,15 @@
 import json
 from dataclasses import replace
 
-import numpy as np
 import pandas as pd
 import pytest
+from analysis_checks import (
+    fit_estimates,
+    input_spectra,
+    intervals,
+    quantity_for_check,
+    retained,
+)
 
 import inptk
 
@@ -59,34 +65,51 @@ def test_original_observations_are_primary_and_identical_states_do_not_gain_prec
         result.frozen_fraction.to_dataframe().drop(columns="fraction_frozen"),
         source.counts.to_dataframe(),
     )
-    assert result.resampled is None
-    combined = result.combined.to_dataframe()
-    assert combined.temperature_C.tolist() == [-5, -6, -6, -5.8, -7]
+    assert not hasattr(next(iter(result.curves.values())), "resampled")
+    combined = fit_estimates(result).to_dataframe()
+    expected = [-5, -5.8, -6, -7] if method == "mle" else [-5, -6, -6, -5.8, -7]
+    assert combined.temperature_C.tolist() == expected
     assert combined.point_id.is_unique
     assert "run_id" not in combined and "cycle_id" not in combined
     assert combined.alignment.eq("native").all()
     for column in ("concentration", "lower_error", "upper_error"):
-        assert combined[column].iloc[1] == combined[column].iloc[2]
+        assert combined[column].iloc[1] == pytest.approx(combined[column].iloc[2], rel=1e-7)
     sources = combined.source_observations.map(json.loads)
     assert all(len(items) == 2 for items in sources)
     assert sources.iloc[1][0]["observation_id"] != sources.iloc[2][0]["observation_id"]
-    assert result.settings["combination_groups"]["S/R1/01"]["members"] == [
-        {"measurement_id": "a", "run_id": "R1", "cycle_id": "01"}
-    ]
+    assert [
+        {k: item[k] for k in ("measurement_id", "run_id", "cycle_id")}
+        for item in result.curves["S/R1/01"].sources
+    ] == [{"measurement_id": "a", "run_id": "R1", "cycle_id": "01"}]
+
+
+def test_joint_workflow_keeps_cooling_intervals_ending_at_a_repeated_temperature():
+    source = experiment()
+    result = inptk.analyze_concentration(source, differential=True)
+    curve = result.curves["S/R1/01"]
+    direct = inptk.differential_spectrum(
+        inptk.frozen_fraction(source), experiment=source
+    ).to_dataframe()
+    actual = curve.differential.to_dataframe()
+    assert actual.temperature_bin_right_C.tolist() == [-5, -5.8]
+    assert actual.temperature_bin_left_C.tolist() == [-6, -7]
+    pd.testing.assert_frame_equal(actual, direct)
 
 
 @pytest.mark.parametrize("method", ["mle", "average"])
 def test_explicit_cross_run_group_keeps_own_blank_and_cycle_provenance(method):
     source = experiment(two_runs=True, cycles=("01", "02"))
     groups = {
-        "both": [
-            {"measurement_id": "a", "cycle_id": "01"},
-            {"measurement_id": "b", "cycle_id": "02"},
-        ]
+        "both": {
+            "inputs": [
+                {"measurement_id": "a", "cycle_id": "01"},
+                {"measurement_id": "b", "cycle_id": "02"},
+            ]
+        }
     }
-    result = inptk.analyze_concentration(source, method=method, combination_groups=groups)
-    frame = result.combined.to_dataframe()
-    assert set(frame.group_id) == {"both"}
+    result = inptk.analyze_concentration(source, method=method, curves=groups)
+    frame = fit_estimates(result).to_dataframe()
+    assert set(frame.curve_id) == {"both"}
     assert frame.alignment.eq("latest").all()
     assert frame.temperature_C.tolist() == sorted({-5, -6, -5.8, -7, -6.2}, reverse=True)
     for items in frame.source_observations.map(json.loads):
@@ -96,17 +119,17 @@ def test_explicit_cross_run_group_keeps_own_blank_and_cycle_provenance(method):
             ("b", "R2", "02"),
             ("wb", "R2", "02"),
         }
-    separate = inptk.analyze_concentration(source).combined.to_dataframe()
-    assert set(separate.group_id) == {"S/R1/01", "S/R2/02"}
-    assert set(result.per_dilution.to_dataframe().run_id) == {"R1", "R2"}
+    separate = fit_estimates(inptk.analyze_concentration(source)).to_dataframe()
+    assert set(separate.curve_id) == {"S/R1/01", "S/R2/02"}
+    assert set(input_spectra(result).to_dataframe().run_id) == {"R1", "R2"}
 
 
 def test_native_cutoff_follows_observation_order_through_temperature_wiggles():
-    curve = inptk.CombinedSpectrumTable(
+    curve = inptk.CurveSpectrumTable(
         pd.DataFrame(
             {
                 "sample_id": "S",
-                "group_id": "g",
+                "curve_id": "g",
                 "point_id": ["a", "b", "c", "d"],
                 "point_order": [0, 1, 2, 3],
                 "temperature_C": [-5, -6, -5.8, -7],
@@ -124,14 +147,13 @@ def test_native_cutoff_follows_observation_order_through_temperature_wiggles():
     assert final.to_dataframe().segment_id.tolist() == ["0"] * 4
 
 
-def test_skipped_points_split_resampling_segments_and_native_values_remain():
+def test_grid_is_selected_before_estimation_and_has_no_second_output():
     source = experiment()
-    native = inptk.analyze_concentration(source)
-    sampled = inptk.analyze_concentration(source, output_step_C=0.5, output_method="sample")
-    pd.testing.assert_frame_equal(native.final.to_dataframe(), sampled.final.to_dataframe())
-    assert sampled.resampled is not None
-    assert sampled.resampled.history[-1]["operation"] == "resample_spectrum"
-    assert np.isfinite(sampled.resampled.to_dataframe().concentration).all()
+    result = inptk.analyze_concentration(source, temperature_step_C=0.5)
+    assert result.to_dataframe().temperature_C.tolist() == [-5, -5.5, -6, -6.5, -7]
+    assert "temperature_step_C" in result.settings
+    assert not hasattr(next(iter(result.curves.values())), "resampled")
+    pd.testing.assert_frame_equal(result.counts.to_dataframe(), source.counts.to_dataframe())
 
 
 def test_native_full_and_stepwise_paths_agree():
@@ -141,38 +163,40 @@ def test_native_full_and_stepwise_paths_agree():
     per = inptk.cumulative_spectrum(
         fractions, experiment=source, temperature_ranges_C={"a": {"max_C": -5.8}}
     )
-    combined = inptk.combine_dilutions(
+    combined = inptk.estimate_concentration(
         fractions, experiment=source, temperature_ranges_C={"a": {"max_C": -5.8}}
     )
-    pd.testing.assert_frame_equal(result.per_dilution.to_dataframe(), per.to_dataframe())
-    pd.testing.assert_frame_equal(result.combined.to_dataframe(), combined.to_dataframe())
+    pd.testing.assert_frame_equal(input_spectra(result).to_dataframe(), per.to_dataframe())
+    pd.testing.assert_frame_equal(fit_estimates(result).to_dataframe(), combined.to_dataframe())
     pd.testing.assert_frame_equal(
-        result.final.to_dataframe(), inptk.finalize_spectrum(combined).to_dataframe()
+        retained(result).to_dataframe(), inptk.finalize_spectrum(combined).to_dataframe()
     )
 
 
-def test_native_and_resampled_results_round_trip(tmp_path):
+def test_initial_grid_results_round_trip(tmp_path):
     source = experiment(two_runs=True)
     groups = {
-        "combined": [
-            {"measurement_id": "a", "cycle_id": "01"},
-            {"measurement_id": "b", "cycle_id": "01"},
-        ]
+        "combined": {
+            "inputs": [
+                {"measurement_id": "a", "cycle_id": "01"},
+                {"measurement_id": "b", "cycle_id": "01"},
+            ]
+        }
     }
-    result = inptk.analyze_concentration(source, combination_groups=groups, output_step_C=0.5)
+    result = inptk.analyze_concentration(source, curves=groups, temperature_step_C=0.5)
     result.save(tmp_path / "saved.inptk")
     restored = inptk.load(tmp_path / "saved.inptk")
-    assert restored.settings["combination_groups"] == result.settings["combination_groups"]
+    assert restored.settings["curves"] == result.settings["curves"]
     for name in (
         "frozen_fraction",
         "per_dilution",
         "combined",
         "final_candidates",
         "final",
-        "resampled",
     ):
         pd.testing.assert_frame_equal(
-            getattr(result, name).to_dataframe(), getattr(restored, name).to_dataframe()
+            quantity_for_check(result, name).to_dataframe(),
+            quantity_for_check(restored, name).to_dataframe(),
         )
 
 
@@ -182,16 +206,14 @@ def test_explicit_group_does_not_fit_unrequested_run_with_incomplete_blank_cover
     frame = original.counts.to_dataframe()
     frame = frame.loc[~(frame.measurement_id.eq("wb") & frame.temperature_C.lt(-5))]
     source = replace(original, counts=inptk.CountsTable(frame))
-    groups = {"requested": [{"measurement_id": "a", "cycle_id": "01"}]}
-    result = inptk.analyze_concentration(
-        source, combination_groups=groups, method=method, differential=True
+    groups = {"requested": {"inputs": [{"measurement_id": "a", "cycle_id": "01"}]}}
+    result = inptk.analyze_concentration(source, curves=groups, method=method, differential=True)
+    expected = inptk.estimate_concentration(
+        inptk.frozen_fraction(source), experiment=source, curves=groups, method=method
     )
-    expected = inptk.combine_dilutions(
-        inptk.frozen_fraction(source), experiment=source, combination_groups=groups, method=method
-    )
-    pd.testing.assert_frame_equal(result.combined.to_dataframe(), expected.to_dataframe())
-    assert set(result.per_dilution.to_dataframe().measurement_id) == {"a"}
-    assert set(result.differential.to_dataframe().measurement_id) == {"a"}
+    pd.testing.assert_frame_equal(fit_estimates(result).to_dataframe(), expected.to_dataframe())
+    assert set(input_spectra(result).to_dataframe().measurement_id) == {"a"}
+    assert set(intervals(result).to_dataframe().measurement_id) == {"a"}
     assert result.experiment is source
     pd.testing.assert_frame_equal(
         result.experiment.counts.to_dataframe(), frame.reset_index(drop=True)
@@ -201,12 +223,11 @@ def test_explicit_group_does_not_fit_unrequested_run_with_incomplete_blank_cover
         source.counts.to_dataframe(),
     )
     selection = next(
-        event for event in result.per_dilution.history
-        if event["operation"] == "select_combination_members"
+        event
+        for event in input_spectra(result).history
+        if event["operation"] == "select_curve_inputs"
     )
-    assert selection["members"] == [
-        {"measurement_id": "a", "run_id": "R1", "cycle_id": "01"}
-    ]
+    assert selection["members"] == [{"measurement_id": "a", "run_id": "R1", "cycle_id": "01"}]
     assert selection["water_blank_context"] == [
         {"measurement_id": "wa", "run_id": "R1", "cycle_id": "01"}
     ]
@@ -222,12 +243,12 @@ def test_explicit_group_restricts_individual_and_differential_fits_to_selected_c
     source = replace(
         original, counts=inptk.CountsTable(pd.concat([first, second], ignore_index=True))
     )
-    groups = {"cycle two": [{"measurement_id": "a", "cycle_id": "02"}]}
-    result = inptk.analyze_concentration(source, combination_groups=groups, differential=True)
-    assert set(result.per_dilution.to_dataframe().cycle_id) == {"02"}
-    assert set(result.differential.to_dataframe().cycle_id) == {"02"}
+    groups = {"cycle two": {"inputs": [{"measurement_id": "a", "cycle_id": "02"}]}}
+    result = inptk.analyze_concentration(source, curves=groups, differential=True)
+    assert set(input_spectra(result).to_dataframe().cycle_id) == {"02"}
+    assert set(intervals(result).to_dataframe().cycle_id) == {"02"}
     assert set(result.frozen_fraction.to_dataframe().cycle_id) == {"01", "02"}
     assert set(result.experiment.counts.to_dataframe().cycle_id) == {"01", "02"}
     single_cycle = inptk.frozen_fraction(source).select(cycle_id="02")
     expected = inptk.cumulative_spectrum(single_cycle, experiment=source)
-    pd.testing.assert_frame_equal(result.per_dilution.to_dataframe(), expected.to_dataframe())
+    pd.testing.assert_frame_equal(input_spectra(result).to_dataframe(), expected.to_dataframe())

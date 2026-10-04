@@ -1,12 +1,16 @@
-"""Translate ordinary count tables and Icescopy exports into an Experiment."""
+"""Read count experiments and already calculated reference spectra."""
 
 from __future__ import annotations
 
+import csv
+import hashlib
+import io
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .experiment import Experiment, MeasurementMetadata, SampleMetadata
@@ -202,7 +206,7 @@ def _icescopy_overrides(metadata, measurement_ids: set[str]) -> dict[str, dict]:
 
 def _icescopy_observations(
     source, *, sample_map=None, metadata=None, run_id="1", require_metadata: bool
-) -> tuple[pd.DataFrame, list[dict]]:
+) -> tuple[pd.DataFrame, list[dict], dict]:
     """Read an Icescopy export; map measurement labels to original sample IDs.
 
     Without sample_map, every Icescopy measurement is a separate sample. Names
@@ -211,8 +215,9 @@ def _icescopy_observations(
     name; omitted or missing fields retain their values from the export.
     """
     from ._engine.adapters import read_counts as read_export
-    from ._engine.adapters import read_metadata, read_sync, split_metadata_rows
+    from ._engine.adapters import split_metadata_rows
     from ._engine.models import SampleMetadata as ExportMetadata
+    from .icescopy_input import read_icescopy_source
 
     if sample_map is not None and (
         not isinstance(sample_map, Mapping)
@@ -224,11 +229,11 @@ def _icescopy_observations(
     ):
         raise TypeError("sample_map must map non-empty measurement names to sample names")
     header_metadata: dict[str, ExportMetadata]
+    source_info = {"format": "icescopy", "path": None}
     if isinstance(source, pd.DataFrame):
         data, header_metadata = source.copy(deep=True), {}
     else:
-        data, _ = read_sync(source)
-        _, header_metadata = read_metadata(source)
+        data, header_metadata, source_info = read_icescopy_source(source)
     data, _ = split_metadata_rows(data)
     if "cycle" in data:
         missing_cycle = data.cycle.isna() | data.cycle.astype(str).str.strip().eq("")
@@ -297,30 +302,33 @@ def _icescopy_observations(
         raise ValueError("No count observations found")
     if sample_map is not None and set(sample_map) - known:
         raise ValueError(f"Unknown measurements in sample_map: {sorted(set(sample_map) - known)}")
-    return pd.concat(frames, ignore_index=True), list(records.values())
+    return pd.concat(frames, ignore_index=True), list(records.values()), source_info
 
 
 def read_icescopy(
-    source, *, sample_map: dict[str, str] | None = None, metadata=None, run_id: str = "1"
+    source, *, sample_map: dict[str, str] | None = None, metadata=None, run_id: str = "1",
+    water_blank_map: dict[str, list[str]] | None = None,
 ) -> Experiment:
-    """Read Icescopy counts with the physical metadata required for concentration.
+    """Read an Icescopy CSV, .icescopy project archive, or count DataFrame.
 
     Map exact measurement names to parent samples explicitly. Supplied metadata
     overrides only the named fields; missing values retain export-header values.
     Use read_observations for counts/fractions before physical metadata is ready.
+    For raw exports, water_blank_map assigns physical blank sets explicitly.
+    Archives read freeze_count_timeseries.csv and its saved session metadata
+    without extracting files. Explicit metadata overrides still take precedence.
+    Every complete count row is retained; an image ID is not required.
     """
-    data, records = _icescopy_observations(
+    data, records, source_info = _icescopy_observations(
         source, sample_map=sample_map, metadata=metadata, run_id=run_id, require_metadata=True
     )
-    experiment = read_counts(data, metadata=records)
+    experiment = read_counts(data, metadata=records, water_blank_map=water_blank_map)
     return Experiment(
         experiment.counts,
         experiment.samples,
         experiment.measurements,
-        source={
-            "format": "icescopy",
-            "path": str(source) if isinstance(source, (str, Path)) else None,
-        },
+        source=source_info,
+        water_blank_map=experiment.water_blank_map,
     )
 
 
@@ -336,8 +344,9 @@ def read_observations(
     Concentration calculation still requires a fully validated Experiment.
     """
     provisional = []
+    source_info: dict[str, str | None] = {}
     if format == "icescopy":
-        data, records = _icescopy_observations(
+        data, records, source_info = _icescopy_observations(
             source,
             sample_map=sample_map,
             metadata=metadata,
@@ -423,8 +432,94 @@ def read_observations(
                 "operation": "read_observations",
                 "format": format,
                 "path": str(source) if isinstance(source, (str, Path)) else None,
+                **source_info,
                 "measurement_metadata": records,
                 "provisional_sample_assignments": provisional,
             }
         ],
+    )
+
+
+@dataclass(frozen=True)
+class CSUSpectrum:
+    """An already calculated CSU/OLAF air spectrum and its supplied metadata.
+
+    table uses INP-toolkit column names and error widths, in INP per litre of air.
+    metadata uses standard physical-field names; other header fields remain text.
+    source records the path, file hash, and original header. Reading a reference
+    never assigns sample identities, blank roles, or metadata to an experiment.
+    """
+
+    table: pd.DataFrame
+    metadata: dict
+    source: dict
+
+
+def read_csu_csv(source: str | Path) -> CSUSpectrum:
+    """Read a CSU INPs_L CSV, including OLAF reference results, without recalculation.
+
+    The file contains key=value header lines followed by degC, INPS_L,
+    lower_CI and upper_CI columns. The CI columns are error widths, not endpoints.
+    Missing normalization metadata stays missing; importing a comparison curve
+    does not require air volume. Applying its metadata is an explicit caller choice.
+    """
+    path = Path(source)
+    content = path.read_bytes()
+    lines = content.decode("utf-8-sig").splitlines(keepends=True)
+    header = {}
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        columns = [value.strip() for value in next(csv.reader([line]))]
+        if columns[0] == "degC":
+            break
+        key, separator, value = line.partition("=")
+        if not separator or not key.strip():
+            raise ValueError("CSU CSV requires key=value metadata followed by a degC table")
+        key = key.strip()
+        if key in header:
+            raise ValueError(f"Duplicate CSU metadata field {key!r}")
+        header[key] = value.strip()
+    else:
+        raise ValueError("CSU CSV is missing its degC table header")
+    table = pd.read_csv(io.StringIO("".join(lines[index:])))
+    table.columns = table.columns.str.strip()
+    names = {"degC": "temperature_C", "INPS_L": "concentration",
+             "lower_CI": "lower_error", "upper_CI": "upper_error"}
+    missing = set(names) - set(table.columns)
+    if missing:
+        raise ValueError(f"CSU CSV is missing columns: {sorted(missing)}")
+    table = table.rename(columns=names)
+    for column in names.values():
+        table[column] = pd.to_numeric(table[column], errors="raise")
+    if table.empty or not np.isfinite(table.temperature_C).all():
+        raise ValueError("CSU CSV requires nonempty, finite temperatures")
+    if table[["lower_error", "upper_error"]].lt(0).any().any():
+        raise ValueError("CSU uncertainty columns must be nonnegative error widths")
+    table["basis"] = "sampled_air"
+    table["unit"] = "INP_per_L_air"
+    metadata: dict[str, str | float] = dict(header)
+    for original, standard in {
+        "vol_air_filt": "air_volume_L",
+        "vol_susp": "suspension_volume_mL",
+        "proportion_filter_used": "filter_fraction_used",
+    }.items():
+        if original not in metadata:
+            continue
+        if standard in metadata:
+            raise ValueError(f"Duplicate CSU metadata for {standard!r}")
+        raw = metadata.pop(original)
+        if not raw:
+            continue
+        number = float(raw)
+        if not np.isfinite(number) or number <= 0:
+            raise ValueError(f"CSU {original} must be finite and positive")
+        if standard == "filter_fraction_used" and number > 1:
+            raise ValueError("CSU proportion_filter_used must not exceed 1")
+        metadata[standard] = number
+    return CSUSpectrum(
+        table=table,
+        metadata=metadata,
+        source={"format": "csu", "path": str(path),
+                "sha256": hashlib.sha256(content).hexdigest(), "header": header},
     )

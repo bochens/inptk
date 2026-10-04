@@ -5,6 +5,7 @@ import inspect
 import numpy as np
 import pandas as pd
 import pytest
+from analysis_checks import all_points, fit_estimates, retained
 
 import inptk
 
@@ -122,15 +123,15 @@ def test_workflow_selects_after_blank_subtraction_and_unit_conversion(policy):
     blank = spectrum([0., 1., 12., 12.], sample="blank")
     result = inptk.analyze_concentration(
         source, output_basis="sampled_air",
-        blank_by_group={"S/R/1": blank}, decrease_policy=policy,
+        blank_by_curve={"S/R/1": blank}, decrease_policy=policy,
     )
-    raw = result.combined.to_dataframe()
+    raw = fit_estimates(result).to_dataframe()
     assert np.all(np.diff(raw.concentration) > 0)
-    corrected = inptk.subtract_blanks(result.combined, {"S/R/1": blank})
+    corrected = inptk.subtract_blanks(fit_estimates(result), {"S/R/1": blank})
     converted = inptk.convert_concentration(corrected, source.samples, basis="sampled_air")
     expected = inptk.finalize_spectrum(converted, decrease_policy=policy)
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.to_dataframe())
-    candidates = result.final_candidates.to_dataframe()
+    pd.testing.assert_frame_equal(retained(result).to_dataframe(), expected.to_dataframe())
+    candidates = all_points(result).to_dataframe()
     original = converted.to_dataframe()
     pd.testing.assert_frame_equal(candidates[list(original.columns)], original)
     assert candidates.final_selection_status.iloc[2] == "decrease"
@@ -138,11 +139,11 @@ def test_workflow_selects_after_blank_subtraction_and_unit_conversion(policy):
         "after_decrease" if policy == "stop_at_decrease" else "kept"
     )
     assert result.settings["decrease_policy"] == policy
-    assert result.final.history[-1]["operation"] == "finalize_spectrum"
+    assert retained(result).history[-1]["operation"] == "finalize_spectrum"
 
 
 def test_public_interface_has_no_forced_monotone_fitting_setting():
-    for function in (inptk.combine_dilutions, inptk.analyze_concentration):
+    for function in (inptk.estimate_concentration, inptk.analyze_concentration):
         assert "enforce_monotone" not in inspect.signature(function).parameters
 
 
@@ -169,14 +170,14 @@ def test_raw_blank_contributor_change_keeps_equal_concentration_with_optimizer_r
         water_blank_map={"A": ["blank"], "B": ["blank"]},
     )
     result = inptk.analyze_concentration(source, decrease_policy=policy)
-    combined = result.combined.to_dataframe()
-    final = result.final.to_dataframe()
+    combined = fit_estimates(result).to_dataframe()
+    final = retained(result).to_dataframe()
     assert len(final) == 2
     expected_concentration = (-np.log(0.75) + np.log(0.875)) / 0.05
     np.testing.assert_allclose(final.concentration, expected_concentration, rtol=1e-9)
     for column in ("concentration", "lower_error", "upper_error"):
         np.testing.assert_array_equal(final[column], combined[column])
-    event = result.final.history[-1]
+    event = retained(result).history[-1]
     assert event["numerical_relative_tolerance"] == 1e-9
     assert event["numerical_absolute_tolerance"] == 0
 

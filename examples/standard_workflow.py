@@ -5,7 +5,7 @@ import pandas as pd
 import inptk
 
 observations = []
-for measurement, counts in (("A_neat", [0, 4, 12]), ("A_diluted", [0, 1, 3])):
+for measurement, counts in (("A_neat", [0, 4, 30]), ("A_diluted", [0, 1, 3])):
     for cycle in ("1", "2"):
         for temperature, frozen in zip((-5, -6, -7), counts):
             observations.append(
@@ -25,8 +25,51 @@ metadata = pd.DataFrame(
     ]
 )
 experiment = inptk.read_counts(pd.DataFrame(observations), metadata=metadata)
-result = inptk.analyze_concentration(experiment)
+curves = {
+    "A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"},
+    "A_neat": {"inputs": ["A_neat"], "cycle": "1"},
+    "A_diluted": {"inputs": ["A_diluted"], "cycle": "1"},
+    "A_cycle2": {"inputs": ["A_neat", "A_diluted"], "cycle": "2"},
+}
+options = {
+    "method": "mle",
+    "temperature_step_C": 0.5,
+    "temperature_start_C": None,
+    "temperature_end_C": None,
+}
+result = inptk.analyze_concentration(experiment, curves=curves, **options)
 
-print(result.final.select(group_id="A/1/1").to_dataframe())
+# The same analysis, one step at a time.
+fractions = inptk.frozen_fraction(experiment)
+estimated = inptk.estimate_concentration(
+    fractions,
+    experiment=experiment,
+    curves=curves,
+    **options,
+)
+final = inptk.finalize_spectrum(estimated)
+pd.testing.assert_frame_equal(result.to_dataframe(), final.to_dataframe())
+
+# Differentiate an existing individual spectrum without repeating the fit.
+individual = inptk.cumulative_spectrum(fractions, experiment=experiment, **options)
+differential = inptk.differentiate_spectrum(individual)
+
+print(result.curves["A"].cumulative.to_dataframe())
+print(result.curves["A"].sources)
+# Individual and combined curves use the same interface. They reuse original
+# observations; keeping these outputs does not create more independent droplets.
+print({name: curve.kind for name, curve in result.curves.items()})
 # When ready to save, choose a new destination:
 # result.save("analysis.inptk")
+
+# Suggest editable monotone limits before using Average on a selected cycle.
+average_curves = {"A": {"inputs": ["A_neat", "A_diluted"], "cycle": "1"}}
+suggestions = inptk.suggest_temperature_ranges(experiment, curves=average_curves)
+print(suggestions.inputs)  # Includes the reason for each proposed cutoff.
+average = inptk.analyze_concentration(
+    experiment,
+    curves=average_curves,
+    method="average",
+    temperature_ranges_C=suggestions.temperature_ranges_C,
+)
+print(average.curves["A"].cumulative.to_dataframe())

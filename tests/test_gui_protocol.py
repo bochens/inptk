@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from analysis_checks import retained
 
 import inptk
 from inptk import cli
@@ -26,8 +27,8 @@ def call(*args):
         check=False,
     )
     payload = json.loads(process.stdout)
-    assert payload["protocol_version"] == 1
-    assert payload["saved_format_version"] == 2
+    assert payload["protocol_version"] == 2
+    assert payload["saved_format_version"] == 4
     assert payload["toolkit_version"] == inptk.__version__
     return process, payload
 
@@ -65,14 +66,19 @@ def test_capabilities_describe_live_arguments_and_methods():
     process, reply = call("capabilities")
     assert process.returncode == 0
     assert not process.stderr
-    assert set(reply["commands"]) == {"capabilities", "preview", "analyze", "export-csv"}
+    assert set(reply["commands"]) == {
+        "capabilities", "preview", "suggest-ranges", "analyze", "export-csv", "serve",
+        "fractions", "estimate", "convert", "finalize", "differentiate", "table", "save",
+    }
     analyze = {item["name"]: item for item in reply["commands"]["analyze"]["options"]}
     assert analyze["method"]["choices"] == ["mle", "average"]
     assert analyze["method"]["default"] == "mle"
-    assert analyze["output_step_C"]["default"] is None
+    assert analyze["temperature_step_C"]["default"] is None
     assert analyze["sample"]["repeatable"]
     assert analyze["no_water_blank_correction"]["type"] == "boolean"
-    assert "temperature_method" not in analyze
+    assert analyze["temperature_method"]["choices"] == ["latest", "max", "window"]
+    assert analyze["temperature_method"]["default"] == "latest"
+    assert analyze["fit_step_C"]["default"] is None
 
 
 def test_python_observations_need_no_suspension_metadata(inputs):
@@ -162,7 +168,7 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
     process, preview = call("preview", path, "--metadata", meta_path, "--json")
     assert process.returncode == 0
     assert preview["suspension_metadata"]["valid"]
-    groups = {"A result": [{"measurement_id": "001", "cycle_id": "01"}]}
+    groups = {"A result": {"inputs": [{"measurement_id": "001", "cycle_id": "01"}]}}
     output = tmp_path / "GUI preview.inptk"
     process, reply = call(
         "analyze",
@@ -171,9 +177,9 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
         meta_path,
         "--method",
         method,
-        "--combination-groups",
+        "--curves",
         json.dumps(groups),
-        "--output-step-C",
+        "--temperature-step-C",
         "0.5",
         "--out",
         output,
@@ -185,19 +191,23 @@ def test_gui_round_trip_preview_fit_saved_preview_and_export(inputs, tmp_path, m
     expected = inptk.analyze_concentration(
         inptk.read_counts(frame, metadata=metadata),
         method=method,
-        combination_groups=groups,
-        output_step_C=0.5,
+        curves=groups,
+        temperature_step_C=0.5,
     )
-    pd.testing.assert_frame_equal(result.final.to_dataframe(), expected.final.to_dataframe())
-    assert reply["tables"]["final"]["row_count"] == len(result.final)
+    pd.testing.assert_frame_equal(
+        retained(result).to_dataframe(), retained(expected).to_dataframe()
+    )
+    assert sum(c["tables"]["cumulative"]["row_count"] for c in reply["curves"].values()) == len(
+        retained(result)
+    )
     assert reply["settings"]["estimation_method"] == method
     process, saved_preview = call("preview", output, "--format", "saved", "--json")
     assert process.returncode == 0
     assert saved_preview["table"]["rows"] == preview["table"]["rows"]
     csv = tmp_path / "grid.csv"
-    process, exported = call("export-csv", output, "--table", "resampled", "--out", csv, "--json")
-    assert process.returncode == 0 and exported["table"] == "resampled"
-    assert len(pd.read_csv(csv)) == len(result.resampled)
+    process, exported = call("export-csv", output, "--table", "cumulative", "--out", csv, "--json")
+    assert process.returncode == 0 and exported["table"] == "cumulative"
+    assert len(pd.read_csv(csv)) == len(retained(result))
     process, rejected = call("export-csv", output, "--out", csv, "--json")
     assert process.returncode == 1 and rejected["error"]["code"] == "output_exists"
     assert path.read_bytes() == original

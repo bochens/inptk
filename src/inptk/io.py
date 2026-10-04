@@ -1,4 +1,4 @@
-"""Versioned, portable Experiment/AnalysisResult files; no pickle or executable data."""
+"""Portable experiments, processing steps and analyses; no executable data."""
 
 from __future__ import annotations
 
@@ -9,23 +9,30 @@ from pathlib import Path
 
 import pandas as pd
 
-from .experiment import AnalysisResult, Experiment, MeasurementMetadata, SampleMetadata
+from .experiment import (
+    AnalysisResult,
+    CurveResult,
+    Experiment,
+    MeasurementMetadata,
+    ProcessingResult,
+    SampleMetadata,
+)
 from .tables import (
-    CombinedSpectrumTable,
     CountsTable,
     CumulativeSpectrumTable,
+    CurveSpectrumTable,
     DifferentialSpectrumTable,
     FrozenFractionTable,
 )
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 4
 TABLE_TYPES = {
     cls.__name__: cls
     for cls in (
         CountsTable,
         FrozenFractionTable,
         CumulativeSpectrumTable,
-        CombinedSpectrumTable,
+        CurveSpectrumTable,
         DifferentialSpectrumTable,
     )
 }
@@ -51,19 +58,36 @@ def _decode(value):
     return value
 
 
-def _table_payload(table):
-    return {
+def _table_frame(table, columns=None):
+    frame = table.to_dataframe()
+    if columns is not None:
+        if not columns or len(set(columns)) != len(columns):
+            raise ValueError("Columns must be a nonempty list without duplicates")
+        missing = set(columns) - set(frame.columns)
+        if missing:
+            raise ValueError(f"Unknown table columns: {sorted(missing)}")
+        frame = frame.loc[:, columns]
+    return frame
+
+
+def _table_payload(table, *, columns=None, include_history=True):
+    frame = _table_frame(table, columns)
+    payload = {
         "type": type(table).__name__,
-        "columns": list(table.columns),
-        "rows": table.to_dataframe().to_dict("records"),
-        "history": table.history,
+        "columns": list(frame.columns),
+        "dtypes": {name: str(dtype) for name, dtype in frame.dtypes.items()},
+        "rows": frame.to_dict("records"),
     }
+    if include_history:
+        payload["history"] = table.history
+    return payload
 
 
 def _table_from_payload(payload):
     cls = TABLE_TYPES[payload["type"]]
     return cls(
-        pd.DataFrame(payload["rows"], columns=payload["columns"]), history=payload["history"]
+        pd.DataFrame(payload["rows"], columns=payload["columns"]).astype(payload["dtypes"]),
+        history=payload["history"],
     )
 
 
@@ -85,59 +109,81 @@ def _experiment_from_payload(payload):
             key: MeasurementMetadata(**value) for key, value in payload["measurements"].items()
         },
         source=payload["source"],
-        water_blank_map=payload.get("water_blank_map", {}),
+        water_blank_map=payload["water_blank_map"],
     )
 
 
-def save(value: Experiment | AnalysisResult, path: str | Path) -> None:
+def save(value: Experiment | AnalysisResult | ProcessingResult, path: str | Path) -> None:
     """Save a complete analysis folder. Existing destinations are never overwritten."""
     if isinstance(value, Experiment):
         payload = {"kind": "experiment", "experiment": _experiment_payload(value)}
+    elif isinstance(value, ProcessingResult):
+        payload = {
+            "kind": "processing",
+            "experiment": _experiment_payload(value.experiment) if value.experiment else None,
+            "tables": {name: _table_payload(table) for name, table in value.tables.items()},
+        }
     elif isinstance(value, AnalysisResult):
         payload = {
             "kind": "analysis",
             "experiment": _experiment_payload(value.experiment),
-            "tables": {
-                name: _table_payload(getattr(value, name))
-                for name in (
-                    "frozen_fraction",
-                    "per_dilution",
-                    "combined",
-                    "final",
-                    "differential",
-                    "final_candidates",
-                    "resampled",
-                )
-                if getattr(value, name) is not None
+            "frozen_fraction": _table_payload(value.frozen_fraction),
+            "curves": {
+                name: {
+                    "curve_id": curve.curve_id,
+                    "sources": curve.sources,
+                    "tables": {
+                        quantity: _table_payload(table)
+                        for quantity in ("cumulative", "excluded", "differential")
+                        if (table := getattr(curve, quantity)) is not None
+                    },
+                }
+                for name, curve in value.curves.items()
             },
             "settings": value.settings,
             "history": value.history,
             "warnings": value.warnings,
         }
     else:
-        raise TypeError("save expects an Experiment or AnalysisResult")
+        raise TypeError("save expects an Experiment, ProcessingResult or AnalysisResult")
     from . import __version__
 
     payload.update(format="inptk", format_version=FORMAT_VERSION, toolkit_version=__version__)
-    text = json.dumps(_encode(payload), indent=2, allow_nan=False)
+    text = json.dumps(_encode(payload), separators=(",", ":"), allow_nan=False)
     target = Path(path)
     target.mkdir(parents=True, exist_ok=False)
     (target / "analysis.json").write_text(text + "\n", encoding="utf-8")
 
 
-def load(path: str | Path) -> Experiment | AnalysisResult:
+def load(path: str | Path) -> Experiment | AnalysisResult | ProcessingResult:
     payload = _decode(json.loads((Path(path) / "analysis.json").read_text(encoding="utf-8")))
     if payload.get("format") != "inptk" or payload.get("format_version") != FORMAT_VERSION:
         raise ValueError("Unsupported INP-toolkit file format or version")
+    if payload["kind"] == "processing":
+        return ProcessingResult(
+            tables={name: _table_from_payload(table) for name, table in payload["tables"].items()},
+            experiment=(
+                _experiment_from_payload(payload["experiment"])
+                if payload["experiment"] is not None
+                else None
+            ),
+        )
     experiment = _experiment_from_payload(payload["experiment"])
     if payload["kind"] == "experiment":
         return experiment
     if payload["kind"] != "analysis":
         raise ValueError(f"Unknown saved object kind {payload['kind']!r}")
-    tables = {name: _table_from_payload(item) for name, item in payload["tables"].items()}
     return AnalysisResult(
         experiment=experiment,
-        **tables,
+        frozen_fraction=_table_from_payload(payload["frozen_fraction"]),
+        curves={
+            name: CurveResult(
+                curve_id=item["curve_id"],
+                sources=item["sources"],
+                **{key: _table_from_payload(table) for key, table in item["tables"].items()},
+            )
+            for name, item in payload["curves"].items()
+        },
         settings=payload["settings"],
         history=payload["history"],
         warnings=payload["warnings"],
