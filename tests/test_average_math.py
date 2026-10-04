@@ -1,129 +1,155 @@
-"""Arithmetic concentration means retain shared-blank uncertainty explicitly."""
+"""Independent checks for direct frozen-fraction concentration averages."""
 
-from math import erfc, sqrt
 from statistics import NormalDist
 
 import numpy as np
+import pandas as pd
 import pytest
+from scipy.stats import binomtest
 
-from inptk._engine.math import PROFILE_LIKELIHOOD_DROP_95
-from inptk._engine.water_blank_math import average_concentration, fit_concentration
-
-
-@pytest.mark.parametrize("blank", [False, True])
-@pytest.mark.parametrize("frozen", [0, 16, 32])
-def test_single_measurement_is_exactly_the_ordinary_fit(blank, frozen):
-    options = {"blank_frozen": 4, "blank_total": 32} if blank else {}
-    expected = fit_concentration(frozen, 32, 13, 50, **options)
-    actual = average_concentration(frozen, 32, 13, 50, **options)
-    np.testing.assert_array_equal(actual, expected)
+import inptk
+from inptk._engine.water_blank_math import average_concentration
 
 
-def test_mean_point_is_arithmetic_concentration_mean_with_unequal_counts_and_exposures():
-    result = average_concentration([16, 4], [32, 10], [1, 13], [50, 20])
-    individuals = -np.log1p(-np.array([16 / 32, 4 / 10])) * [1, 13] / [0.05, 0.02]
-    assert result[0] == pytest.approx(np.mean(individuals), rel=1e-10)
-    joint = fit_concentration([16, 4], [32, 10], [1, 13], [50, 20])
-    assert abs(result[0] - joint[0]) > 1
-    assert result[1] > 0 and result[2] > 0 and result[3]
+def rate(frozen, total, volume_uL):
+    return -np.log1p(-frozen / total) / (volume_uL / 1000)
 
 
-def test_adjusted_bounds_equal_mean_of_individual_interval_endpoints_with_shared_blanks():
-    frozen, total, dilution, volume = [16, 24], [32, 40], [1, 13], [50, 20]
-    blanks = {
-        "blank_frozen": [1, 2], "blank_total": [10, 20], "blank_volume_uL": [50, 20]
-    }
-    drop = PROFILE_LIKELIHOOD_DROP_95
-    adjusted = NormalDist().inv_cdf(erfc(sqrt(drop)) / (2 * len(frozen)))**2 / 2
-    individual = np.array([
-        fit_concentration(x, n, d, v, confidence_drop=adjusted, **blanks)
-        for x, n, d, v in zip(frozen, total, dilution, volume)
-    ])
-    mean, lower, upper, finite = average_concentration(
-        frozen, total, dilution, volume, confidence_drop=drop, **blanks
-    )
-    assert mean == pytest.approx(individual[:, 0].mean(), rel=1e-10)
-    assert mean - lower == pytest.approx((individual[:, 0] - individual[:, 1]).mean())
-    assert mean + upper == pytest.approx((individual[:, 0] + individual[:, 2]).mean())
+def rate_bounds(frozen, total, volume_uL, z=1.96):
+    level = 2 * NormalDist().cdf(z) - 1
+    limits = binomtest(frozen, total).proportion_ci(confidence_level=level, method="wilson")
+    return rate(limits.low, 1, volume_uL), rate(limits.high, 1, volume_uL)
+
+
+@pytest.mark.parametrize("frozen", [0, 1, 16, 30])
+def test_single_measurement_uses_direct_fraction_and_transformed_wilson_limits(frozen):
+    point, lower, upper, finite = average_concentration(frozen, 32, 13, 50)
+    expected = 13 * rate(frozen, 32, 50)
+    lo, hi = rate_bounds(frozen, 32, 50)
+    assert point == pytest.approx(expected)
+    assert lower == pytest.approx(expected - 13 * lo)
+    assert upper == pytest.approx(13 * hi - expected)
     assert finite
 
 
-def test_four_versus_thirty_two_blank_droplets_changes_precision_not_the_subtracted_rate():
-    small = average_concentration(
-        [16, 24], [32, 32], [1, 2], 50, blank_frozen=1, blank_total=4
-    )
-    large = average_concentration(
-        [16, 24], [32, 32], [1, 2], 50, blank_frozen=8, blank_total=32
-    )
-    individual_points = np.array([1, 2]) * (
-        -np.log1p(-np.array([16, 24]) / 32) + np.log1p(-0.25)
-    ) / 0.05
-    assert small[0] == pytest.approx(individual_points.mean(), rel=1e-8)
-    assert large[0] == pytest.approx(small[0], rel=1e-8)
-    assert large[1] < small[1] and large[2] < small[2]
-    assert small[3] and large[3]
+def test_mean_uses_equal_measurement_weights_and_independent_sample_errors():
+    frozen, total = [16, 4], [32, 10]
+    dilution, volume = [1, 13], [50, 20]
+    point, lower, upper, finite = average_concentration(frozen, total, dilution, volume)
+    rates = [rate(x, n, v) for x, n, v in zip(frozen, total, volume)]
+    limits = [rate_bounds(x, n, v) for x, n, v in zip(frozen, total, volume)]
+    expected_lower = np.hypot(*[
+        d * (value - bounds[0]) / 2
+        for d, value, bounds in zip(dilution, rates, limits)
+    ])
+    expected_upper = np.hypot(*[
+        d * (bounds[1] - value) / 2
+        for d, value, bounds in zip(dilution, rates, limits)
+    ])
+    assert point == pytest.approx(np.mean(np.asarray(dilution) * rates))
+    assert lower == pytest.approx(expected_lower)
+    assert upper == pytest.approx(expected_upper)
+    assert finite
 
 
-def test_unequal_sample_and_blank_volumes_keep_their_physical_concentrations():
+def test_unequal_sample_and_blank_volumes_use_actual_liquid_volumes():
     result = average_concentration(
         [8, 16], [16, 32], [1, 3], [50, 100],
         blank_frozen=1, blank_total=10, blank_volume_uL=20,
     )
-    expected = np.array([1, 3]) * (
-        -np.log1p(-0.5) / np.array([0.05, 0.1]) + np.log1p(-0.1) / 0.02
-    )
-    assert result[0] == pytest.approx(expected.mean(), rel=1e-8)
+    expected = np.mean([
+        rate(8, 16, 50) - rate(1, 10, 20),
+        3 * (rate(16, 32, 100) - rate(1, 10, 20)),
+    ])
+    assert result[0] == pytest.approx(expected)
+    assert result[1] > 0 and result[2] > 0 and result[3]
+
+
+def test_blank_well_count_changes_precision_but_not_direct_correction():
+    small = average_concentration([16, 24], [32, 32], [1, 2], 50,
+                                  blank_frozen=1, blank_total=4)
+    large = average_concentration([16, 24], [32, 32], [1, 2], 50,
+                                  blank_frozen=8, blank_total=32)
+    assert small[0] == pytest.approx(large[0])
+    assert large[1] < small[1] and large[2] < small[2]
+    assert small[3] and large[3]
+
+
+def test_equal_volume_blanks_pool_independent_well_counts():
+    options = {"n_frozen": 16, "n_total": 32, "dilution": 1, "well_volume_uL": 50}
+    separate = average_concentration(**options, blank_frozen=[1, 7],
+        blank_total=[4, 28], blank_volume_uL=[50, 50])
+    pooled = average_concentration(**options, blank_frozen=8,
+        blank_total=32, blank_volume_uL=50)
+    np.testing.assert_allclose(separate[:3], pooled[:3], rtol=1e-12, atol=1e-12)
+    assert separate[3] and pooled[3]
+
+
+def test_different_blank_volumes_use_total_assayed_volume_weights():
+    result = average_concentration(16, 32, 2, 50,
+        blank_frozen=[1, 8], blank_total=[4, 32], blank_volume_uL=[50, 100])
+    weights = np.array([4 * 50, 32 * 100], dtype=float)
+    blank_rates = [rate(1, 4, 50), rate(8, 32, 100)]
+    expected = 2 * (rate(16, 32, 50) - np.average(blank_rates, weights=weights))
+    assert result[0] == pytest.approx(expected)
     assert result[3]
 
 
-def test_identical_points_stay_exactly_identical_when_contributor_count_changes():
-    single = average_concentration(1, 32, 1, 50)
-    multiple = average_concentration([1, 1, 1], 32, [1, 2, 3], [50, 100, 150])
-    assert single[0] == multiple[0]
-    assert multiple[3]
+def test_shared_blank_uncertainty_is_counted_once_in_the_mean():
+    single = average_concentration(16, 32, 1, 50, blank_frozen=1, blank_total=4)
+    shared = average_concentration([16, 16], [32, 32], [1, 1], 50,
+                                   blank_frozen=1, blank_total=4)
+    independent = average_concentration([16, 16], [32, 32], [1, 1], 50,
+        blank_frozen=[1, 1], blank_total=[4, 4], blank_volume_uL=50,
+        sample_blank_group=["A", "B"], blank_group=["A", "B"])
+    sample = rate(16, 32, 50)
+    sample_lo, sample_hi = rate_bounds(16, 32, 50)
+    blank = rate(1, 4, 50)
+    blank_lo, blank_hi = rate_bounds(1, 4, 50)
+    assert shared[0] == pytest.approx(single[0])
+    assert shared[1] == pytest.approx(np.hypot(
+        (sample - sample_lo) / np.sqrt(2), blank_hi - blank))
+    assert shared[2] == pytest.approx(np.hypot(
+        (sample_hi - sample) / np.sqrt(2), blank - blank_lo))
+    assert independent[1] < shared[1] and independent[2] < shared[2]
 
 
-def test_shared_blank_intervals_do_not_assume_independent_background_errors():
-    options = {"blank_frozen": 1, "blank_total": 4}
-    single = average_concentration(16, 32, 1, 50, **options)
-    multiple = average_concentration([16, 16], [32, 32], [1, 1], 50, **options)
-    assert multiple[0] == single[0]
-    # Bonferroni widens the marginal bounds here; duplicating their shared
-    # background does not create an artificial square-root precision gain.
-    assert multiple[1] >= single[1] and multiple[2] > single[2]
+def test_negative_correction_is_retained_without_likelihood_clipping():
+    point, lower, upper, finite = average_concentration(
+        2, 32, 1, 50, blank_frozen=8, blank_total=32)
+    assert point == pytest.approx(rate(2, 32, 50) - rate(8, 32, 50))
+    assert point < 0 and lower > 0 and upper > 0 and finite
 
 
-def test_zero_counts_keep_positive_upper_bounds():
-    result = average_concentration(
-        [0, 0], [32, 10], [1, 13], [50, 20],
-        blank_frozen=0, blank_total=4, blank_volume_uL=50,
-    )
-    assert result[0] == result[1] == 0
-    assert result[2] > 0 and result[3]
+def test_zero_sample_and_blank_keep_both_uncertainty_directions():
+    no_blank = average_concentration(0, 32, 1, 50)
+    with_blank = average_concentration(0, 32, 1, 50, blank_frozen=0, blank_total=32)
+    assert no_blank[0] == no_blank[1] == 0
+    assert no_blank[2] > 0 and no_blank[3]
+    assert with_blank[0] == 0
+    assert with_blank[1] > 0 and with_blank[2] > 0 and with_blank[3]
 
 
-def test_infinite_and_unidentifiable_measurements_are_not_silently_dropped():
-    saturated = average_concentration([32, 4], [32, 32], [1, 13], 50)
-    assert np.isinf(saturated[0]) and np.isnan(saturated[1:3]).all()
-    assert not saturated[3]
-    unidentifiable = average_concentration(
-        [32, 4], [32, 32], [1, 13], 50, blank_frozen=32, blank_total=32
-    )
-    assert np.isnan(unidentifiable[:3]).all() and not unidentifiable[3]
+def test_saturation_is_flagged_without_discarding_other_measurements():
+    sample = average_concentration([32, 4], [32, 32], [1, 13], 50)
+    assert np.isinf(sample[0]) and np.isnan(sample[1:3]).all() and not sample[3]
+    blank = average_concentration(4, 32, 1, 50,
+        blank_frozen=[4, 32], blank_total=[16, 32], blank_volume_uL=[50, 100])
+    assert not np.isfinite(blank[0]) and np.isnan(blank[1:3]).all() and not blank[3]
+    both = average_concentration(32, 32, 1, 50, blank_frozen=32, blank_total=32)
+    assert np.isnan(both[:3]).all() and not both[3]
 
 
 @pytest.mark.parametrize("changes", [
     {"n_frozen": [16, 0.5]}, {"n_total": [32, 0]}, {"dilution": [1, 0]},
     {"well_volume_uL": [50, np.nan]}, {"n_frozen": [[16, 4]]},
     {"n_frozen": [], "n_total": [], "dilution": [], "well_volume_uL": []},
-    {"confidence_drop": 0}, {"confidence_drop": np.nan},
+    {"z": 0}, {"z": -1}, {"z": np.nan}, {"z": np.inf}, {"z": 1e308},
     {"blank_frozen": 0}, {"blank_total": 32}, {"blank_volume_uL": 50},
 ])
 def test_invalid_inputs_fail_without_discarding_bad_measurements(changes):
-    arguments = {
-        "n_frozen": [16, 4], "n_total": [32, 32], "dilution": [1, 13],
-        "well_volume_uL": 50,
-    }
+    arguments = {"n_frozen": [16, 4], "n_total": [32, 32],
+                 "dilution": [1, 13], "well_volume_uL": 50}
     arguments.update(changes)
     with pytest.raises(ValueError):
         average_concentration(**arguments)
@@ -131,11 +157,32 @@ def test_invalid_inputs_fail_without_discarding_bad_measurements(changes):
 
 def test_vector_volumes_require_explicit_blank_volumes_even_when_equal():
     with pytest.raises(ValueError, match="explicit blank_volume_uL"):
-        average_concentration(
-            [16, 4], [32, 32], [1, 13], [50, 50], blank_frozen=0, blank_total=32
+        average_concentration([16, 4], [32, 32], [1, 13], [50, 50],
+                              blank_frozen=0, blank_total=32)
+
+
+def test_public_average_paths_never_call_the_likelihood_fitter(monkeypatch):
+    import inptk._engine.water_blank_math as math
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Average called the likelihood fitter")
+
+    monkeypatch.setattr(math, "fit_concentration", forbidden)
+    rows = []
+    for name, frozen in (("A", [2, 8, 14]), ("B", [0, 2, 6]), ("W", [0, 1, 2])):
+        rows.extend(
+            {"measurement_id": name, "temperature_C": temperature,
+             "n_frozen": count, "n_total": 16}
+            for temperature, count in zip([-5, -6, -7], frozen)
         )
-
-
-def test_underflowing_adjusted_error_probability_has_a_clear_error():
-    with pytest.raises(ValueError, match="finite numerical range"):
-        average_concentration([16, 4], [32, 32], [1, 13], 50, confidence_drop=1000)
+    metadata = [
+        {"measurement_id": "A", "sample_id": "S", "dilution": 1, "droplet_volume_uL": 50},
+        {"measurement_id": "B", "sample_id": "S", "dilution": 2, "droplet_volume_uL": 50},
+        {"measurement_id": "W", "sample_id": "W", "dilution": 1, "droplet_volume_uL": 50},
+    ]
+    data = inptk.read_counts(pd.DataFrame(rows), metadata=metadata,
+                             water_blank_map={"A": ["W"], "B": ["W"]})
+    fractions = inptk.frozen_fraction(data)
+    assert len(inptk.estimate_concentration(fractions, experiment=data, method="average"))
+    assert len(inptk.cumulative_spectrum(fractions, experiment=data, method="average"))
+    assert inptk.suggest_temperature_ranges(data).inputs

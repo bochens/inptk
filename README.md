@@ -174,8 +174,9 @@ original first and last freezing events and ignore combined temperature ranges.
 Events outside the selected ranges do not extend a combined curve's interval.
 
 `analyze_concentration()` and the `finalize_spectrum()` step omit concentration
-points outside this interval. Fitting still uses the eligible observations
-outside it, which can constrain the fit and its uncertainty. Zero concentrations
+points outside this interval. MLE still uses eligible observations outside it,
+which can constrain its fit and uncertainty. Average calculates each selected
+temperature directly from its count states. Zero concentrations
 inside the interval remain valid, including zeros from blank correction. No
 observed sample events means no reported concentration points. Individual curves
 retain every calculated point inside their interval, including flagged values
@@ -266,9 +267,11 @@ Use `differentiate_spectrum(cumulative)` to calculate differential concentration
 from an existing individual cumulative spectrum without fitting again.
 
 To calculate separate spectra for all physical inputs, use `cumulative_spectrum`
-with the same fractions, experiment, method, and temperature ranges.
-For optional differential output, call `differential_spectrum` with the same
-fractions, experiment, method, and temperature ranges.
+with the same fractions, experiment, method, and temperature grid settings.
+For optional differential output, call `differential_spectrum` with those same
+inputs and settings. Temperature ranges apply only to combined curves; these
+individual calculations use each input's complete observation sequence.
+
 `inptk.subtract_blanks(estimated, {"A": blank_spectrum})` subtracts a calculated
 sample/filter blank spectrum before unit conversion. `finalize_spectrum`
 then selects the final nondecreasing concentration rows without changing the
@@ -281,7 +284,7 @@ Differential concentration is the increase between adjacent cooling observations
 divided by their actual temperature difference. Repeated-temperature and warming
 transitions have no cooling interval; their source identities are recorded in
 history, and the calculation never skips across them. Each
-endpoint uses its fitted concentration. With `method="average"`, the separate
+endpoint uses its calculated concentration. With `method="average"`, the direct
 count-state estimates also support changing blank-corrected totals; joint MLE
 requires fixed raw totals. Missing or excluded endpoints produce a missing interval; the
 calculation does not bridge gaps. Negative changes carry quality flag `2`;
@@ -296,8 +299,9 @@ Use `method="mle"` (default) or `method="average"` with the same temperature ran
 - **MLE**, maximum likelihood estimation, fits one complete freezing curve to
   the eligible raw counts. Concentration and each run's blank background can
   only increase or stay constant as temperature falls.
-- **Average** calculates each eligible measurement's concentration in the original
-  suspension, then takes their equal-weight arithmetic mean.
+- **Average** converts each eligible measurement's observed frozen fraction
+  directly to a concentration, subtracts its assigned blank background, and
+  takes the arithmetic mean in the original suspension.
 
 By default, measurements of the same original sample, run, and cycle form one
 output curve. Explicit curves can combine independent sets from different runs;
@@ -468,24 +472,30 @@ under the model, not cycle-to-cycle variability or uncertainty in supplied volum
 and dilutions. With a single uncorrected droplet set they agree with the ordinary
 binomial count profile bounds at the observed temperatures.
 
-Average uses conservative bounds that allow shared blank uncertainty; MLE uses
-counts jointly. For `average`, the uncertainty label is **Bonferroni-adjusted
-marginal profile bounds**. Each measurement is estimated with its assigned raw
-blank observations, then its interval is widened before the endpoints are averaged:
+Average uses `x_i` frozen wells out of `n_i` total wells. It converts the
+frozen fraction `p_i = x_i / n_i` directly to `S_i = -ln(1 - p_i) / V_i`,
+where `V_i` is that measurement's droplet volume in
+mL. With dilution factor `d_i` and the assigned run/cycle blank concentration
+`B_g`, its original-suspension concentration is `C_i = d_i * (S_i - B_g)`.
+At each temperature, the combined value is the arithmetic mean of the eligible
+`C_i` values from the selected sample and blank count states.
+A negative corrected value stays negative. A fully frozen sample gives an
+infinite direct estimate. If all pooled blank wells at a given volume are frozen,
+the blank-corrected estimate is marked unavailable. Neither is silently dropped
+from the mean.
 
-1. Convert `z` to the nominal probability of falling outside the interval, called
-   `alpha`. Divide it by the number of eligible measurements, `m`.
-2. Calculate each measurement's profile bounds using this smaller `alpha / m`.
-3. Average all lower endpoints, and separately average all upper endpoints.
-
-The [Bonferroni adjustment](https://www.itl.nist.gov/div898/handbook/prc/section4/prc463.htm)
-does not require independent intervals, so a shared blank is not mistaken for
-independent background information. The individual profile intervals remain
-approximate: this is not a promise of exact 95% coverage. Bounds may stay wide
-or widen when more measurements contribute; averaging does not guarantee smaller
-error bars. With one measurement, its ordinary MLE bounds are used unchanged.
-An infinite individual estimate makes the mean infinite; an unavailable individual estimate
-makes the mean unavailable. Neither is silently omitted from the average.
+For Average uncertainty, Wilson bounds (intervals for a frozen fraction based
+on its frozen and total well counts) are transformed through the same logarithm
+and volume. The transformed limits describe each selected count state.
+The lower side of a corrected concentration uses the upper side of its blank
+uncertainty, and vice versa. Error widths are combined in quadrature (square,
+add, then take the square root). In an arithmetic mean of `m` measurements,
+each independent sample error has weight `d_i / m`. A blank shared by several
+measurements in one run/cycle is included **once**, with weight `sum(d_i / m)`
+over those measurements. Separate blank groups contribute separate error terms.
+This propagation is approximate; `z=1.96` does not establish exact 95%
+coverage for the corrected mean. It does not include uncertainty in supplied
+volumes or dilutions, or variability across repeated cycles.
 
 Both methods include measured background uncertainty when raw blank
 correction is enabled. Raw sample and blank counts allow that background to be
@@ -717,7 +727,7 @@ assay preparation. Each sample and blank uses its own actual droplet volume;
 their volumes do not have to be equal. There is one model and no model selector.
 Saved settings record this fixed assumption as `water_blank_model="volume_scaled"`.
 
-The fitted frozen probabilities are:
+MLE uses these frozen-probability relationships:
 
 - Sample: `1 - exp[-V_sample * (C / dilution + B)]`.
 - Blank set: `1 - exp[-V_blank * B]`.
@@ -728,26 +738,34 @@ droplet volume in mL. The model describes randomly distributed ice-active
 contributions per liquid volume. Water, substrate, and wall contributions all
 enter through `B`; there is no separate surface-area term.
 
-MLE fits this common assay background explicitly. It cannot identify or remove
-contamination unique to one dilution and absent from its assigned blanks.
+MLE fits this common assay background explicitly. Average calculates its
+background directly from the selected blank counts. Neither method can identify
+or remove contamination unique to one dilution and absent from its assigned blanks.
 Measurement-specific temperature ranges remain an explicit choice by the user.
 
 When correction is enabled, individual dilution spectra estimate sample
 concentration from that measurement and its assigned blanks. The combined
 spectrum uses all measurements allowed by `temperature_ranges_C`. MLE fits their
-counts with each run's own blank group; average uses their individually estimated
+counts with each run's own blank group; Average uses their individually calculated
 concentrations. Cross-run MLE estimates one original-sample concentration while
 allowing a separate background curve for each run. In an MLE fit, each independent
 blank set contributes its freezing history once,
 regardless of how many dilutions reference it. Distinct droplet volumes remain
 in the probability model; unequal-volume blank counts are not collapsed into
-one frozen fraction. Repeated cycles remain separate.
+one frozen fraction. Average pools raw counts only across independent blank sets
+with exactly the same droplet volume. For different blank volumes, it calculates
+one background concentration per volume class and averages those concentrations
+with weights proportional to the number of blank wells times droplet volume.
+The corresponding independent error terms use those same fixed weights. This is
+the defined aggregation rule, not a claim that it is uniquely optimal for every
+physical background. Repeated cycles remain separate.
 
 A blank with 32 wells is not subtracted as 32 droplets from a sample with four
 wells. Each count is interpreted with its own observed total and droplet volume.
 At the same frozen fraction and volume, more blank wells imply the same background
-level, with greater statistical precision. The joint fit uses that stronger
-information; the number of wells is not a multiplier for the correction.
+level, with greater statistical precision. The joint MLE fit uses that stronger
+information; Average uses the count uncertainty and the blank aggregation rule
+above. The number of wells is not a multiplier for the correction.
 
 Temperature ranges select whole count observations; there are no count-rebasing
 or arbitrary contribution-weight settings. This model also differs from the

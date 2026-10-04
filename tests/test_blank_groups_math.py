@@ -1,8 +1,5 @@
 """Each independent run keeps its own background in a common-concentration fit."""
 
-from math import erfc, sqrt
-from statistics import NormalDist
-
 import numpy as np
 import pytest
 
@@ -173,27 +170,28 @@ def test_large_dilutions_keep_positive_signal_across_groups():
     assert actual[3]
 
 
-def test_average_uses_only_own_group_blanks_and_adjusts_all_marginal_bounds():
-    frozen, total, dilution, volume = [12, 20, 13], [20, 32, 30], [1, 2, 13], [50, 100, 20]
-    blank_x, blank_n, blank_volume = np.array([1, 2, 8]), np.array([10, 12, 32]), [50, 20, 50]
+def test_average_subtracts_only_its_own_groups_direct_blank_concentrations():
+    frozen, total = np.array([12, 20, 13]), np.array([20, 32, 30])
+    dilution, volume = np.array([1, 2, 13]), np.array([50, 100, 20])
+    blank_x, blank_n = np.array([1, 2, 8]), np.array([10, 12, 32])
+    blank_volume = np.array([50, 20, 50])
     sample_group, blank_group = ["A", "B", "A"], np.array(["A", "A", "B"])
-    adjusted = NormalDist().inv_cdf(
-        erfc(sqrt(PROFILE_LIKELIHOOD_DROP_95)) / (2 * len(frozen))
-    )**2 / 2
-    expected = []
-    for x, n, d, v, group in zip(frozen, total, dilution, volume, sample_group):
+    backgrounds = {}
+    for group in ("A", "B"):
         mask = blank_group == group
-        expected.append(fit_concentration(
-            x, n, d, v, confidence_drop=adjusted,
-            blank_frozen=blank_x[mask], blank_total=blank_n[mask],
-            blank_volume_uL=np.array(blank_volume)[mask],
-        ))
+        concentrations = -np.log1p(-blank_x[mask] / blank_n[mask]) / (blank_volume[mask] / 1000)
+        backgrounds[group] = np.average(concentrations, weights=blank_n[mask] * blank_volume[mask])
+    expected = np.mean(dilution * (
+        -np.log1p(-frozen / total) / (volume / 1000)
+        - np.array([backgrounds[group] for group in sample_group])
+    ))
     result = average_concentration(
         frozen, total, dilution, volume,
         blank_frozen=blank_x, blank_total=blank_n, blank_volume_uL=blank_volume,
         sample_blank_group=sample_group, blank_group=blank_group,
     )
-    np.testing.assert_allclose(result, np.mean(expected, axis=0), rtol=1e-10)
+    assert result[0] == pytest.approx(expected, rel=1e-12)
+    assert result[1] > 0 and result[2] > 0 and result[3]
 
 
 def test_average_does_not_discard_unidentifiable_group():

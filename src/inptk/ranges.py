@@ -283,7 +283,7 @@ def suggest_temperature_ranges(
                             point.blanks,
                             view,
                             method="average",
-                            confidence_drop=float(z) ** 2 / 2,
+                            z=float(z),
                         )
                     concentration, lower, upper, finite = cache[key]
                     concentrations[index] = (concentration, lower, upper)

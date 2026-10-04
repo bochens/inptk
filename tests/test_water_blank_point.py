@@ -51,9 +51,9 @@ def test_native_rows_use_each_runs_background_and_each_shared_blank_once(method,
         [15, 35, 35], [20, 40, 40], [1, 2, 1], [50, 100, 50],
         blank_frozen=[5, 24], blank_total=[10, 32], blank_volume_uL=[50, 50],
         sample_blank_group=["R1", "R1", "R2"], blank_group=["R1", "R2"],
-        confidence_drop=DROP,
+        **({"z": np.sqrt(2 * DROP)} if method == "average" else {"confidence_drop": DROP}),
     )
-    actual = estimate_point(samples, blanks, experiment, confidence_drop=DROP, method=method)
+    actual = estimate_point(samples, blanks, experiment, z=np.sqrt(2 * DROP), method=method)
     np.testing.assert_array_equal(actual, expected)
     assert actual[0] == pytest.approx(np.log(2) / 0.05, rel=1e-8)
     pd.testing.assert_frame_equal(samples, before_samples)
@@ -62,7 +62,7 @@ def test_native_rows_use_each_runs_background_and_each_shared_blank_once(method,
 
 def test_selecting_one_run_requires_only_its_assigned_blanks():
     experiment, samples, blanks = inputs()
-    actual = estimate_point(samples.iloc[:2], blanks.iloc[:1], experiment, confidence_drop=DROP)
+    actual = estimate_point(samples.iloc[:2], blanks.iloc[:1], experiment, z=np.sqrt(2 * DROP))
     expected = fit_concentration(
         [15, 35], [20, 40], [1, 2], [50, 100],
         blank_frozen=5, blank_total=10, blank_volume_uL=50,
@@ -84,7 +84,7 @@ def test_repeated_observations_and_cycles_cannot_multiply_droplets(role, change_
         estimate_point(
             frame if role == "sample" else samples,
             frame if role == "blank" else blanks,
-            experiment, confidence_drop=DROP,
+            experiment, z=np.sqrt(2 * DROP),
         )
 
 
@@ -92,7 +92,7 @@ def test_two_selected_cycles_in_same_run_are_rejected_even_for_different_measure
     experiment, samples, blanks = inputs()
     samples.loc[samples.measurement_id.eq("M2"), "cycle_id"] = "02"
     with pytest.raises(ValueError, match="one selected cycle per run"):
-        estimate_point(samples, blanks, experiment, confidence_drop=DROP)
+        estimate_point(samples, blanks, experiment, z=np.sqrt(2 * DROP))
 
 
 @pytest.mark.parametrize("blank_selection", ["missing", "wrong_cycle", "extra"])
@@ -105,13 +105,13 @@ def test_selected_blanks_must_match_all_and_only_assigned_measurement_cycles(bla
     else:
         samples = samples.iloc[:2]
     with pytest.raises(ValueError, match="exactly match assigned measurement/cycle pairs"):
-        estimate_point(samples, blanks, experiment, confidence_drop=DROP)
+        estimate_point(samples, blanks, experiment, z=np.sqrt(2 * DROP))
 
 
 def test_mapped_experiment_cannot_silently_skip_blank_correction():
     experiment, samples, _ = inputs()
     with pytest.raises(ValueError, match="missing="):
-        estimate_point(samples, pd.DataFrame(), experiment, confidence_drop=DROP)
+        estimate_point(samples, pd.DataFrame(), experiment, z=np.sqrt(2 * DROP))
 
 
 def test_disabling_correction_keeps_samples_and_runs_but_fits_no_background():
@@ -122,7 +122,7 @@ def test_disabling_correction_keeps_samples_and_runs_but_fits_no_background():
         sample_rows(experiment.counts.to_dataframe(), experiment).reset_index(drop=True),
         uncorrected.counts.to_dataframe(),
     )
-    actual = estimate_point(samples, pd.DataFrame(), uncorrected, confidence_drop=DROP)
+    actual = estimate_point(samples, pd.DataFrame(), uncorrected, z=np.sqrt(2 * DROP))
     expected = fit_concentration([15, 35, 35], [20, 40, 40], [1, 2, 1], [50, 100, 50])
     np.testing.assert_array_equal(actual, expected)
 
@@ -131,7 +131,7 @@ def test_unassigned_blanks_are_not_silently_used():
     experiment, samples, blanks = inputs()
     experiment = replace(experiment, water_blank_map={})
     with pytest.raises(ValueError, match="require experiment.water_blank_map"):
-        estimate_point(samples, blanks, experiment, confidence_drop=DROP)
+        estimate_point(samples, blanks, experiment, z=np.sqrt(2 * DROP))
 
 
 @pytest.mark.parametrize("column,value,match", [
@@ -145,16 +145,16 @@ def test_invalid_observation_identity_is_rejected(column, value, match):
     experiment, samples, blanks = inputs()
     samples.loc[0, column] = value
     with pytest.raises(ValueError, match=match):
-        estimate_point(samples, blanks, experiment, confidence_drop=DROP)
+        estimate_point(samples, blanks, experiment, z=np.sqrt(2 * DROP))
 
 
 def test_blank_measurement_cannot_be_used_as_sample():
     experiment, _, blanks = inputs()
     with pytest.raises(ValueError, match="not an assigned sample measurement"):
-        estimate_point(blanks.iloc[:1], blanks, experiment, confidence_drop=DROP)
+        estimate_point(blanks.iloc[:1], blanks, experiment, z=np.sqrt(2 * DROP))
 
 
 def test_unknown_method_is_rejected_instead_of_defaulting_to_mle():
     experiment, samples, blanks = inputs()
     with pytest.raises(ValueError, match="method must be"):
-        estimate_point(samples, blanks, experiment, confidence_drop=DROP, method="typo")
+        estimate_point(samples, blanks, experiment, z=np.sqrt(2 * DROP), method="typo")

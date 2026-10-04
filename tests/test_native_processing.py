@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from inptk._engine.water_blank_math import fit_concentration
 from inptk.estimation import estimate_concentration
 from inptk.experiment import Experiment, MeasurementMetadata, SampleMetadata
 from inptk.processing import cumulative_spectrum, differential_spectrum, frozen_fraction
@@ -90,10 +89,10 @@ def test_matching_blank_acquisitions_remain_paired_at_duplicate_temperatures():
         frozen_fraction(source), experiment=source, method="average"
     ).to_dataframe()
     expected = [
-        fit_concentration(x, 32, 1, 50, blank_frozen=b, blank_total=32, confidence_drop=1.96**2 / 2)
+        (-np.log1p(-x / 32) + np.log1p(-b / 32)) / 0.05
         for x, b in zip([4, 8, 16, 20], [0, 1, 5, 8])
     ]
-    np.testing.assert_allclose(actual.concentration, np.array(expected)[:, 0])
+    np.testing.assert_allclose(actual.concentration, expected)
     assert actual.blank_n_frozen.tolist() == [0, 1, 5, 8]
     for position, serialized in enumerate(actual.water_blank_observations):
         assert json.loads(serialized)[0]["observation_id"] == f"B:01:{position}"

@@ -73,7 +73,7 @@ def estimate_point(
     blanks: pd.DataFrame,
     experiment: Experiment,
     *,
-    confidence_drop: float,
+    z: float,
     method: str = "mle",
 ) -> tuple[float, float, float, bool]:
     """Estimate one concentration from explicitly selected physical observations.
@@ -86,8 +86,9 @@ def estimate_point(
     With an active water-blank map, supply every assigned blank exactly once
     for each selected run/cycle. Runs have independent background concentrations,
     while their samples share one original-sample concentration for MLE. Average
-    fits each sample with its own run's blanks before taking the arithmetic mean.
-    Without a map, blanks must be empty and no background is fitted.
+    directly calculates each sample concentration, subtracts its run's blank
+    concentration, and takes the arithmetic mean with propagated uncertainty.
+    Without a map, blanks must be empty and no correction is applied.
     """
     if not isinstance(experiment, Experiment):
         raise TypeError("experiment must be an Experiment")
@@ -96,7 +97,7 @@ def estimate_point(
     if not isinstance(samples, pd.DataFrame) or not isinstance(blanks, pd.DataFrame):
         raise TypeError("samples and blanks must be pandas DataFrames")
     if samples.empty:
-        raise ValueError("Concentration fitting requires sample observations")
+        raise ValueError("Concentration calculation requires sample observations")
     required = {
         "measurement_id", "sample_id", "run_id", "cycle_id",
         "temperature_C", "n_frozen", "n_total",
@@ -129,7 +130,7 @@ def estimate_point(
                     f"Observation identities disagree with metadata for {row.measurement_id!r}"
                 )
     if samples.sample_id.nunique() != 1:
-        raise ValueError("Concentration fitting requires one parent sample")
+        raise ValueError("Concentration calculation requires one parent sample")
 
     sample_metadata = [experiment.measurements[key] for key in samples.measurement_id]
     estimate = average_concentration if method == "average" else fit_concentration
@@ -138,7 +139,7 @@ def estimate_point(
         "n_total": samples.n_total.to_numpy(),
         "dilution": [item.dilution for item in sample_metadata],
         "well_volume_uL": [item.droplet_volume_uL for item in sample_metadata],
-        "confidence_drop": confidence_drop,
+        **({"z": z} if method == "average" else {"confidence_drop": z**2 / 2}),
     }
     if not experiment.water_blank_map:
         if not blanks.empty:

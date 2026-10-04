@@ -185,11 +185,7 @@ def estimate_concentration(
                 "source_observations": json.dumps(_sources(point)),
                 "uncertainty_method": "joint_curve_profile_likelihood"
                 if method == "mle"
-                else "bonferroni_marginal_profile_bounds"
-                if method == "average" and len(contributors) > 1
-                else "joint_sample_water_blank_profile_likelihood"
-                if experiment.water_blank_map
-                else "binomial_Poisson_profile_likelihood",
+                else "propagated_wilson_binomial_bounds",
                 "correction_state": "water_blank_corrected"
                 if experiment.water_blank_map
                 else "uncorrected",
@@ -206,7 +202,7 @@ def estimate_concentration(
                             point.samples,
                             point.blanks,
                             experiment,
-                            confidence_drop=z**2 / 2,
+                            z=z,
                             method=method,
                         )
                     fit = cache[key]
@@ -218,7 +214,7 @@ def estimate_concentration(
                 )
             else:
                 empty_count += 1
-            record["at_zero_boundary"] = record["concentration"] == 0
+            record["at_zero_boundary"] = method == "mle" and record["concentration"] == 0
             records.append(record)
         if empty_count:
             notices.append(f"Curve {curve_id!r}: {empty_count} points have no eligible input")
@@ -244,16 +240,20 @@ def estimate_concentration(
         if temperature_step_C is not None
         else "latest observation at or warmer than target, only where needed",
         "z": float(z),
-        "confidence_drop": float(z**2 / 2),
+        **({"confidence_drop": float(z**2 / 2)} if method == "mle" else {}),
         "water_blank_correction": water_blank_correction,
         "water_blank_correction_applied": bool(experiment.water_blank_map),
         "water_blank_model": "volume_scaled",
         "background_groups": "separate by run and selected cycle",
         "water_blank_map": dict(experiment.water_blank_map),
         "joint_curve_fits": joint_fits,
+        **({"average_blank_aggregation": "equal-volume counts pooled; different volumes "
+            "weighted by total assayed volume"} if method == "average" else {}),
         "uncertainty_assumption": (
             "Independent physical droplet sets, repeated observations never pooled; "
-            "profile bounds and Bonferroni-adjusted average bounds have approximate coverage"
+            + ("joint curve profile bounds have approximate coverage" if method == "mle" else
+               "log-transformed Wilson binomial bounds with approximate asymmetric "
+               "quadrature propagation; shared blank uncertainty counted once")
         ),
         "warnings": notices,
     }

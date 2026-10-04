@@ -1,4 +1,4 @@
-"""Pointwise count likelihood with optional independent water-background groups.
+"""Direct Average calculations and pointwise likelihood for raw sample/blank counts.
 
 This model assumes independent droplet sets and known droplet volumes. When
 blank data are supplied, each group has a common background concentration per mL
@@ -11,8 +11,6 @@ confidence bands or a guarantee of nominal coverage at parameter boundaries.
 from __future__ import annotations
 
 from collections.abc import Callable
-from math import erfc, sqrt
-from statistics import NormalDist
 from typing import Any
 
 import numpy as np
@@ -52,7 +50,7 @@ def _log_likelihood(hazard: np.ndarray, frozen: np.ndarray, total: np.ndarray) -
 
 
 def _sample_arrays(n_frozen: Any, n_total: Any, dilution: Any, well_volume_uL: Any):
-    """Validate every contributing sample before starting any individual fit."""
+    """Validate every contributing sample before calculating concentrations."""
     frozen, total, dilutions, sample_volumes = np.broadcast_arrays(
         np.asarray(n_frozen, dtype=float),
         np.asarray(n_total, dtype=float),
@@ -452,92 +450,100 @@ def joint_water_blank_mle(
     )
 
 
+def _direct_concentration(frozen, total, volumes_uL, z):
+    """Direct concentrations and log-transformed Wilson binomial error widths."""
+    fraction = frozen / total
+    z_squared = z * z
+    if not np.isfinite(z_squared):
+        raise ValueError("z exceeds the finite numerical range")
+    denominator = 1 + z_squared / total
+    center = (fraction + z_squared / (2 * total)) / denominator
+    half_width = z * np.sqrt(
+        (fraction * (1 - fraction) + z_squared / (4 * total)) / total
+    ) / denominator
+    lower_fraction = np.maximum(0, center - half_width)
+    upper_fraction = np.minimum(1, center + half_width)
+    lower_fraction = np.where(frozen == 0, 0, lower_fraction)
+    upper_fraction = np.where(frozen == total, 1, upper_fraction)
+    volume_mL = volumes_uL / 1000
+    with np.errstate(divide="ignore", invalid="ignore"):
+        concentration = -np.log1p(-fraction) / volume_mL
+        lower = -np.log1p(-lower_fraction) / volume_mL
+        upper = -np.log1p(-upper_fraction) / volume_mL
+        return (concentration, np.maximum(0, concentration - lower),
+                np.maximum(0, upper - concentration))
+
+
 def average_concentration(
     n_frozen: Any,
     n_total: Any,
     dilution: Any,
     well_volume_uL: Any,
     *,
-    confidence_drop: float = PROFILE_LIKELIHOOD_DROP_95,
+    z: float = 1.96,
     blank_frozen: Any = None,
     blank_total: Any = None,
     blank_volume_uL: Any = None,
     sample_blank_group: Any = None,
     blank_group: Any = None,
 ) -> tuple[float, float, float, bool]:
-    """Average individual concentrations with adjusted marginal profile bounds.
+    """Direct blank-corrected concentrations, arithmetic mean and propagated errors.
 
-    Every sample is fitted separately with its actual droplet count, dilution
-    and volume. Each individual fit includes each blank from its own group once;
-    omitted group labels mean that every sample uses the same supplied blanks.
-    The point estimate is the arithmetic mean of those individual estimates;
-    measurements with infinite or unavailable estimates are never discarded.
-    One sample returns exactly the ordinary ``fit_concentration`` result.
+    Each sample contributes d * (S - B), where S and B are calculated from
+    -log(1 - frozen/total) / well_volume_mL. Negative differences are retained.
+    Equal-volume independent blank wells in a group use their combined counts.
+    Different blank volumes use a mean of these concentrations weighted by
+    total assayed volume (well count times well volume).
 
-    For m samples, the two-sided error probability implied by confidence_drop
-    is divided by m (the Bonferroni adjustment). Fit each individual interval
-    at that adjusted level, then average its lower and upper endpoints.
-    This construction requires no independence between the intervals, so it
-    accommodates correlation from the shared blank. Marginal profile intervals
-    are approximate: this does not guarantee the requested coverage, especially
-    at small counts or boundaries. Bounds can remain wide or widen when more
-    measurements contribute. They are pointwise, not whole-spectrum bands.
+    Wilson binomial fraction bounds are transformed through the same logarithm.
+    Their asymmetric error widths are propagated in quadrature, reversing the
+    blank error direction for subtraction. Independent samples each have weight
+    d/m; a shared blank appears once with the sum of those weights. These are
+    approximate pointwise bounds, not exact confidence intervals or whole-curve
+    bands. Counts across repeated cycles must never be supplied as independent
+    wells. Saturated/unavailable inputs are flagged, never silently dropped.
     """
     frozen, total, dilutions, volumes = _sample_arrays(
         n_frozen, n_total, dilution, well_volume_uL
     )
-    drop = _scalar(confidence_drop, name="confidence_drop")
-    if drop <= 0:
-        raise ValueError("confidence_drop must be positive")
+    z = _scalar(z, name="z")
+    if z <= 0:
+        raise ValueError("z must be positive")
     blank_x, blank_n, blank_volumes = _blank_arrays(
         well_volume_uL, blank_frozen, blank_total, blank_volume_uL
     )
     sample_labels, blank_labels = _blank_groups(
         sample_blank_group, blank_group, len(frozen), len(blank_x)
     )
-    count = len(frozen)
-    if count == 1:
-        return fit_concentration(
-            n_frozen, n_total, dilution, well_volume_uL,
-            confidence_drop=drop,
-            blank_frozen=blank_frozen,
-            blank_total=blank_total,
-            blank_volume_uL=blank_volume_uL,
-            sample_blank_group=sample_blank_group,
-            blank_group=blank_group,
-        )
-
-    # Use the lower normal tail directly: 1-alpha/(2*m) can round to one.
-    probability = erfc(sqrt(drop)) / (2 * count)
-    if not 0 < probability < 0.5:
-        raise ValueError("Average confidence adjustment exceeds the finite numerical range")
-    adjusted_z = NormalDist().inv_cdf(probability)
-    adjusted_drop = adjusted_z**2 / 2
-    if not np.isfinite(adjusted_drop) or adjusted_drop <= 0:
-        raise ValueError("Average confidence adjustment exceeds the finite numerical range")
-    fits = []
-    for index, (x, n, d, volume) in enumerate(zip(frozen, total, dilutions, volumes)):
-        blank_mask = blank_labels == sample_labels[index]
-        fits.append(fit_concentration(
-            x, n, d, volume,
-            confidence_drop=adjusted_drop,
-            blank_frozen=blank_x[blank_mask] if len(blank_x) else None,
-            blank_total=blank_n[blank_mask] if len(blank_x) else None,
-            blank_volume_uL=blank_volumes[blank_mask] if len(blank_x) else None,
-        ))
-    fit_array = np.asarray(fits)
-
-    def mean(values: np.ndarray) -> float:
-        if np.all(values == values[0]):
-            return float(values[0])
-        # Divide before summing to avoid overflow for large concentrations.
-        return float(np.sum(values / count))
-
-    estimate = mean(fit_array[:, 0])
-    if not np.isfinite(estimate) or not fit_array[:, 3].all():
+    sample_rate, sample_lower, sample_upper = _direct_concentration(frozen, total, volumes, z)
+    weights = dilutions / len(frozen)
+    corrected = sample_rate.copy()
+    lower_error = float(np.hypot.reduce(weights * sample_lower))
+    upper_error = float(np.hypot.reduce(weights * sample_upper))
+    for group in dict.fromkeys(blank_labels):
+        mask = blank_labels == group
+        group_volumes = np.unique(blank_volumes[mask])
+        totals = np.array([np.sum(blank_n[mask & (blank_volumes == v)]) for v in group_volumes])
+        counts = np.array([np.sum(blank_x[mask & (blank_volumes == v)]) for v in group_volumes])
+        rates, lowers, uppers = _direct_concentration(counts, totals, group_volumes, z)
+        if not np.isfinite(rates).all():
+            return np.nan, np.nan, np.nan, False
+        exposures = totals * group_volumes
+        blank_weights = exposures / np.sum(exposures)
+        background = float(np.dot(blank_weights, rates))
+        background_lower = float(np.hypot.reduce(blank_weights * lowers))
+        background_upper = float(np.hypot.reduce(blank_weights * uppers))
+        assigned = sample_labels == group
+        corrected[assigned] -= background
+        # The same blank estimate is subtracted from every assigned sample.
+        # Its uncertainty is shared, so sum its coefficients before propagation.
+        coefficient = float(np.sum(weights[assigned]))
+        lower_error = float(np.hypot(lower_error, coefficient * background_upper))
+        upper_error = float(np.hypot(upper_error, coefficient * background_lower))
+    corrected *= dilutions
+    estimate = (float(corrected[0]) if np.all(corrected == corrected[0])
+                else float(np.sum(corrected / len(corrected))))
+    if not np.isfinite(estimate):
         return estimate, np.nan, np.nan, False
-    # Averaging corresponding widths around the mean point is algebraically
-    # identical to averaging interval endpoints, with less cancellation.
-    lower_error, upper_error = mean(fit_array[:, 1]), mean(fit_array[:, 2])
-    finite = bool(np.isfinite([estimate, lower_error, upper_error]).all())
+    finite = bool(np.isfinite([lower_error, upper_error]).all())
     return estimate, lower_error, upper_error, finite

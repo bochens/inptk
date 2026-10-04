@@ -56,7 +56,7 @@ def test_only_existing_grid_points_between_events_are_reported(method):
 
 
 @pytest.mark.parametrize("method", ["average", "mle"])
-def test_blank_events_do_not_extend_interval_and_corrected_zeros_survive(method):
+def test_blank_events_do_not_extend_interval_or_change_calculated_values(method):
     temperatures = [-5, -6, -7, -8, -9, -10]
     source = experiment([("A", "1", temperatures, [0, 0, 2, 2, 4, 4]),
                          ("blank", "1", temperatures, [0, 1, 3, 3, 5, 6])],
@@ -64,7 +64,10 @@ def test_blank_events_do_not_extend_interval_and_corrected_zeros_survive(method)
     result = inptk.analyze_concentration(source, method=method)
     frame = result.to_dataframe()
     assert frame.temperature_C.tolist() == [-7, -8, -9]
-    np.testing.assert_allclose(frame.concentration, 0, atol=1e-6)
+    expected = ((-np.log1p(-np.array([2, 2, 4]) / 10)
+                 + np.log1p(-np.array([3, 3, 5]) / 10)) / 0.05
+                if method == "average" else 0)
+    np.testing.assert_allclose(frame.concentration, expected, atol=1e-6)
     assert frame.upper_error.ge(0).all()
 
 
@@ -197,3 +200,13 @@ def test_cli_individual_estimate_has_no_combined_range_option(tmp_path, capsys):
                  "--out", str(tmp_path / "final")]) == 0
     frame = inptk.load(tmp_path / "final").tables["cumulative"].to_dataframe()
     assert frame.temperature_C.tolist() == [-6, -6.5, -7, -7.5, -8]
+
+
+def test_direct_corrected_zeros_survive_inside_sample_freezing_interval():
+    temperatures = [-5, -6, -7, -8, -9, -10]
+    source = experiment([("A", "1", temperatures, [0, 0, 2, 2, 4, 4]),
+                         ("blank", "1", temperatures, [0, 1, 2, 2, 4, 6])],
+                        water_blank_map={"A": ["blank"]})
+    frame = inptk.analyze_concentration(source, method="average").to_dataframe()
+    assert frame.temperature_C.tolist() == [-7, -8, -9]
+    np.testing.assert_array_equal(frame.concentration, 0)

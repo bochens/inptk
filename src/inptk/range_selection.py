@@ -45,7 +45,7 @@ class RangePlanner:
             if key not in self.estimates:
                 self.estimates[key] = estimate_point(
                     point.samples, point.blanks, self.experiment, method="average",
-                    confidence_drop=self.z**2 / 2,
+                    z=self.z,
                 )
             records.append((float(point.temperature_C), self.estimates[key][0]))
         return records
