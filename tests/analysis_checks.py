@@ -64,7 +64,6 @@ def input_spectra(result):
     return inptk.cumulative_spectrum(
         selected_fractions(result),
         experiment=result.experiment,
-        temperature_ranges_C=result.settings["temperature_ranges_C"],
         temperature_step_C=result.settings["temperature_step_C"],
         temperature_start_C=result.settings["temperature_start_C"],
         temperature_end_C=result.settings["temperature_end_C"],

@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from inptk._engine.water_blank_math import fit_concentration
+from inptk.estimation import estimate_concentration
 from inptk.experiment import Experiment, MeasurementMetadata, SampleMetadata
 from inptk.processing import cumulative_spectrum, differential_spectrum, frozen_fraction
 from inptk.tables import CountsTable, FrozenFractionTable
@@ -115,7 +116,7 @@ def test_unsynchronized_blank_uses_latest_observed_state_and_records_its_actual_
 def test_combined_exclusions_do_not_hide_missing_individual_blank_coverage():
     source = experiment([-5, -6, -7], [4, 8, 16], blanks=[2, 4], blank_temperatures=[-6, -7])
     with pytest.raises(ValueError, match="no blank extrapolation"):
-        cumulative_spectrum(
+        estimate_concentration(
             frozen_fraction(source), experiment=source,
             temperature_ranges_C={"M": {"min_C": -7, "max_C": -6}},
         )
@@ -157,10 +158,10 @@ def test_differential_uses_only_adjacent_cooling_transitions_without_bridging_ji
     assert omitted[1]["to_observation_id"] == "M:01:3"
 
 
-def test_differential_ignores_combined_exclusions_and_keeps_cycles_separate():
+def test_individual_differential_keeps_cycles_separate():
     source = experiment([-5, -6, -7], [0, 4, 16], cycles=("01", "1"))
     result = differential_spectrum(
-        frozen_fraction(source), experiment=source, temperature_ranges_C={"M": {"max_C": -6}}
+        frozen_fraction(source), experiment=source
     ).to_dataframe()
     assert len(result) == 4
     for _, cycle in result.groupby("cycle_id"):

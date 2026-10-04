@@ -250,8 +250,7 @@ def test_excluded_temperatures_do_not_require_missing_blank_observations(method)
     pd.testing.assert_frame_equal(stepwise.to_dataframe(), fit_estimates(actual).to_dataframe())
     # A combined exclusion does not waive blank coverage for individual estimates.
     with pytest.raises(ValueError, match="no blank extrapolation"):
-        inptk.cumulative_spectrum(fractions, experiment=source, method=method,
-                                  temperature_ranges_C=ranges)
+        inptk.cumulative_spectrum(fractions, experiment=source, method=method)
     assert (
         fit_estimates(actual).to_dataframe().set_index("temperature_C").loc[-6].contributor_count
         == 0

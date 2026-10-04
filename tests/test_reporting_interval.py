@@ -161,10 +161,12 @@ def test_combination_exclusions_leave_individual_grid_curves_unchanged(method):
     fractions = inptk.frozen_fraction(source)
     step_settings = {key: value for key, value in settings.items() if key != "curves"}
     original_individuals = inptk.cumulative_spectrum(fractions, experiment=source, **step_settings)
-    restricted_individuals = inptk.cumulative_spectrum(
-        fractions, experiment=source, temperature_ranges_C=ranges, **step_settings)
-    pd.testing.assert_frame_equal(original_individuals.to_dataframe(),
-                                  restricted_individuals.to_dataframe())
+    individual_steps = inptk.finalize_spectrum(original_individuals).to_dataframe()
+    columns = ["temperature_C", "concentration", "lower_error", "upper_error"]
+    for name in ("A", "B"):
+        expected = individual_steps.loc[individual_steps.measurement_id.eq(name), columns]
+        actual = restricted.curves[name].cumulative.to_dataframe()[columns]
+        pd.testing.assert_frame_equal(actual, expected.reset_index(drop=True))
 
 
 @pytest.mark.parametrize("policy", ["skip_decreases", "stop_at_decrease"])
@@ -179,13 +181,18 @@ def test_individual_reporting_does_not_remove_grid_estimates_or_saturation(polic
     assert individual.final_selection_status.eq("kept").all()
 
 
-def test_cli_individual_estimate_ignores_combined_exclusions(tmp_path):
+def test_cli_individual_estimate_has_no_combined_range_option(tmp_path, capsys):
     source = experiment([("A", "1", [-5, -6, -7, -8, -9], [0, 2, 3, 4, 4])])
     source.save(tmp_path / "source")
     ranges = {"A": {"min_C": -7, "max_C": -7}}
+    with pytest.raises(SystemExit) as error:
+        main(["estimate", str(tmp_path / "source"), "--format", "saved", "--individual",
+              "--temperature-ranges", json.dumps(ranges), "--out", str(tmp_path / "invalid")])
+    assert error.value.code == 1
+    assert "applies to combined curves" in capsys.readouterr().err
+    assert not (tmp_path / "invalid").exists()
     assert main(["estimate", str(tmp_path / "source"), "--format", "saved", "--individual",
-                 "--temperature-step", "0.5", "--temperature-ranges", json.dumps(ranges),
-                 "--out", str(tmp_path / "estimated")]) == 0
+                 "--temperature-step", "0.5", "--out", str(tmp_path / "estimated")]) == 0
     assert main(["finalize", str(tmp_path / "estimated"),
                  "--out", str(tmp_path / "final")]) == 0
     frame = inptk.load(tmp_path / "final").tables["cumulative"].to_dataframe()

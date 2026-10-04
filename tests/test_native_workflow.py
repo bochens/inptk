@@ -166,9 +166,7 @@ def test_native_full_and_stepwise_paths_agree():
     source = experiment()
     result = inptk.analyze_concentration(source, temperature_ranges_C={"a": {"max_C": -5.8}})
     fractions = inptk.frozen_fraction(source)
-    per = inptk.cumulative_spectrum(
-        fractions, experiment=source, temperature_ranges_C={"a": {"max_C": -5.8}}
-    )
+    per = inptk.cumulative_spectrum(fractions, experiment=source)
     combined = inptk.estimate_concentration(
         fractions, experiment=source, temperature_ranges_C={"a": {"max_C": -5.8}}
     )

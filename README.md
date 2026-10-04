@@ -437,8 +437,10 @@ the incomplete proposals first. Individual valid proposals remain visible in `in
 
 Apply `temperature_ranges_C` to combined curves in `estimate_concentration` or
 `analyze_concentration`. It controls which inputs contribute to each combined
-point. Individual curves and the `cumulative_spectrum` and `differential_spectrum`
-steps ignore these combination ranges and keep their input observations.
+point. Individual curves in a mixed result keep their input observations.
+The individual-only `cumulative_spectrum` and `differential_spectrum` functions
+do not accept this argument. Likewise, CLI `estimate --individual` does not accept
+`--temperature-ranges`.
 The frozen-fraction table remains complete. Every calculated sample temperature
 still requires coverage from its assigned blanks when correction is enabled.
 

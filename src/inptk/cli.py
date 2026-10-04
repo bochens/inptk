@@ -685,6 +685,8 @@ def _fraction_input(args, store):
 
 
 def _estimate_step(args, store):
+    if args.individual and args.temperature_ranges is not None:
+        raise ValueError("--temperature-ranges applies to combined curves, not --individual")
     source = store.load(args.input) if args.format == "saved" else None
     experiment = _read_analysis_input(args, store, saved=source)
     tables = table_summary(source) if source is not None else {}
@@ -701,6 +703,7 @@ def _estimate_step(args, store):
     settings = _estimation_settings(args)
     if args.individual:
         settings.pop("curves")
+        settings.pop("temperature_ranges_C")
         estimated = cumulative_spectrum(fractions, experiment=experiment, **settings)
     else:
         estimated = estimate_concentration(fractions, experiment=experiment, **settings)

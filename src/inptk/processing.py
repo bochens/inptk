@@ -49,7 +49,6 @@ def cumulative_spectrum(
     fractions: FrozenFractionTable,
     *,
     experiment: Experiment,
-    temperature_ranges_C=None,
     temperature_step_C: float | None = DEFAULTS.temperature_step_C,
     temperature_start_C: float | None = DEFAULTS.temperature_start_C,
     temperature_end_C: float | None = DEFAULTS.temperature_end_C,
@@ -66,8 +65,8 @@ def cumulative_spectrum(
     Average retains separate temperature estimates. All original observation
     rows remain in this table by default; fitted values use their temperatures.
     With temperature_step_C, return selected grid states with original source
-    identities and observed temperatures recorded separately. Combined-analysis
-    temperature ranges do not exclude individual observations or estimates.
+    identities and observed temperatures recorded separately. Input-exclusion
+    ranges belong to the combined-curve calculation, not this individual step.
     """
     from .estimation import estimate_concentration
     from .water_blank import sample_rows
@@ -91,7 +90,6 @@ def cumulative_spectrum(
         method=method,
         z=z,
         fit_step_C=fit_step_C,
-        temperature_ranges_C=temperature_ranges_C,
         temperature_step_C=temperature_step_C,
         temperature_start_C=temperature_start_C,
         temperature_end_C=temperature_end_C,
@@ -183,7 +181,6 @@ def differential_spectrum(
     fractions: FrozenFractionTable,
     *,
     experiment: Experiment,
-    temperature_ranges_C=None,
     temperature_step_C: float | None = DEFAULTS.temperature_step_C,
     temperature_start_C: float | None = DEFAULTS.temperature_start_C,
     temperature_end_C: float | None = DEFAULTS.temperature_end_C,
@@ -205,7 +202,6 @@ def differential_spectrum(
     cumulative = cumulative_spectrum(
         fractions,
         experiment=experiment,
-        temperature_ranges_C=temperature_ranges_C,
         temperature_step_C=temperature_step_C,
         temperature_start_C=temperature_start_C,
         temperature_end_C=temperature_end_C,
