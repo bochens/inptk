@@ -164,7 +164,34 @@ inptk analyze counts.csv --metadata measurements.csv \
 inptk export-csv analysis.inptk --out final_concentrations.csv
 ```
 
-CSV export uses the saved analysis temperatures without another grid selection.
+Concentration reporting uses each curve's observed sample freezing interval:
+from its first through its last freezing event. A new maximum frozen count marks
+an event; an initially positive count marks the first observed event. Repeated
+count states do not extend the interval. For a combined curve, the interval spans
+the freezing events of its selected inputs and cycles. Blank events do not extend
+it, and events outside an input's selected temperature range do not extend it.
+
+`analyze_concentration()` and the `finalize_spectrum()` step omit concentration
+points outside this interval. Fitting still uses the eligible observations
+outside it, which can constrain the fit and its uncertainty. Zero concentrations
+inside the interval remain valid, including zeros from blank correction. No
+observed sample events means no reported concentration points.
+
+CSV export keeps only existing analysis temperatures inside this interval,
+including when exporting an unfinalized estimate. It does not add off-grid event
+endpoints or select another grid. For example, events at −6.1 and −8.1 °C leave
+−6.5, −7, −7.5 and −8 °C on a 0.5 °C grid. The saved counts, observed fractions,
+and intermediate estimates retain the full input and calculated points.
+
+For application plots and exports, use each curve's final `cumulative` table.
+The toolkit's CSV is a long table with one row per curve and temperature. If a
+client arranges individual curves as columns, leave absent values empty and use
+the union of their reported temperatures; do not extend a curve or replace
+missing values with zero. This also omits rows where every curve is empty.
+`reporting_min_C`, `reporting_max_C`, and `reporting_status` describe the interval
+on estimated rows. The `excluded` table records `before_first_freeze`,
+`after_last_freeze`, or `no_freezing_events` as appropriate. `inptk capabilities`
+exposes the reporting rule under `concentration_reporting`.
 
 To read an existing CSU/OLAF reference for comparison:
 
@@ -1059,6 +1086,7 @@ src/inptk/
   settings.py       shared Python and CLI defaults and validation
   cli_steps.py      saved step operations and table access
   cli_store.py      files or in-memory results for a persistent client
+  reporting.py      sample freezing intervals for concentration reporting
   workflows.py      correction, units, final selection, and full workflow
   results.py        assemble named curves with their sources and exclusions
   io.py             versioned saving/loading of complete analyses

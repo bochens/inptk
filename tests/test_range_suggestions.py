@@ -45,7 +45,7 @@ def test_count_limits_are_inclusive_editable_and_preserve_observations():
     result = inptk.analyze_concentration(
         data, method="average", temperature_ranges_C=proposal.temperature_ranges_C
     )
-    assert result.to_dataframe().temperature_C.tolist() == [-5, -6, -7, -8, -9]
+    assert result.to_dataframe().temperature_C.tolist() == [-6, -7, -8, -9]
 
 
 def test_repeated_temperature_is_usable_only_when_every_observation_passes():

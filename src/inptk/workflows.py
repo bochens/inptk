@@ -165,7 +165,10 @@ def _final_candidates(
         for index, row in rows.iterrows():
             index = cast(int, index)  # ScientificTable stores rows with a RangeIndex.
             concentration = float(row.concentration) if pd.notna(row.concentration) else np.nan
-            if not np.isfinite(concentration):
+            reporting = row.get("reporting_status", "within_freezing_interval")
+            if reporting != "within_freezing_interval":
+                status = reporting
+            elif not np.isfinite(concentration):
                 status = "nonfinite"
             elif stopped and decrease_policy == "stop_at_decrease":
                 status = "after_decrease"
@@ -202,10 +205,14 @@ def _final_candidates(
         report: dict[str, object] = dict(zip(keys, identity, strict=True))
         report.update(retained_count=retained, excluded_count=len(excluded), excluded=excluded)
         reports.append(report)
-        if excluded:
+        scientific_exclusions = [
+            item for item in excluded
+            if item["reason"] in {"nonfinite", "decrease", "after_decrease"}
+        ]
+        if scientific_exclusions:
             notices.append(
                 f"{dict(zip(keys, identity, strict=True))}: final selection excluded "
-                f"{len(excluded)} of {len(rows)} points using {decrease_policy}"
+                f"{len(scientific_exclusions)} of {len(rows)} points using {decrease_policy}"
             )
         if retained == 0:
             notices.append(
@@ -220,6 +227,8 @@ def _final_candidates(
         + [
             {
                 "operation": "finalize_spectrum",
+                "reporting_rule": "observed_sample_freezing_interval"
+                if "reporting_status" in data else "no_count_limits_provided",
                 "decrease_policy": decrease_policy,
                 "comparison_order": "point_order, or supplied observation order",
                 "numerical_relative_tolerance": 1e-9,
@@ -236,10 +245,12 @@ def finalize_spectrum(
     *,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = DEFAULTS.decrease_policy,
 ) -> SpectrumT:
-    """Keep nondecreasing concentration in observation order, allowing fitting roundoff.
+    """Keep reportable, nondecreasing concentration points in observation order.
 
-    No temperature sorting, rounding, value adjustment or uncertainty reduction
-    is performed. Segment IDs retain gaps for plotting.
+    Estimates outside the observed sample freezing interval are omitted when
+    the estimation step has recorded those limits. Input observations still
+    constrain the fit. No temperature sorting, rounding, value adjustment or
+    uncertainty reduction is performed. Segment IDs retain gaps for plotting.
     """
     return _final_candidates(spectrum, decrease_policy=decrease_policy).select(used_in_final=True)
 
@@ -352,6 +363,8 @@ def analyze_concentration(
         and bool(experiment.water_blank_map),
         "water_blank_model": "volume_scaled",
         "decrease_policy": decrease_policy,
+        "reporting_rule": "observed_sample_freezing_interval",
+        "reporting_intervals_C": combined.history[-1]["reporting_intervals_C"],
     }
     history = final.history
     warnings = list(

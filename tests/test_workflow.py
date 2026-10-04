@@ -325,13 +325,13 @@ def test_icescopy_metadata_rejects_unknown_measurement_names():
     [
         (
             "stop_at_decrease",
-            [True, True, False, False, False],
-            ["kept", "kept", "decrease", "after_decrease", "after_decrease"],
+            [False, True, False, False, False],
+            ["before_first_freeze", "kept", "decrease", "after_decrease", "after_decrease"],
         ),
         (
             "skip_decreases",
-            [True, True, False, True, True],
-            ["kept", "kept", "decrease", "kept", "kept"],
+            [False, True, False, True, True],
+            ["before_first_freeze", "kept", "decrease", "kept", "kept"],
         ),
     ],
 )

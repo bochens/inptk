@@ -451,6 +451,16 @@ def _capabilities(parser):
             },
             "release": {"id": "request ID", "release": ["@result"]},
         },
+        concentration_reporting={
+            "rule": "observed_sample_freezing_interval",
+            "boundaries": "inclusive; original sample events; blanks do not extend the interval",
+            "grid": "existing selected points only; no additional endpoint rows",
+            "zeros": "retained inside the interval",
+            "fit_observations": "retained outside the reporting interval",
+            "final_tables": "cumulative",
+            "diagnostic_tables": "excluded; unfinalized estimates",
+            "csv": "cumulative export omits points outside the interval",
+        },
         step_sequence=["fractions", "estimate", "convert", "finalize"],
         individual_sequence=["fractions", "estimate --individual", "differentiate"],
         estimation_methods={
@@ -930,6 +940,10 @@ def main(argv=None, *, store=None, parser=None):
                 )
             result = store.load(args.input)
             table = select_table(result, args.table, args.curve)
+            if args.table == "cumulative":
+                from .reporting import reportable_spectrum
+
+                table = reportable_spectrum(table)
             table.to_dataframe().to_csv(args.out, index=False, mode="x")
             if json_mode:
                 _print_json(

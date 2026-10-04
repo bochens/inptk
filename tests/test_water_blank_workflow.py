@@ -124,7 +124,7 @@ def test_raw_stages_cycles_differential_and_archive_remain_consistent(tmp_path, 
         fit_estimates(first_cycle_result).to_dataframe(),
     )
     for cycle in ("01", "02"):
-        cumulative = input_spectra(result).select(cycle_id=cycle).to_dataframe()
+        cumulative = result.curves[f"S/1/{cycle}"].cumulative.to_dataframe()
         differential = intervals(result).select(cycle_id=cycle).to_dataframe()
         np.testing.assert_allclose(differential.concentration, np.diff(cumulative.concentration))
     result.save(tmp_path / "raw.inptk")

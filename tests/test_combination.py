@@ -101,8 +101,11 @@ def test_equal_exposure_contributor_change_does_not_create_a_false_decrease():
         result = inptk.analyze_concentration(
             source, method=method, temperature_ranges_C={"B": {"max_C": -6}}
         )
-        assert len(retained(result)) == 2
-        assert retained(result).to_dataframe().concentration.nunique() == 1
+        # The unchanged count state still constrains estimation, but its
+        # temperature is past the last observed freezing event.
+        assert len(fit_estimates(result)) == 2
+        assert fit_estimates(result).to_dataframe().concentration.nunique() == 1
+        assert retained(result).to_dataframe().temperature_C.tolist() == [-5]
 
 
 def test_filter_blank_does_not_require_coverage_at_excluded_temperatures():

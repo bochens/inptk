@@ -85,7 +85,9 @@ changing the CLI into a windowed app, which would remove standard streams.
 
 Use the in-memory protocol in [the README](../../README.md#interactive-application-clients): upload counts/metadata once,
 calculate into named references, request summary ranges and plot columns, save
-only when asked, and release superseded results. No Windows-specific estimator
+only when asked, and release superseded results.
+Final cumulative tables report only the sample freezing interval. Use those rows
+for plots and export; counts outside that interval remain available to the fit. No Windows-specific estimator
 or temporary-CSV calculation loop should be introduced.
 
 ## Distribution

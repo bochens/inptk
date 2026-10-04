@@ -91,9 +91,12 @@ def test_joint_workflow_keeps_cooling_intervals_ending_at_a_repeated_temperature
         inptk.frozen_fraction(source), experiment=source
     ).to_dataframe()
     actual = curve.differential.to_dataframe()
-    assert actual.temperature_bin_right_C.tolist() == [-5, -5.8]
-    assert actual.temperature_bin_left_C.tolist() == [-6, -7]
-    pd.testing.assert_frame_equal(actual, direct)
+    assert actual.temperature_bin_right_C.tolist() == [-5.8]
+    assert actual.temperature_bin_left_C.tolist() == [-7]
+    temperatures = curve.cumulative.to_dataframe().temperature_C
+    direct = direct.loc[direct.temperature_bin_left_C.isin(temperatures)
+                        & direct.temperature_bin_right_C.isin(temperatures)]
+    pd.testing.assert_frame_equal(actual, direct.reset_index(drop=True))
 
 
 @pytest.mark.parametrize("method", ["mle", "average"])
@@ -150,7 +153,10 @@ def test_native_cutoff_follows_observation_order_through_temperature_wiggles():
 def test_grid_is_selected_before_estimation_and_has_no_second_output():
     source = experiment()
     result = inptk.analyze_concentration(source, temperature_step_C=0.5)
-    assert result.to_dataframe().temperature_C.tolist() == [-5, -5.5, -6, -6.5, -7]
+    assert result.to_dataframe().temperature_C.tolist() == [-6, -6.5, -7]
+    assert fit_estimates(result).to_dataframe().temperature_C.tolist() == [
+        -5, -5.5, -6, -6.5, -7
+    ]
     assert "temperature_step_C" in result.settings
     assert not hasattr(next(iter(result.curves.values())), "resampled")
     pd.testing.assert_frame_equal(result.counts.to_dataframe(), source.counts.to_dataframe())

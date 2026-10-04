@@ -278,6 +278,6 @@ def test_cli_final_decrease_policy_matches_python_and_keeps_candidates(tmp_path,
     )
     assert len(all_points(actual)) == 5
     assert retained(actual).to_dataframe().temperature_C.tolist() == (
-        [-5, -6] if effective_policy == "stop_at_decrease" else [-5, -6, -8, -9]
+        [-6] if effective_policy == "stop_at_decrease" else [-6, -8, -9]
     )
     assert actual.settings["decrease_policy"] == effective_policy

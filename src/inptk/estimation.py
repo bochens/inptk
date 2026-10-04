@@ -12,6 +12,7 @@ from .alignment import align_observations
 from .context import prepare_fraction_analysis
 from .experiment import Experiment
 from .methods import curve_specifications, resolve_curves, validate_temperature_ranges
+from .reporting import freezing_intervals, mark_reporting_intervals
 from .settings import DEFAULTS, EstimationSettings
 from .tables import CurveSpectrumTable, FrozenFractionTable
 from .water_blank import estimate_point, sample_rows
@@ -73,6 +74,9 @@ def estimate_concentration(
     centered window. Sample and blank use the same rule, before correction.
     Optional start/end bounds are exact warm/cold grid endpoints; omitted
     bounds use observed limits. Both endpoints are retained without rounding.
+    All calculated points are returned with reporting limits from the original
+    sample freezing events. finalize_spectrum selects the reportable points;
+    these limits never remove observations from estimation.
     """
     EstimationSettings(
         method=method,
@@ -214,8 +218,11 @@ def estimate_concentration(
             records.append(record)
         if empty_count:
             notices.append(f"Curve {curve_id!r}: {empty_count} points have no eligible input")
+    intervals = freezing_intervals(source, groups, ranges)
     settings = {
         "operation": "estimate_concentration",
+        "reporting_rule": "observed_sample_freezing_interval",
+        "reporting_intervals_C": intervals,
         "estimation_method": method,
         "fit_step_C": fit_step_C,
         "curves": curve_specifications(groups),
@@ -246,5 +253,6 @@ def estimate_concentration(
         "warnings": notices,
     }
     return CurveSpectrumTable(
-        pd.DataFrame.from_records(records), history=fractions.history + [settings]
+        mark_reporting_intervals(pd.DataFrame.from_records(records), intervals),
+        history=fractions.history + [settings]
     )
