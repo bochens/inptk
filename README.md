@@ -1104,6 +1104,5 @@ endorsed by the original OLAF authors. Original documentation is available at
 <https://sigran.github.io/OLAF/>. Please also cite the original OLAF release when
 using this work in research: <https://doi.org/10.5281/zenodo.17509699>.
 
-Original copyright and licence notices are retained. The project remains
-licensed under AGPL-3.0; renaming or describing an integration as a plugin does
-not change that licence.
+INP-toolkit is licensed under AGPL-3.0. Original copyright and licence notices
+are retained.
