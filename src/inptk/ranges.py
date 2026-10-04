@@ -342,7 +342,8 @@ def suggest_temperature_ranges(
         "same_dilution": "nonoverlapping; curve input order breaks dilution ties",
         "repeated_temperatures": "all observations must pass",
         "blank_flags_change_ranges": False,
-        "uncertainty": "individual pointwise profile bounds; excludes range-selection uncertainty",
+        "uncertainty": "log-transformed Wilson binomial bounds with approximate propagation; "
+        "excludes range-selection uncertainty",
         "inputs": proposals,
     }
     return RangeSuggestions(
