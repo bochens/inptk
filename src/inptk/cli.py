@@ -456,6 +456,7 @@ def _capabilities(parser):
             "boundaries": "inclusive; original sample events; blanks do not extend the interval",
             "grid": "existing selected points only; no additional endpoint rows",
             "zeros": "retained inside the interval",
+            "outside_values": "NaN concentration and uncertainty; raw observations retained",
             "individual": "every selected point between original first and last sample freezes",
             "exclusion_ranges": "combined curves only",
             "decrease_selection": "combined curves only",
@@ -474,7 +475,10 @@ def _capabilities(parser):
                 "output_order": "selected analysis temperatures, warm to cold",
             },
             "average": {
-                "fit": "equal-weight concentration mean at each temperature",
+                "calculation": "direct corrected concentrations; arithmetic mean in overlap",
+                "contributors": "positive frozen sample counts within each input's "
+                "first-to-last freezing interval and selected ranges",
+                "uncertainty": "propagated Wilson binomial bounds; shared blank counted once",
                 "output_order": "native observation order, latest-warmer alignment when needed",
             },
         },

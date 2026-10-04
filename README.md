@@ -175,8 +175,12 @@ Events outside the selected ranges do not extend a combined curve's interval.
 
 `analyze_concentration()` and the `finalize_spectrum()` step omit concentration
 points outside this interval. MLE still uses eligible observations outside it,
-which can constrain its fit and uncertainty. Average calculates each selected
-temperature directly from its count states. Zero concentrations
+which can constrain its fit and uncertainty. Estimate tables keep the grid rows
+outside the interval with `NaN` concentration and uncertainty values. Combined
+Average uses each input only between its own original first and last freezing
+events, with a positive selected frozen sample count, intersected with any chosen
+input limits. Unfrozen inputs contribute neither concentration nor uncertainty.
+These rules also apply to Full Range. Zero concentrations
 inside the interval remain valid, including zeros from blank correction. No
 observed sample events means no reported concentration points. Individual curves
 retain every calculated point inside their interval, including flagged values
@@ -382,10 +386,11 @@ Range trials recalculate the selected counts, since changing a limit can change
 which observation supplies a grid point. The guarantee applies to that unchanged
 analysis setup, before any additional sample/filter-blank spectrum subtraction.
 
-The first dilution keeps its initial observations, including zero frozen wells.
+Each automatic interval is confined to that input's original first and last
+freezing events. The first dilution retains its first frozen observations.
 For every dilution, the default cold cutoff requires at least three liquid wells.
 Later dilutions also require at least three frozen wells. Thus, for 32 wells,
-the first dilution allows 0–29 frozen wells and later dilutions allow 3–29,
+the first dilution allows 1–29 frozen wells and later dilutions allow 3–29,
 subject to the switch temperature. These positive integer thresholds are editable
 starting values, not a validated confidence criterion. Assigned blanks must cover
 the selected temperatures when correction is enabled. The thresholds apply to

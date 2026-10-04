@@ -44,7 +44,7 @@ def freezing_intervals(frame, groups, ranges):
 
 
 def mark_reporting_intervals(frame, intervals):
-    """Annotate every estimate without removing rows or changing fitted values."""
+    """Keep diagnostic rows; concentration and errors outside event bounds are NaN."""
     data = frame.copy()
     data["reporting_min_C"] = data.curve_id.map(lambda name: intervals[name]["min_C"]).astype(float)
     data["reporting_max_C"] = data.curve_id.map(lambda name: intervals[name]["max_C"]).astype(float)
@@ -57,6 +57,10 @@ def mark_reporting_intervals(frame, intervals):
         ["no_freezing_events", "before_first_freeze", "after_last_freeze"],
         default="within_freezing_interval",
     )
+    outside = data.reporting_status.ne("within_freezing_interval")
+    data.loc[outside, ["concentration", "lower_error", "upper_error"]] = np.nan
+    data.loc[outside, "at_zero_boundary"] = False
+    data.loc[outside, "qc_flag"] = data.loc[outside, "qc_flag"].astype(int) | 1
     return data
 
 

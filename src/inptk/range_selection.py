@@ -21,16 +21,25 @@ class RangePlanner:
         self.frame = frame
         self.members = members
         self.experiment = experiment
-        self.bases = bases
         self.grid = grid
         self.z = z
         self.estimates = estimates
         self.trials = {}
         self.outside = float(frame.temperature_C.max()) + 1
-        intervals = freezing_intervals(
+        self.freezing_intervals = freezing_intervals(
             frame, {m["measurement_id"]: {"members": [m]} for m in members}, {}
         )
-        self.first_freeze = {name: limits["max_C"] for name, limits in intervals.items()}
+        self.bases = {}
+        for name, blocks in bases.items():
+            bounds = self.freezing_intervals[name]
+            self.bases[name] = []
+            if bounds["min_C"] is None:
+                continue
+            for block in blocks:
+                cold = max(block["min_C"], bounds["min_C"])
+                warm = min(block["max_C"], bounds["max_C"])
+                if cold <= warm:
+                    self.bases[name].append({"min_C": cold, "max_C": warm})
 
     def points(self, ranges):
         disabled = {"min_C": self.outside, "max_C": self.outside}
@@ -38,13 +47,14 @@ class RangePlanner:
             self.frame, self.members, water_blank_map=self.experiment.water_blank_map,
             temperature_ranges_C={m["measurement_id"]: ranges.get(m["measurement_id"], disabled)
                                   for m in self.members},
+            sample_freezing_intervals_C=self.freezing_intervals,
             **self.grid,
         )
 
-    def profile(self, ranges, *, warm_limit=None):
+    def profile(self, ranges):
         records = []
         for point in self.points(ranges):
-            if point.samples.empty or (warm_limit is not None and point.temperature_C > warm_limit):
+            if point.samples.empty:
                 continue
             key = point.count_key()
             if key not in self.estimates:
@@ -63,9 +73,7 @@ class RangePlanner:
             # A block containing actual calculation points must not be replaced
             # by a colder block for the first input. Blocks between grid targets
             # have no calculation points and cannot determine a grid range.
-            if previous is None and self.profile(
-                {name: base}, warm_limit=self.first_freeze[name]
-            ):
+            if previous is None and self.profile({name: base}):
                 break
         return None
 
@@ -87,18 +95,16 @@ class RangePlanner:
                 return None
             warm = min(warm, float(candidates.max()))
         reference = previous["profile"][-1][1] if previous is not None else 0.0
-        # Before the first sample freeze these points are outside the reported
-        # combined spectrum. Later inputs must still meet the previous value at
-        # their warm end, even before their own first freeze.
-        warm_limit = self.first_freeze[name] if previous is None else None
-        if previous is None and warm_limit is None:
-            return None
-        warm_reason = cold_reason = "count_or_coverage_limit"
+        bounds = self.freezing_intervals[name]
+        warm_reason = ("first_freezing_event" if warm == bounds["max_C"]
+                       else "count_or_coverage_limit")
+        cold_reason = ("last_freezing_event" if cold == bounds["min_C"]
+                       else "count_or_coverage_limit")
         while cold <= warm:
-            key = (name, cold, warm, warm_limit)
+            key = (name, cold, warm)
             if key not in self.trials:
                 self.trials[key] = self.profile(
-                    {name: {"min_C": cold, "max_C": warm}}, warm_limit=warm_limit
+                    {name: {"min_C": cold, "max_C": warm}}
                 )
             profile = self.trials[key]
             if not profile:
@@ -160,7 +166,7 @@ class RangePlanner:
         # actual combined sequence as well as each proposed interval.
         while chosen:
             ranges = {name: item["limits"] for name, item in chosen.items()}
-            profile = self.profile(ranges, warm_limit=self.first_freeze[next(iter(chosen))])
+            profile = self.profile(ranges)
             bad = next(
                 (i for i, (_, value) in enumerate(profile)
                  if not np.isfinite(value) or value < 0

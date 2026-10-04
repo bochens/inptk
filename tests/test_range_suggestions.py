@@ -32,16 +32,16 @@ def test_count_limits_are_inclusive_editable_and_preserve_observations():
     data = source()
     before = data.counts.to_dataframe()
     proposal = inptk.suggest_temperature_ranges(data)
-    assert proposal.temperature_ranges_C == {"001": {"min_C": -9, "max_C": -5}}
-    assert proposal.inputs["001"]["warm_limit_reason"] == ["observed_temperature_limit"]
+    assert proposal.temperature_ranges_C == {"001": {"min_C": -9, "max_C": -6}}
+    assert proposal.inputs["001"]["warm_limit_reason"] == ["first_freezing_event"]
     assert proposal.inputs["001"]["cold_limit_reason"] == ["too_few_liquid"]
     report = proposal.observations.to_dataframe()
-    assert report.in_suggested_range.tolist() == [True, True, True, True, True, False, False]
+    assert report.in_suggested_range.tolist() == [False, True, True, True, True, False, False]
     assert report.loc[report.in_suggested_range, "blank_status"].eq("not_applied").all()
     pd.testing.assert_frame_equal(data.counts.to_dataframe(), before)
     limits = proposal.temperature_ranges_C
-    limits["001"]["max_C"] = -6
-    assert proposal.temperature_ranges_C["001"]["max_C"] == -5
+    limits["001"]["max_C"] = -7
+    assert proposal.temperature_ranges_C["001"]["max_C"] == -6
     result = inptk.analyze_concentration(
         data, method="average", temperature_ranges_C=proposal.temperature_ranges_C
     )
@@ -52,7 +52,7 @@ def test_count_limits_are_inclusive_editable_and_preserve_observations():
 
 
 def test_repeated_temperature_is_usable_only_when_every_observation_passes():
-    data = source((29, 30, 10, 30), temperatures=[-5, -5, -6, -7])
+    data = source((29, 30, 10, 31), temperatures=[-5, -5, -6, -7])
     proposal = inptk.suggest_temperature_ranges(data)
     assert proposal.temperature_ranges_C == {"001": {"min_C": -6, "max_C": -6}}
     report = proposal.observations.to_dataframe()
@@ -167,7 +167,7 @@ def test_cli_thresholds_and_input_selection_are_exposed_in_capabilities(capsys):
 
 
 def test_suggestions_end_before_a_decrease_in_corrected_concentration():
-    data = source((8, 8, 8), blank=([0, 1, 4], [-5, -6, -7], 32, 50))
+    data = source((8, 9, 10), blank=([0, 2, 4], [-5, -6, -7], 32, 50))
     report = inptk.suggest_temperature_ranges(data).observations.to_dataframe()
     assert report.in_suggested_range.tolist() == [True, False, False]
     assert "concentration_decrease" in report.range_exclusion_reasons.iloc[1]
@@ -210,9 +210,9 @@ def test_negative_cold_value_cuts_tail_even_if_concentration_later_recovers():
 def test_negative_blank_prefix_before_first_sample_freeze_does_not_cut_signal():
     data = source((0, 0, 8, 16), blank=([0, 4, 4, 4], [-5, -6, -7, -8], 32, 50))
     proposal = inptk.suggest_temperature_ranges(data)
-    assert proposal.temperature_ranges_C == {"001": {"min_C": -8, "max_C": -5}}
+    assert proposal.temperature_ranges_C == {"001": {"min_C": -8, "max_C": -7}}
     raw = unfiltered(data, proposal)
-    assert raw.loc[raw.temperature_C.eq(-6), "concentration"].iloc[0] < 0
+    assert np.isnan(raw.loc[raw.temperature_C.eq(-6), "concentration"].iloc[0])
     assert raw.loc[raw.temperature_C.eq(-6), "reporting_status"].iloc[0] == "before_first_freeze"
     reported = raw.loc[raw.reporting_status.eq("within_freezing_interval")]
     assert reported.concentration.ge(0).all()
@@ -252,7 +252,7 @@ def test_exhaust_previous_dilution_before_switching_even_when_next_is_already_us
     curves = {"combined": {"inputs": ["C", "A", "B"]}}
     proposal = inptk.suggest_temperature_ranges(data, curves=curves)
     assert proposal.temperature_ranges_C == {
-        "A": {"min_C": -8, "max_C": -5},
+        "A": {"min_C": -8, "max_C": -6},
         "B": {"min_C": -11, "max_C": -9},
         "C": {"min_C": -12, "max_C": -12},
     }
@@ -263,7 +263,7 @@ def test_exhaust_previous_dilution_before_switching_even_when_next_is_already_us
         temperature_ranges_C=proposal.temperature_ranges_C,
     ).to_dataframe()
     assert [json.loads(ids) for ids in result.contributing_measurement_ids] == (
-        [["A"]] * 4 + [["B"]] * 3 + [["C"]]
+        [[]] + [["A"]] * 3 + [["B"]] * 3 + [["C"]]
     )
 
 
@@ -375,14 +375,14 @@ def test_handoff_shortens_previous_range_without_modifying_concentrations():
     data = two_inputs([0, 16, 24, 29, 30], [0, 3, 5, 8, 12])
     proposal = inptk.suggest_temperature_ranges(data)
     assert proposal.temperature_ranges_C == {
-        "A": {"min_C": -6, "max_C": -5}, "B": {"min_C": -9, "max_C": -9},
+        "A": {"min_C": -6, "max_C": -6}, "B": {"min_C": -9, "max_C": -9},
     }
     assert proposal.inputs["A"]["cold_limit_reason"] == ["shortened_for_monotone_handoff"]
     table = unfiltered(data, proposal)
     finite = table.loc[np.isfinite(table.concentration)]
-    assert finite.temperature_C.tolist() == [-5, -6, -9]
+    assert finite.temperature_C.tolist() == [-6, -9]
     assert finite.contributor_count.eq(1).all()
-    np.testing.assert_allclose(finite.concentration, -np.log([1, 0.5, 0.625]) / 0.05 * [1, 1, 2])
+    np.testing.assert_allclose(finite.concentration, -np.log([0.5, 0.625]) / 0.05 * [1, 2])
     assert finite.concentration.diff().dropna().ge(0).all()
 
 
@@ -402,7 +402,7 @@ def test_impossible_handoff_stops_and_reports_unused_input():
 def test_total_count_change_is_checked_through_concentration():
     data = inptk.read_counts(
         {"measurement_id": ["A"] * 3, "temperature_C": [-5, -6, -7],
-         "n_total": [32, 32, 64], "n_frozen": [8, 12, 12]},
+         "n_total": [32, 32, 64], "n_frozen": [8, 12, 13]},
         metadata=[{"measurement_id": "A", "sample_id": "A", "dilution": 1,
                    "droplet_volume_uL": 50}],
     )
@@ -428,7 +428,7 @@ def test_monotone_limits_use_the_same_initial_grid_and_rule_as_analysis(method):
     limits = proposal.temperature_ranges_C["001"]
     allowed = table.temperature_C.between(limits["min_C"], limits["max_C"])
     finite = table.loc[allowed & np.isfinite(table.concentration)]
-    assert len(finite) >= 2
+    assert finite.temperature_C.tolist() == [-5.5]
     assert finite.concentration.diff().dropna().ge(0).all()
     assert finite.contributor_count.eq(1).all()
     for key, value in grid.items():
@@ -467,7 +467,7 @@ def test_count_eligible_island_between_grid_targets_does_not_block_later_input()
 
 
 def test_cli_monotone_limits_share_grid_settings_with_python(tmp_path, capsys):
-    data = source((8, 8, 8), blank=([0, 1, 4], [-5, -6, -7], 32, 50))
+    data = source((8, 9, 10), blank=([0, 2, 4], [-5, -6, -7], 32, 50))
     path = tmp_path / "experiment.inptk"
     data.save(path)
     assert main(["suggest-ranges", str(path), "--format", "saved",
@@ -531,6 +531,9 @@ def test_report_keeps_observation_identity_with_shuffled_input_rows():
         expected[columns].sort_index(),
     )
     for row in report.itertuples():
+        if not row.in_suggested_range:
+            assert json.loads(row.blank_observation_ids) == []
+            continue
         assert json.loads(row.blank_observation_ids) == [{
             "measurement_id": "water", "run_id": "R", "cycle_id": "01",
             "observation_id": row.observation_id,

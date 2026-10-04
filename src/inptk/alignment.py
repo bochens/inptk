@@ -77,6 +77,15 @@ def _in_range(temperature: float, limits: Mapping) -> bool:
     )
 
 
+def _average_sample_eligible(row, temperature, intervals):
+    """Average uses positive sample counts inside that input's freezing interval."""
+    if intervals is None:
+        return True
+    limits = intervals[str(row["measurement_id"])]
+    return (row["n_frozen"] > 0 and limits["min_C"] is not None
+            and _in_range(temperature, limits))
+
+
 def _latest_position(rows: pd.DataFrame, temperature: float, limits: Mapping) -> int | None:
     if not _in_support(rows, temperature) or not _in_range(temperature, limits):
         return None
@@ -115,6 +124,7 @@ def align_observations(
     temperature_end_C: float | None = None,
     temperature_method: str = "latest",
     temperature_window_C: float | None = None,
+    sample_freezing_intervals_C: Mapping[str, Mapping] | None = None,
 ) -> list[AlignedPoint]:
     """Keep native sequences, or explicitly select counts on a regular grid.
 
@@ -170,6 +180,7 @@ def align_observations(
             frame, members, water_blank_map=water_blank_map, ranges=ranges,
             step_C=temperature_step_C, start_C=temperature_start_C, end_C=temperature_end_C,
             method=temperature_method, window_C=temperature_window_C,
+            sample_freezing_intervals_C=sample_freezing_intervals_C,
         )
 
     blank_streams: dict[tuple[str, str, str], pd.DataFrame] = {}
@@ -235,15 +246,17 @@ def align_observations(
                 for key in keys:
                     row = streams[key].iloc[position]
                     limits = ranges.get(key[0], {})
-                    if _in_range(temperature, limits) and _in_range(
+                    if (_in_range(temperature, limits) and _in_range(
                         float(row.temperature_C), limits
-                    ):
+                    ) and _average_sample_eligible(row, temperature, sample_freezing_intervals_C)):
                         selected[key] = (row, position)
             else:
                 for key in keys:
                     position = _latest_position(streams[key], temperature, ranges.get(key[0], {}))
                     if position is not None:
-                        selected[key] = (streams[key].iloc[position], position)
+                        row = streams[key].iloc[position]
+                        if _average_sample_eligible(row, temperature, sample_freezing_intervals_C):
+                            selected[key] = (row, position)
 
         blank_positions: dict[tuple[str, str, str], list[int]] = {}
         alignment = "native" if native else "latest"

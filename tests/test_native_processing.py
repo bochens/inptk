@@ -64,6 +64,7 @@ def test_individual_estimates_keep_native_rows_without_pooling_repeated_temperat
     ).to_dataframe()
     fitted_counts = [0, 9, 9, 9, 16, 16] if method == "mle" else [0, 4, 8, 9, 16, 16]
     expected = -np.log1p(-np.array(fitted_counts) / 32) / 0.05
+    expected[0] = np.nan
     np.testing.assert_allclose(actual.concentration, expected, atol=1e-7, rtol=1e-7)
     assert actual.n_frozen.tolist() == [0, 4, 8, 9, 16, 16]
     assert actual.observation_id.tolist() == source.counts.to_dataframe().observation_id.tolist()
@@ -164,8 +165,9 @@ def test_individual_differential_keeps_cycles_separate():
     ).to_dataframe()
     assert len(result) == 4
     for _, cycle in result.groupby("cycle_id"):
-        assert np.isfinite(cycle.concentration).all()
-        assert cycle.qc_flag.eq(0).all()
+        assert np.isnan(cycle.concentration.iloc[0])
+        assert np.isfinite(cycle.concentration.iloc[1])
+        assert cycle.qc_flag.tolist() == [1, 0]
 
 
 @pytest.mark.parametrize(

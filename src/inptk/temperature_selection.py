@@ -56,6 +56,7 @@ def temperature_grid(temperatures, *, step_C, start_C=None, end_C=None):
 
 def grid_points(
     frame, members, *, water_blank_map, ranges, step_C, method, window_C, start_C=None, end_C=None,
+    sample_freezing_intervals_C=None,
 ):
     """Select each sample and blank independently; never pool repeated counts.
 
@@ -63,7 +64,7 @@ def grid_points(
     fit_temperature_C records where the selected state will enter the fit.
     Empty sample windows create gaps; missing required blank states are errors.
     """
-    from .alignment import AlignedPoint, _in_range, _ordered_rows
+    from .alignment import AlignedPoint, _average_sample_eligible, _in_range, _ordered_rows
 
     keys = [(str(m["measurement_id"]), str(m["run_id"]), str(m["cycle_id"])) for m in members]
     blank_keys = {
@@ -122,7 +123,9 @@ def grid_points(
         samples, needed = [], set()
         for key in keys:
             row = select(key, target)
-            if row is not None:
+            if row is not None and _average_sample_eligible(
+                row, target, sample_freezing_intervals_C
+            ):
                 samples.append(row)
                 needed.update((str(b), key[1], key[2]) for b in water_blank_map.get(key[0], []))
         blanks = []

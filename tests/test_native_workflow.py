@@ -115,13 +115,17 @@ def test_explicit_cross_run_group_keeps_own_blank_and_cycle_provenance(method):
     assert set(frame.curve_id) == {"both"}
     assert frame.alignment.eq("latest").all()
     assert frame.temperature_C.tolist() == sorted({-5, -6, -5.8, -7, -6.2}, reverse=True)
-    for items in frame.source_observations.map(json.loads):
-        assert {(item["measurement_id"], item["run_id"], item["cycle_id"]) for item in items} == {
-            ("a", "R1", "01"),
-            ("wa", "R1", "01"),
-            ("b", "R2", "02"),
-            ("wb", "R2", "02"),
-        }
+    a_sources = {("a", "R1", "01"), ("wa", "R1", "01")}
+    b_sources = {("b", "R2", "02"), ("wb", "R2", "02")}
+    for row in frame.itertuples():
+        expected = a_sources | b_sources
+        if method == "average":
+            expected = (a_sources if -7 <= row.temperature_C <= -5.8 else set())
+            if -7 <= row.temperature_C <= -6.2:
+                expected |= b_sources
+        items = json.loads(row.source_observations)
+        assert {(item["measurement_id"], item["run_id"], item["cycle_id"])
+                for item in items} == expected
     separate = fit_estimates(inptk.analyze_concentration(source)).to_dataframe()
     assert set(separate.curve_id) == {"S/R1/01", "S/R2/02"}
     assert set(input_spectra(result).to_dataframe().run_id) == {"R1", "R2"}

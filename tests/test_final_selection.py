@@ -127,7 +127,8 @@ def test_workflow_selects_after_blank_subtraction_and_unit_conversion(policy):
         blank_by_curve={"S/R/1": blank}, decrease_policy=policy,
     )
     raw = fit_estimates(result).to_dataframe()
-    assert np.all(np.diff(raw.concentration) > 0)
+    assert np.isnan(raw.concentration.iloc[0])
+    assert np.all(np.diff(raw.concentration.dropna()) > 0)
     corrected = inptk.subtract_blanks(fit_estimates(result), {"S/R/1": blank})
     converted = inptk.convert_concentration(corrected, source.samples, basis="sampled_air")
     expected = inptk.finalize_spectrum(converted, decrease_policy=policy)

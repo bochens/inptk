@@ -74,9 +74,10 @@ def estimate_concentration(
     centered window. Sample and blank use the same rule, before correction.
     Optional start/end bounds are exact warm/cold grid endpoints; omitted
     bounds use observed limits. Both endpoints are retained without rounding.
-    All calculated points are returned with reporting limits from the original
-    sample freezing events. finalize_spectrum selects the reportable points;
-    these limits never remove observations from estimation. Input temperature
+    Rows outside original sample freezing limits retain their identities with
+    NaN concentrations and errors. MLE still uses raw observations there.
+    Combined Average uses positive sample counts inside each input's event
+    interval, intersected with user ranges. Input temperature
     ranges apply only to curves combining several physical inputs. Individual
     curves use the complete input trajectory, independently of those exclusions.
     """
@@ -103,6 +104,13 @@ def estimate_concentration(
         temperature_ranges_C, measurement_ids=set(experiment.measurements) - blank_ids
     )
     groups = resolve_curves(curves, experiment, frame)
+    input_intervals = {}
+    if method == "average":
+        input_groups = {
+            (member["measurement_id"], member["run_id"], member["cycle_id"]): {"members": [member]}
+            for group in groups.values() for member in group["members"]
+        }
+        input_intervals = freezing_intervals(source, input_groups, {})
     records, notices, group_alignment, cache = [], [], {}, {}
     joint_fits = {}
     for curve_id, group in groups.items():
@@ -129,6 +137,11 @@ def estimate_concentration(
             temperature_end_C=temperature_end_C,
             temperature_method=temperature_method,
             temperature_window_C=temperature_window_C,
+            sample_freezing_intervals_C={
+                member["measurement_id"]: input_intervals[
+                    (member["measurement_id"], member["run_id"], member["cycle_id"])
+                ] for member in members
+            } if method == "average" and not individual else None,
         )
         if method == "mle":
             from dataclasses import replace
@@ -248,7 +261,10 @@ def estimate_concentration(
         "water_blank_map": dict(experiment.water_blank_map),
         "joint_curve_fits": joint_fits,
         **({"average_blank_aggregation": "equal-volume counts pooled; different volumes "
-            "weighted by total assayed volume"} if method == "average" else {}),
+            "weighted by total assayed volume",
+            "average_contributors": "positive frozen sample counts within each input's "
+            "original first-to-last freezing interval, intersected with selected ranges"}
+           if method == "average" else {}),
         "uncertainty_assumption": (
             "Independent physical droplet sets, repeated observations never pooled; "
             + ("joint curve profile bounds have approximate coverage" if method == "mle" else

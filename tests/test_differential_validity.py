@@ -24,7 +24,7 @@ def test_regular_differential_matches_original_fixed_total_count_formula():
     source = experiment()
     fractions = inptk.frozen_fraction(source)
     result = inptk.differential_spectrum(fractions, experiment=source).to_dataframe()
-    expected = -np.log(np.array([24 / 32, 16 / 24])) / 0.05
+    expected = np.array([np.nan, -np.log(16 / 24) / 0.05])
     np.testing.assert_allclose(result.concentration, expected)
     assert result.temperature_bin_left_C.tolist() == [-6, -7]
     assert result.temperature_bin_right_C.tolist() == [-5, -6]
@@ -33,7 +33,7 @@ def test_regular_differential_matches_original_fixed_total_count_formula():
 
 @pytest.mark.parametrize(
     "totals,frozen",
-    [((32, 32, 24), (0, 8, 8)), ((32, 32, 28), (0, 12, 8))],
+    [((32, 32, 24), (1, 8, 9)), ((32, 32, 64), (1, 12, 13))],
 )
 def test_changing_corrected_totals_use_each_states_fraction(totals, frozen):
     source = experiment(totals=totals, frozen=frozen)
@@ -65,6 +65,7 @@ def test_irregular_observations_use_actual_adjacent_interval_edges():
     np.testing.assert_allclose(result.temperature_bin_right_C, observed.temperature_C.iloc[:-1])
     widths = -np.diff(observed.temperature_C)
     concentration = -np.log1p(-observed.fraction_frozen.to_numpy()) / 0.05
+    concentration[0] = np.nan  # No concentration before the first sample freeze.
     np.testing.assert_allclose(result.concentration, np.diff(concentration) / widths)
     assert "temperature_bin_width_C" not in result
 
