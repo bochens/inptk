@@ -70,12 +70,11 @@ def test_cli_matches_python_and_preserves_cycle_ids(tmp_path, sample_id):
     assert payload["toolkit_version"] == inptk.__version__
 
 
-def test_no_cycle_policy_or_compatibility_package_in_source():
+def test_no_cycle_policy_in_parser():
     from inptk.cli import build_parser
 
     parser = build_parser()
     assert "cycle-policy" not in parser.format_help()
-    assert not (Path(__file__).resolve().parents[1] / "src" / "ufolaf" / "__init__.py").exists()
 
 
 @pytest.fixture

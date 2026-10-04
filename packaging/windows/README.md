@@ -39,7 +39,7 @@ Implement `scripts/build_windows.py` and an Inno Setup script with these steps:
    against the Python API from a clean working directory.
 4. Run the package's full tests on Windows and verify saved-step commands, CSV and
    .icescopy input, Unicode/spaced paths, explicit blanks, release, and error recovery.
-5. Add a Windows GitHub Actions build that retains the tested installer as an artifact.
+5. Keep the tested installer for upload to the GitHub Release.
    Keep temporary files in a dedicated build directory; do not commit binaries.
 6. Include the exact source archive, package/Python licenses, dependency versions,
    architecture and commit identity, following `scripts/build_macos.py`.
@@ -50,14 +50,14 @@ Keep `--console` in the build. Icescopy should start it using QProcess with pipe
 without opening a separate terminal. Verify that behavior on Windows rather than
 changing the CLI into a windowed app, which would remove standard streams.
 
-Use the in-memory protocol in `ICESCOPY_HANDOFF.md`: upload counts/metadata once,
+Use the in-memory protocol in [the README](../../README.md#interactive-application-clients): upload counts/metadata once,
 calculate into named references, request summary ranges and plot columns, save
 only when asked, and release superseded results. No Windows-specific estimator
 or temporary-CSV calculation loop should be introduced.
 
 ## Distribution
 
-Attach a signed `inptk-VERSION-windows-x64-setup.exe` and checksum to the same
+Attach a signed `inptk-VERSION-windows-x64-setup.exe` to the same
 GitHub Release as the Mac packages. Use Windows code signing when credentials are
 available, and test the downloaded installer on a clean PC. Keep unsigned builds
 explicitly marked as test installers; do not claim signing or SmartScreen behavior

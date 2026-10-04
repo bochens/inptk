@@ -3,11 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from inptk import _engine as ufolaf
+from inptk import _engine as engine
 
 
-def _first_freeze_near_threshold_counts() -> ufolaf.CountsTable:
-    return ufolaf.CountsTable(
+def _first_freeze_near_threshold_counts() -> engine.CountsTable:
+    return engine.CountsTable(
         sample_id=["sample-1"] * 6,
         temperature_C=[0.0, -6.9, -7.024, -7.14, -7.676, -8.008],
         n_total=[32, 32, 32, 32, 32, 32],
@@ -15,8 +15,8 @@ def _first_freeze_near_threshold_counts() -> ufolaf.CountsTable:
     )
 
 
-def _cool_then_warm_counts() -> ufolaf.CountsTable:
-    return ufolaf.CountsTable(
+def _cool_then_warm_counts() -> engine.CountsTable:
+    return engine.CountsTable(
         sample_id=["sample-1"] * 5,
         temperature_C=[20.0, -10.0, -25.0, -10.0, -5.0],
         n_total=[32, 32, 32, 32, 32],
@@ -26,7 +26,7 @@ def _cool_then_warm_counts() -> ufolaf.CountsTable:
 
 
 def test_window_max_count_includes_first_frozen_rounded_row() -> None:
-    fraction = ufolaf.fraction_frozen(
+    fraction = engine.fraction_frozen(
         _first_freeze_near_threshold_counts(),
         method="window_max_count",
         step_C=0.5,
@@ -46,7 +46,7 @@ def test_window_max_count_includes_first_frozen_rounded_row() -> None:
 
 
 def test_window_max_count_does_not_change_max_threshold_behavior() -> None:
-    max_fraction = ufolaf.fraction_frozen(
+    max_fraction = engine.fraction_frozen(
         _first_freeze_near_threshold_counts(),
         method="max",
         step_C=0.5,
@@ -58,7 +58,7 @@ def test_window_max_count_does_not_change_max_threshold_behavior() -> None:
 
 
 def test_fraction_defaults_to_cooling_only_before_threshold_reduction() -> None:
-    fraction = ufolaf.fraction_frozen(
+    fraction = engine.fraction_frozen(
         _cool_then_warm_counts(),
         method="latest",
         step_C=5.0,
@@ -74,7 +74,7 @@ def test_fraction_defaults_to_cooling_only_before_threshold_reduction() -> None:
 
 
 def test_fraction_can_include_warming_rows_for_legacy_debugging() -> None:
-    fraction = ufolaf.fraction_frozen(
+    fraction = engine.fraction_frozen(
         _cool_then_warm_counts(),
         method="latest",
         step_C=5.0,
@@ -89,7 +89,7 @@ def test_fraction_can_include_warming_rows_for_legacy_debugging() -> None:
 
 def test_window_max_count_rejects_nonpositive_step() -> None:
     with pytest.raises(ValueError, match="step_C must be positive"):
-        ufolaf.fraction_frozen(
+        engine.fraction_frozen(
             _first_freeze_near_threshold_counts(),
             method="window_max_count",
             step_C=0.0,

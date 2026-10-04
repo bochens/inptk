@@ -34,12 +34,10 @@ plot = [
 ]
 dev = [
     "ruff>=0.5.6",
-    "pre-commit>=3.8.0",
     "pytest>=8.3.2",
     "mypy>=1.11.0",
     "bandit>=1.7.9",
     "pandas-stubs>=2.2.2.240603",
-    "sphinx-autoapi>=3.2.1",
 ]
 
 [tool.setuptools.packages.find]

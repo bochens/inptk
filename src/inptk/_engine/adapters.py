@@ -229,7 +229,7 @@ def read_counts(
 
 
 def map_count_columns(df: pd.DataFrame, columns: CountColumnMap) -> pd.DataFrame:
-    """Map an arbitrary long count table into UFOLAF's canonical column names."""
+    """Map an arbitrary long count table into INP-toolkit's canonical column names."""
 
     unknown = sorted(set(columns) - _count_column_names())
     if unknown:
@@ -326,7 +326,7 @@ def metadata_frame(metadata_source: Any) -> pd.DataFrame:
 
 
 def tables_to_dataframe(table_or_tables: Any) -> pd.DataFrame:
-    """Return a display DataFrame from one UFOLAF table or a list of tables."""
+    """Return a display DataFrame from one INP-toolkit table or a list of tables."""
 
     if isinstance(table_or_tables, dict):
         frames = []
@@ -340,14 +340,14 @@ def tables_to_dataframe(table_or_tables: Any) -> pd.DataFrame:
         frames = [table.to_dataframe() for table in table_or_tables]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not hasattr(table_or_tables, "to_dataframe"):
-        raise TypeError("Expected a UFOLAF table or a list of UFOLAF tables")
+        raise TypeError("Expected an INP-toolkit table or a list of INP-toolkit tables")
     return table_or_tables.to_dataframe()
 
 
 def infer_dilution_groups(
     metadata_by_sample_id: dict[str, SampleMetadata],
 ) -> dict[str, str]:
-    """Infer parent sample IDs from Icescopy long names like CRG_M1_13."""
+    """Infer parent sample IDs from Icescopy long names like sample_A_10."""
 
     return {
         sample_id: _strip_trailing_numeric_token(
@@ -460,9 +460,9 @@ def _time_seconds(df: pd.DataFrame) -> np.ndarray:
 def _with_cycle_key(df: pd.DataFrame) -> pd.DataFrame:
     keyed = df.copy()
     if "cycle" not in keyed:
-        keyed["_ufolaf_cycle_key"] = "missing"
+        keyed["_inptk_cycle_key"] = "missing"
         return keyed
-    keyed["_ufolaf_cycle_key"] = [
+    keyed["_inptk_cycle_key"] = [
         _normalize_cycle_key(value) for value in keyed["cycle"].to_numpy(dtype=object)
     ]
     return keyed
@@ -497,13 +497,13 @@ def _normalize_cycle_key(value: Any) -> str:
 
 
 def _cycle_keys(df: pd.DataFrame) -> list[str]:
-    return [str(value) for value in pd.unique(df["_ufolaf_cycle_key"])]
+    return [str(value) for value in pd.unique(df["_inptk_cycle_key"])]
 
 
 def _iter_cycle_dataframes(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
     frames: list[tuple[str, pd.DataFrame]] = []
-    for cycle_key, cycle_df in df.groupby("_ufolaf_cycle_key", sort=False):
-        frames.append((str(cycle_key), cycle_df.drop(columns="_ufolaf_cycle_key").copy()))
+    for cycle_key, cycle_df in df.groupby("_inptk_cycle_key", sort=False):
+        frames.append((str(cycle_key), cycle_df.drop(columns="_inptk_cycle_key").copy()))
     return frames
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from inptk import _engine as ufolaf
+from inptk import _engine as engine
 
 
 def _fraction_table(
@@ -13,8 +13,8 @@ def _fraction_table(
     air_volume_L: float | None = None,
     filter_fraction_used: float | None = None,
     suspension_volume_mL: float | None = None,
-) -> ufolaf.TemperatureFrozenFractionTable:
-    metadata = ufolaf.SampleMetadata(
+) -> engine.TemperatureFrozenFractionTable:
+    metadata = engine.SampleMetadata(
         sample_id=sample_id,
         sample_name=sample_name,
         sample_long_name=sample_name,
@@ -25,7 +25,7 @@ def _fraction_table(
         filter_fraction_used=filter_fraction_used,
         suspension_volume_mL=suspension_volume_mL,
     )
-    return ufolaf.TemperatureFrozenFractionTable(
+    return engine.TemperatureFrozenFractionTable(
         sample_id=[sample_id],
         temperature_C=[-5.0],
         n_total=[10],
@@ -39,7 +39,7 @@ def test_stitch_reports_duplicate_source_sample_temperatures() -> None:
     second = _fraction_table("sample-1", sample_name="filterA_1")
 
     with pytest.raises(ValueError, match="same source sample and temperature"):
-        ufolaf.cumulative_spec_stitch([first, second], sample_group_by="sample_name")
+        engine.cumulative_spec_stitch([first, second], sample_group_by="sample_name")
 
 
 def test_stitch_reports_repeated_group_temperature_dilution() -> None:
@@ -47,7 +47,7 @@ def test_stitch_reports_repeated_group_temperature_dilution() -> None:
     second = _fraction_table("run-2", sample_name="filterA_1")
 
     with pytest.raises(ValueError, match="repeated temperature/dilution rows"):
-        ufolaf.cumulative_spec_stitch([first, second])
+        engine.cumulative_spec_stitch([first, second])
 
 
 def test_stitch_warns_on_mismatched_combined_metadata() -> None:
@@ -69,7 +69,7 @@ def test_stitch_warns_on_mismatched_combined_metadata() -> None:
     )
 
     with pytest.warns(UserWarning) as captured:
-        ufolaf.cumulative_spec_stitch([first, second])
+        engine.cumulative_spec_stitch([first, second])
 
     messages = [str(warning.message) for warning in captured]
     assert any("vol_air_filt" in message for message in messages)
@@ -82,4 +82,4 @@ def test_mle_warns_on_mismatched_combined_metadata() -> None:
     second = _fraction_table("run-2", sample_name="filterA_10", dilution=10, air_volume_L=900)
 
     with pytest.warns(UserWarning, match="mle group 'filterA'.*vol_air_filt"):
-        ufolaf.cumulative_spec_mle([first, second])
+        engine.cumulative_spec_mle([first, second])

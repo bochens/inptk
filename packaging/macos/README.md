@@ -42,9 +42,7 @@ uncertainty bounds with the Python API. It needs no installation or administrato
 permission. This tests the bundled runtime; it does not test Installer upgrades
 or Gatekeeper on a different Mac.
 
-The `Mac installer` GitHub Actions workflow builds and checks both architectures.
-Its unsigned artifacts are for testing; an Actions artifact is not a published
-release. You can also run that workflow manually for a chosen commit or tag.
+Run the build above on each target architecture.
 
 ## Public release
 
@@ -70,7 +68,7 @@ For each public version:
 2. Build, sign and notarize both architecture packages from that tag.
 3. Test installation and upgrade on clean Macs, then test Icescopy's executable
    chooser, JSON session and save/export with the installed command.
-4. Attach the two `.pkg` files and checksums to the matching GitHub Release, with
+4. Attach the two `.pkg` files to the matching GitHub Release, with
    supported macOS versions and the executable path prominently stated.
 5. Publish the wheel and source distribution for Python users when PyPI publishing
    is configured. Build these with `python -m build`; never ask normal Mac users

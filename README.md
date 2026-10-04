@@ -67,12 +67,6 @@ normal scientific cost. EOF ends the process. Use `capabilities` for discovery.
 Repeated count states reuse their point estimates and confidence limits. Range
 reports retain every original observation, even when the calculation uses a grid;
 report construction and temperature selection avoid repeated table conversions.
-To measure processing time on generated counts, run
-`python examples/benchmark_processing.py --rows 6000 --repeat 3`.
-It reports separate times for range suggestions, Average and MLE, with a combined
-curve and two individual curves on a 0.5 °C grid. Add `--native` to also time
-Average at every original observation, or `--wells 96` for more freezing events.
-The benchmark writes no files and excludes CLI transport and file I/O.
 
 ## Install
 
@@ -90,15 +84,10 @@ python -m pip install -e ".[dev]"
 inptk --help
 ```
 
-The distribution, Python import, and command are named `inptk`. There is no
-`ufolaf` compatibility package. Historical workflows remain in Git history.
-Start with `examples/standard_workflow.py` for a small synthetic example.
-The [Icescopy-to-air-concentration notebook](notebook/icescopy_freeze_count_to_air_inp_demo.ipynb)
-shows the current API step by step on the M1 dataset, including explicit sample
-mapping, input checks, temperature ranges, concentration estimation, and air
-normalization. It requires Jupyter, the `plot` extra, and the local source data at the
-paths configured near the top. Its dataset-specific settings are documented there;
-external result export is off by default.
+Start with the [tutorial notebook](notebook/tutorial.ipynb). It uses small synthetic
+counts to show sample and blank inputs, concentration calculation, plotting, and
+the same workflow one step at a time. No external dataset is needed. Install
+Jupyter and the `plot` extra to run it.
 
 ## Preview observations before calculating concentrations
 
@@ -201,7 +190,7 @@ reference.source    # file path, SHA-256, and original header
 
 The reader preserves the supplied results without recalculation. It does not
 assign samples or blanks or automatically apply reference metadata to an
-experiment. Both example notebooks use package readers for CSV ingestion.
+experiment. Use `read_icescopy()` for Icescopy CSV exports or project files.
 
 ## Interactive application clients
 
@@ -211,10 +200,20 @@ application can upload native counts and metadata as JSON, calculate using
 intermediate CSV or result file is required. Files are written when explicitly
 saving or exporting. Terminal commands with file inputs remain available.
 
-See [the Icescopy handoff](ICESCOPY_HANDOFF.md#persistent-processing-for-interactive-clients)
-for the JSON request format, reference ownership and client integration steps.
-`examples/benchmark_client.py` measures the complete in-memory exchange, including
-JSON transport; `examples/benchmark_processing.py` measures calculation alone.
+Send one JSON request per line to standard input; read one response per line
+from standard output. For example, after starting `inptk serve`:
+
+```json
+{"id":1,"import":{"out":"@input","counts":[{"measurement_id":"A","cycle_id":"1","temperature_C":-10,"n_total":32,"n_frozen":4}],"metadata":[{"measurement_id":"A","sample_id":"A","dilution":1,"droplet_volume_uL":50}]}}
+{"id":2,"args":["analyze","@input","--format","saved","--out","@result"]}
+{"id":3,"args":["table","@result","--table","cumulative","--columns","temperature_C","concentration","lower_error","upper_error","--no-history"]}
+{"id":4,"release":["@result","@input"]}
+```
+
+The response echoes `id` so a client can match it to the request. References such
+as `@input` belong to this process and disappear when it exits. Release results
+when they are no longer needed. Use `inptk capabilities` to discover commands and
+settings supported by the installed version.
 
 ## Work one step at a time
 
@@ -832,13 +831,12 @@ Per-input volume rows such as `# well_volume_uL,50,100` are read in the same
 input order as `# sample_name,...`; sample and blank volumes may differ. When
 the CSV contains raw counts, explicitly supply `read_icescopy(..., water_blank_map=...)`
 before calculating blank-corrected concentrations. A label such as "water blank"
-does not automatically enable correction. See the executed
-[raw CSV blank comparison](notebook/icescopy_raw_blank_comparison.ipynb) for a
-0.5 °C experimental fit with correction on and off.
+does not automatically enable correction. The [tutorial](notebook/tutorial.ipynb)
+shows explicit blank assignment.
 
 Partially missing cycle labels are rejected rather than merged into a single
 cycle. Zero-total observations are also rejected: exclude unusable observations
-explicitly and retain the exclusion record, as demonstrated in the notebook.
+explicitly and retain the exclusion record.
 
 An external application can invoke:
 
@@ -848,10 +846,9 @@ inptk analyze freeze_count_timeseries.csv --format icescopy \
 ```
 
 The application supplies input files and reads the saved analysis or exported
-CSV. No Icescopy GUI plugin is installed by this package. Connecting the
-Icescopy interface is a separate integration task. The
-[Icescopy handoff](ICESCOPY_HANDOFF.md) defines the executable contract, settings
-placement, plots, and remaining integration work.
+CSV. No Icescopy GUI plugin is installed by this package. For interactive use,
+keep a process open as described under
+[Interactive application clients](#interactive-application-clients).
 
 ### Calling the CLI from an interactive application
 
@@ -890,7 +887,7 @@ Nonfinite numbers use the same `{"$nonfinite":"inf"}` encoding as saved files.
 `--sample-map`, `--water-blank-map`, `--temperature-ranges` and
 `--curves` accept a JSON object directly or a JSON file. Pass them as
 individual arguments; do not construct a shell command from GUI text. See
-[ICESCOPY_HANDOFF.md](ICESCOPY_HANDOFF.md) for the process and plotting contract.
+[Interactive application clients](#interactive-application-clients) for in-memory requests.
 
 ## Results and scientific methods
 
@@ -1097,7 +1094,7 @@ infinite concentrations into missing values.
 
 ## Origin and licence
 
-INP-toolkit is the successor to UFOLAF, an unofficial fork of OLAF (OpenSource
+INP-toolkit builds on OLAF (OpenSource
 Library for Automating Freezing data acquisition from Ice Nucleation
 Spectrometer). It is independently maintained and is not affiliated with or
 endorsed by the original OLAF authors. Original documentation is available at

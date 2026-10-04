@@ -363,7 +363,7 @@ def _counts_to_temperature_frozen_fraction_one(
         raise ValueError(
             f"Multiple cycles found in one calculation input. Process each separately: {available}"
         )
-    selected_df = df.drop(columns="_ufolaf_cycle_key")
+    selected_df = df.drop(columns="_inptk_cycle_key")
     if cooling_only:
         selected_df = _cooling_phase_counts_dataframe(selected_df)
     return _counts_dataframe_to_temperature_frozen_fraction(
@@ -696,9 +696,9 @@ def _valid_counts_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def _with_cycle_key(df: pd.DataFrame) -> pd.DataFrame:
     keyed = df.copy()
     if "cycle" not in keyed:
-        keyed["_ufolaf_cycle_key"] = "missing"
+        keyed["_inptk_cycle_key"] = "missing"
         return keyed
-    keyed["_ufolaf_cycle_key"] = [
+    keyed["_inptk_cycle_key"] = [
         _normalize_cycle_key(value) for value in keyed["cycle"].to_numpy(dtype=object)
     ]
     return keyed
@@ -733,13 +733,13 @@ def _normalize_cycle_key(value: Any) -> str:
 
 
 def _cycle_keys(df: pd.DataFrame) -> list[str]:
-    return [str(value) for value in pd.unique(df["_ufolaf_cycle_key"])]
+    return [str(value) for value in pd.unique(df["_inptk_cycle_key"])]
 
 
 def _iter_cycle_dataframes(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
     frames: list[tuple[str, pd.DataFrame]] = []
-    for cycle_key, cycle_df in df.groupby("_ufolaf_cycle_key", sort=False):
-        frames.append((str(cycle_key), cycle_df.drop(columns="_ufolaf_cycle_key").copy()))
+    for cycle_key, cycle_df in df.groupby("_inptk_cycle_key", sort=False):
+        frames.append((str(cycle_key), cycle_df.drop(columns="_inptk_cycle_key").copy()))
     return frames
 
 
@@ -1860,7 +1860,7 @@ def _raise_on_duplicate_stitch_source_temperatures(
         )
         raise ValueError(
             f"Stitch input contains repeated {name} rows for the same source sample "
-            f"and temperature: {examples}. UFOLAF cannot stitch repeated experiments "
+            f"and temperature: {examples}. INP-toolkit cannot stitch repeated experiments "
             "with the same source sample_id because it cannot tell whether the rows "
             "are replicate measurements or conflicting records. Give each experiment "
             "a unique source sample_id and aggregate replicates before stitching, run "

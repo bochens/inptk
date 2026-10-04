@@ -5,11 +5,11 @@ import pandas as pd
 import pytest
 
 import inptk
-from inptk import _engine as ufolaf
+from inptk import _engine as engine
 
 
-def _air_metadata(sample_id: str) -> ufolaf.SampleMetadata:
-    return ufolaf.SampleMetadata(
+def _air_metadata(sample_id: str) -> engine.SampleMetadata:
+    return engine.SampleMetadata(
         sample_id=sample_id,
         sample_type="air",
         well_volume_uL=50,
@@ -20,8 +20,8 @@ def _air_metadata(sample_id: str) -> ufolaf.SampleMetadata:
     )
 
 
-def _cumulative_spectrum(sample_id: str, value: float) -> ufolaf.CumulativeNucleusSpectrumTable:
-    return ufolaf.CumulativeNucleusSpectrumTable(
+def _cumulative_spectrum(sample_id: str, value: float) -> engine.CumulativeNucleusSpectrumTable:
+    return engine.CumulativeNucleusSpectrumTable(
         sample_id=[sample_id],
         temperature_C=[-10.0],
         value=[value],
@@ -37,33 +37,33 @@ def test_filter_blank_correction_accepts_suspension_cumulative_spectra() -> None
     sample = _cumulative_spectrum("sample", 2.0)
     blank = _cumulative_spectrum("blank", 0.5)
 
-    corrected = ufolaf.subtract_filter_blank_spectrum(sample, blank, apply_qc=False)
+    corrected = engine.subtract_filter_blank_spectrum(sample, blank, apply_qc=False)
 
-    assert isinstance(corrected, ufolaf.CumulativeNucleusSpectrumTable)
+    assert isinstance(corrected, engine.CumulativeNucleusSpectrumTable)
     assert corrected.value_unit == "INP_per_mL_suspension"
     assert corrected.basis == "suspension"
     assert np.allclose(corrected.value, [1.5])
 
 
 def test_filter_blank_correction_rejects_air_normalized_spectra() -> None:
-    sample = ufolaf.normalize_spec(_cumulative_spectrum("sample", 2.0))
-    blank = ufolaf.normalize_spec(_cumulative_spectrum("blank", 0.5))
+    sample = engine.normalize_spec(_cumulative_spectrum("sample", 2.0))
+    blank = engine.normalize_spec(_cumulative_spectrum("blank", 0.5))
 
     with pytest.raises(ValueError, match="before sample-basis normalization"):
-        ufolaf.subtract_filter_blank_spectrum(sample, blank, apply_qc=False)
+        engine.subtract_filter_blank_spectrum(sample, blank, apply_qc=False)
 
 
 @pytest.mark.parametrize("private_type", ["cumulative", "normalized"])
 def test_private_blank_subtraction_crosses_asymmetric_error_directions(private_type):
-    cls = (ufolaf.CumulativeNucleusSpectrumTable if private_type == "cumulative"
-           else ufolaf.NormalizedInpSpectrumTable)
+    cls = (engine.CumulativeNucleusSpectrumTable if private_type == "cumulative"
+           else engine.NormalizedInpSpectrumTable)
     def spectrum(name, value, lower, upper):
         return cls(
             sample_id=[name], temperature_C=[-10], value=[value],
             value_unit="INP_per_mL_suspension", basis="suspension",
             lower_ci=[lower], upper_ci=[upper],
         )
-    result = ufolaf.subtract_filter_blank_spectrum(
+    result = engine.subtract_filter_blank_spectrum(
         spectrum("sample", 10., 1., 2.), spectrum("blank", 1., 3., 4.),
         apply_qc=False, extrapolate_missing_cold=False,
     ).to_dataframe()

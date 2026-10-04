@@ -74,7 +74,7 @@ def qc_blank_corrected_spectrum(
     threshold_percent: float = 10.0,
     error_signal: float = -9999.0,
 ) -> pd.DataFrame:
-    """Apply UFOLAF-style blank-corrected spectrum QC to a dataframe."""
+    """Apply INP-toolkit-style blank-corrected spectrum QC to a dataframe."""
 
     required = {"temperature_C", "value", "lower_ci", "upper_ci"}
     missing = required - set(corrected_df.columns)

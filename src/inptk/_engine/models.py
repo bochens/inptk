@@ -102,7 +102,7 @@ def _normalize_sample_type(value: Any) -> SampleType:
 
 @dataclass(frozen=True)
 class SampleMetadata:
-    """Icescopy freeze-count metadata plus UFOLAF calculation inputs."""
+    """Icescopy freeze-count metadata plus INP-toolkit calculation inputs."""
 
     format_name: str = ""
     file_version: str = ""
@@ -191,7 +191,7 @@ MetadataLike = SampleMetadata | dict[str, SampleMetadata] | None
 
 @dataclass(frozen=True)
 class ArtifactRef:
-    """Serializable reference to a UFOLAF table artifact."""
+    """Serializable reference to an INP-toolkit table artifact."""
 
     artifact_id: str
     table_type: str
@@ -209,7 +209,7 @@ class ArtifactRef:
 
 @dataclass(frozen=True)
 class ProcessingStep:
-    """One lightweight provenance step in a UFOLAF processing chain."""
+    """One lightweight provenance step in an INP-toolkit processing chain."""
 
     operation: str
     parameters: dict[str, Any] = field(default_factory=dict)
@@ -252,7 +252,7 @@ class ProcessingMetadata:
 
 
 def artifact_ref(table: Any, *, role: str = "predecessor") -> ArtifactRef:
-    """Return a stable lightweight reference for a UFOLAF table."""
+    """Return a stable lightweight reference for an INP-toolkit table."""
 
     processing = getattr(table, "processing_metadata", ProcessingMetadata())
     content_hash = _table_content_hash(table)
