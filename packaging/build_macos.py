@@ -122,7 +122,7 @@ def main():
             )
             + "\n"
         )
-        run(sys.executable, ROOT / "build_scripts/check_executable.py", bundle / "inptk", cwd=ROOT)
+        run(sys.executable, ROOT / "packaging/check_executable.py", bundle / "inptk", cwd=ROOT)
         identifier = "org.bochens.inptk"
         run(
             "/usr/bin/pkgbuild",
