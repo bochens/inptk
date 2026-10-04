@@ -345,11 +345,12 @@ def test_roundtrip_retains_discarded_final_values_and_uncertainty(tmp_path, poli
             "n_frozen": [0, 8, 4, 10, 12],
         }
     )
+    counts = pd.concat([counts, counts.assign(measurement_id="N")], ignore_index=True)
     source = inptk.read_counts(
         counts,
         metadata=[
             {
-                "measurement_id": "M",
+                "measurement_id": name,
                 "sample_id": "A",
                 "sample_type": "air",
                 "droplet_volume_uL": 50,
@@ -357,7 +358,7 @@ def test_roundtrip_retains_discarded_final_values_and_uncertainty(tmp_path, poli
                 "air_volume_L": 100,
                 "suspension_volume_mL": 5,
                 "filter_fraction_used": 1,
-            }
+            } for name in ("M", "N")
         ],
     )
     result = inptk.analyze_concentration(

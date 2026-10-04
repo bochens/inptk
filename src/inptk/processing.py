@@ -66,7 +66,8 @@ def cumulative_spectrum(
     Average retains separate temperature estimates. All original observation
     rows remain in this table by default; fitted values use their temperatures.
     With temperature_step_C, return selected grid states with original source
-    identities and observed temperatures recorded separately.
+    identities and observed temperatures recorded separately. Combined-analysis
+    temperature ranges do not exclude individual observations or estimates.
     """
     from .estimation import estimate_concentration
     from .water_blank import sample_rows

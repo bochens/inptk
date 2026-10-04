@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
+import numpy as np
+
 from .experiment import CurveResult, Experiment
 from .tables import CurveSpectrumTable, DifferentialSpectrumTable
 
@@ -42,6 +44,8 @@ def assemble_curves(
         if differential is not None and len(sources) == 1:
             intervals = differential[name]
             data = intervals.to_dataframe()
+            cumulative_data = cumulative.to_dataframe()
+            finite_points = cumulative_data.loc[np.isfinite(cumulative_data.concentration)]
             joint_fit = any(
                 entry.get("estimation_method") == "mle" for entry in cumulative.history
             )
@@ -52,14 +56,14 @@ def assemble_curves(
                 # A fitted temperature can represent several original images.
                 # Grid selection also has its own state IDs. Keep an interval
                 # when both endpoints survived, not by original image IDs.
-                temperatures = cumulative.to_dataframe().temperature_C
+                temperatures = finite_points.temperature_C
                 keep = data.temperature_bin_left_C.isin(temperatures) & (
                     data.temperature_bin_right_C.isin(temperatures)
                 )
             else:
                 observed = {
                     item["observation_id"]
-                    for value in cumulative.to_dataframe().source_observations
+                    for value in finite_points.source_observations
                     for item in json.loads(value)
                     if item["role"] == "sample"
                 }

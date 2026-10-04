@@ -60,8 +60,9 @@ def test_one_workflow_handles_single_overlap_and_gaps_with_explicit_sources(meth
         .to_dataframe()
         .query("selection_status == 'outside_temperature_range'")
     )
-    assert excluded.concentration.isna().all()
-    assert excluded.n_total.eq(32).all()
+    assert excluded.empty
+    assert per.concentration.notna().all()
+    assert per.n_total.eq(32).all()
     assert len(result.frozen_fraction) == 6
     fractions = inptk.frozen_fraction(source)
     stepwise = inptk.estimate_concentration(
@@ -109,7 +110,8 @@ def test_equal_exposure_contributor_change_does_not_create_a_false_decrease():
 
 
 def test_filter_blank_does_not_require_coverage_at_excluded_temperatures():
-    source = observations([("A", 32, [4, 8, 16], 1, 50)])
+    source = observations([("A", 32, [4, 8, 16], 1, 50),
+                           ("B", 32, [1, 3, 6], 2, 50)])
     blank = inptk.CumulativeSpectrumTable(
         pd.DataFrame(
             {
@@ -127,7 +129,8 @@ def test_filter_blank_does_not_require_coverage_at_excluded_temperatures():
     )
     result = inptk.analyze_concentration(
         source,
-        temperature_ranges_C={"A": {"min_C": -6, "max_C": -6}},
+        temperature_ranges_C={"A": {"min_C": -6, "max_C": -6},
+                              "B": {"min_C": -6, "max_C": -6}},
         blank_by_curve={"S/R/01": blank},
     )
     assert retained(result).to_dataframe().temperature_C.tolist() == [-6]

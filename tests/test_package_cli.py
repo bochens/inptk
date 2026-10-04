@@ -245,8 +245,10 @@ def test_cli_final_decrease_policy_matches_python_and_keeps_candidates(tmp_path,
             "n_frozen": [0, 8, 4, 10, 12],
         }
     )
+    counts = pd.concat([counts, counts.assign(measurement_id="002")], ignore_index=True)
     metadata = pd.DataFrame(
-        [{"measurement_id": "001", "sample_id": "007", "dilution": 1, "droplet_volume_uL": 50}]
+        [{"measurement_id": name, "sample_id": "007", "dilution": 1, "droplet_volume_uL": 50}
+         for name in ("001", "002")]
     )
     counts.to_csv(tmp_path / "counts.csv", index=False)
     metadata.to_csv(tmp_path / "metadata.csv", index=False)

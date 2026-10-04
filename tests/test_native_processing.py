@@ -112,17 +112,13 @@ def test_unsynchronized_blank_uses_latest_observed_state_and_records_its_actual_
     assert [row["observation_id"] for row in selected] == ["B:01:0", "B:01:1", "B:01:1"]
 
 
-def test_excluded_rows_keep_native_data_without_requiring_blank_coverage():
+def test_combined_exclusions_do_not_hide_missing_individual_blank_coverage():
     source = experiment([-5, -6, -7], [4, 8, 16], blanks=[2, 4], blank_temperatures=[-6, -7])
-    actual = cumulative_spectrum(
-        frozen_fraction(source), experiment=source,
-        temperature_ranges_C={"M": {"min_C": -7, "max_C": -6}},
-    ).to_dataframe()
-    assert len(actual) == 3 and np.isnan(actual.concentration.iloc[0])
-    assert actual.selection_status.tolist() == ["outside_temperature_range", "selected", "selected"]
-    assert actual.n_frozen.tolist() == [4, 8, 16]
-    assert actual.observation_id.tolist() == ["M:01:0", "M:01:1", "M:01:2"]
-    assert json.loads(actual.water_blank_observations.iloc[0]) == []
+    with pytest.raises(ValueError, match="no blank extrapolation"):
+        cumulative_spectrum(
+            frozen_fraction(source), experiment=source,
+            temperature_ranges_C={"M": {"min_C": -7, "max_C": -6}},
+        )
 
 
 def test_missing_blank_coverage_for_eligible_native_target_is_rejected():
@@ -161,16 +157,15 @@ def test_differential_uses_only_adjacent_cooling_transitions_without_bridging_ji
     assert omitted[1]["to_observation_id"] == "M:01:3"
 
 
-def test_differential_keeps_missing_adjacent_intervals_and_cycles_separate():
+def test_differential_ignores_combined_exclusions_and_keeps_cycles_separate():
     source = experiment([-5, -6, -7], [0, 4, 16], cycles=("01", "1"))
     result = differential_spectrum(
         frozen_fraction(source), experiment=source, temperature_ranges_C={"M": {"max_C": -6}}
     ).to_dataframe()
     assert len(result) == 4
     for _, cycle in result.groupby("cycle_id"):
-        assert np.isnan(cycle.concentration.iloc[0])
-        assert cycle.qc_flag.iloc[0] == 1
-        assert np.isfinite(cycle.concentration.iloc[1])
+        assert np.isfinite(cycle.concentration).all()
+        assert cycle.qc_flag.eq(0).all()
 
 
 @pytest.mark.parametrize(

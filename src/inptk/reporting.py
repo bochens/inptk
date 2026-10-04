@@ -11,7 +11,8 @@ def freezing_intervals(frame, groups, ranges):
     A new maximum frozen count marks an event; an initially positive count marks
     the first observed event. Repeated count states and recovery after a falling
     count do not create new events. Blank inputs never determine these limits.
-    Events outside explicitly selected input ranges do not extend the output.
+    Individual limits always use the original events. Combined limits use only
+    events inside the selected input ranges.
     """
     events = {}
     keys = ["measurement_id", "run_id", "cycle_id"]
@@ -20,20 +21,21 @@ def freezing_intervals(frame, groups, ranges):
             rows = rows.sort_values("time_s", kind="stable")
         previous = rows.n_frozen.cummax().shift(fill_value=0)
         temperatures = rows.loc[rows.n_frozen.gt(previous), "temperature_C"]
-        limits = ranges.get(identity[0], {})
-        if limits.get("min_C") is not None:
-            temperatures = temperatures[temperatures.ge(limits["min_C"])]
-        if limits.get("max_C") is not None:
-            temperatures = temperatures[temperatures.le(limits["max_C"])]
-        if not temperatures.empty:
-            events[identity] = (float(temperatures.min()), float(temperatures.max()))
+        events[identity] = temperatures
     intervals = {}
     for name, group in groups.items():
-        bounds = [
-            events[key]
-            for member in group["members"]
-            if (key := tuple(member[column] for column in keys)) in events
-        ]
+        bounds = []
+        for member in group["members"]:
+            identity = tuple(member[column] for column in keys)
+            temperatures = events[identity]
+            if len(group["members"]) > 1:
+                limits = ranges.get(member["measurement_id"], {})
+                if limits.get("min_C") is not None:
+                    temperatures = temperatures[temperatures.ge(limits["min_C"])]
+                if limits.get("max_C") is not None:
+                    temperatures = temperatures[temperatures.le(limits["max_C"])]
+            if not temperatures.empty:
+                bounds.append((float(temperatures.min()), float(temperatures.max())))
         intervals[name] = {
             "min_C": min(bound[0] for bound in bounds) if bounds else None,
             "max_C": max(bound[1] for bound in bounds) if bounds else None,

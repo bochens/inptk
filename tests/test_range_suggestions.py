@@ -45,7 +45,10 @@ def test_count_limits_are_inclusive_editable_and_preserve_observations():
     result = inptk.analyze_concentration(
         data, method="average", temperature_ranges_C=proposal.temperature_ranges_C
     )
-    assert result.to_dataframe().temperature_C.tolist() == [-6, -7, -8, -9]
+    # Suggestions only select contributions to combined curves, not this individual.
+    pd.testing.assert_frame_equal(
+        result.to_dataframe(), inptk.analyze_concentration(data, method="average").to_dataframe()
+    )
 
 
 def test_repeated_temperature_is_usable_only_when_every_observation_passes():
@@ -291,7 +294,10 @@ def test_total_count_change_is_checked_through_concentration():
     )
     proposal = inptk.suggest_temperature_ranges(data)
     assert proposal.temperature_ranges_C["A"] == {"min_C": -6, "max_C": -5}
-    assert unfiltered(data, proposal).concentration.diff().dropna().ge(0).all()
+    individual = unfiltered(data, proposal)
+    assert individual.concentration.iloc[-1] < individual.concentration.iloc[-2]
+    allowed = individual[individual.temperature_C.between(-6, -5)]
+    assert allowed.concentration.diff().dropna().ge(0).all()
 
 
 @pytest.mark.parametrize("method", ["latest", "max", "window"])
@@ -305,7 +311,9 @@ def test_monotone_limits_use_the_same_initial_grid_and_rule_as_analysis(method):
         grid["temperature_window_C"] = 0.5
     proposal = inptk.suggest_temperature_ranges(data, **grid)
     table = unfiltered(data, proposal, **grid)
-    finite = table.loc[np.isfinite(table.concentration)]
+    limits = proposal.temperature_ranges_C["001"]
+    allowed = table.temperature_C.between(limits["min_C"], limits["max_C"])
+    finite = table.loc[allowed & np.isfinite(table.concentration)]
     assert len(finite) >= 2
     assert finite.concentration.diff().dropna().ge(0).all()
     assert finite.contributor_count.eq(1).all()

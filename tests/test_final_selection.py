@@ -108,17 +108,18 @@ def test_unrecognized_policy_is_rejected():
 
 @pytest.mark.parametrize("policy", ["stop_at_decrease", "skip_decreases"])
 def test_workflow_selects_after_blank_subtraction_and_unit_conversion(policy):
+    counts = pd.DataFrame({
+        "measurement_id": "M", "run_id": "R", "cycle_id": "1",
+        "temperature_C": [-5, -6, -7, -8], "n_total": 32,
+        "n_frozen": [0, 8, 16, 24],
+    })
     source = inptk.read_counts(
-        pd.DataFrame({
-            "measurement_id": "M", "run_id": "R", "cycle_id": "1",
-            "temperature_C": [-5, -6, -7, -8], "n_total": 32,
-            "n_frozen": [0, 8, 16, 24],
-        }),
+        pd.concat([counts, counts.assign(measurement_id="N")], ignore_index=True),
         metadata=[{
-            "measurement_id": "M", "sample_id": "S", "run_id": "R",
+            "measurement_id": name, "sample_id": "S", "run_id": "R",
             "dilution": 1, "droplet_volume_uL": 50, "sample_type": "air",
             "air_volume_L": 100, "suspension_volume_mL": 10, "filter_fraction_used": 1,
-        }],
+        } for name in ("M", "N")],
     )
     blank = spectrum([0., 1., 12., 12.], sample="blank")
     result = inptk.analyze_concentration(

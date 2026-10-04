@@ -217,7 +217,7 @@ def test_steps_reuse_fractions_and_transforms_do_not_estimate(source, capsys, mo
     assert not store.exists("@twice")
 
 
-def test_estimate_keeps_decreases_and_differentiation_respects_exclusions(capsys):
+def test_individual_finalize_keeps_decreases_and_differentiation_uses_all_points(capsys):
     source = inptk.read_counts(
         pd.DataFrame(
             {
@@ -257,10 +257,10 @@ def test_estimate_keeps_decreases_and_differentiation_respects_exclusions(capsys
         store=store,
     )
     final = store.load("@skip")
-    assert len(final.tables["excluded"]) == 1
+    assert len(final.tables["excluded"]) == 0
     invoke(capsys, "differentiate", "@skip", "--out", "@diff", store=store)
     diff = store.load("@diff").tables["differential"].to_dataframe()
-    assert len(diff) == 2  # Never bridge the excluded -7 C state.
+    assert len(diff) == 4  # Every adjacent individual state remains available.
     invoke(
         capsys,
         "finalize",
@@ -271,7 +271,7 @@ def test_estimate_keeps_decreases_and_differentiation_respects_exclusions(capsys
         "@stop",
         store=store,
     )
-    assert len(store.load("@stop").tables["cumulative"]) == 2
+    assert len(store.load("@stop").tables["cumulative"]) == 5
     pd.testing.assert_frame_equal(
         table.to_dataframe(), store.load("@estimated").tables["cumulative"].to_dataframe()
     )

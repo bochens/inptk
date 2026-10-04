@@ -228,6 +228,7 @@ def test_excluded_temperatures_do_not_require_missing_blank_observations(method)
     original = make_experiment(
         {
             "sample": ("sample", 50, 1, [8, 16], 32),
+            "diluted": ("sample", 50, 2, [4, 8], 32),
             "blank": ("blank", 50, 1, [1, 2], 10),
         },
         temperatures=(-5, -6),
@@ -240,18 +241,17 @@ def test_excluded_temperatures_do_not_require_missing_blank_observations(method)
         samples=original.samples,
         water_blank_map=original.water_blank_map,
     )
-    ranges = {"sample": {"min_C": -5}}
+    ranges = {"sample": {"min_C": -5}, "diluted": {"min_C": -5}}
     actual = inptk.analyze_concentration(source, method=method, temperature_ranges_C=ranges)
     fractions = inptk.frozen_fraction(source)
     stepwise = inptk.estimate_concentration(
         fractions, experiment=source, method=method, temperature_ranges_C=ranges
     )
     pd.testing.assert_frame_equal(stepwise.to_dataframe(), fit_estimates(actual).to_dataframe())
-    missing = input_spectra(actual).to_dataframe().set_index("temperature_C").loc[-6]
-    assert missing.n_frozen == 16
-    assert missing.n_total == 32
-    assert missing.selection_status == "outside_temperature_range"
-    assert np.isnan(missing.concentration)
+    # A combined exclusion does not waive blank coverage for individual estimates.
+    with pytest.raises(ValueError, match="no blank extrapolation"):
+        inptk.cumulative_spectrum(fractions, experiment=source, method=method,
+                                  temperature_ranges_C=ranges)
     assert (
         fit_estimates(actual).to_dataframe().set_index("temperature_C").loc[-6].contributor_count
         == 0

@@ -169,13 +169,17 @@ from its first through its last freezing event. A new maximum frozen count marks
 an event; an initially positive count marks the first observed event. Repeated
 count states do not extend the interval. For a combined curve, the interval spans
 the freezing events of its selected inputs and cycles. Blank events do not extend
-it, and events outside an input's selected temperature range do not extend it.
+it. Input exclusions apply only to combined curves. Individual curves use their
+original first and last freezing events and ignore combined temperature ranges.
+Events outside the selected ranges do not extend a combined curve's interval.
 
 `analyze_concentration()` and the `finalize_spectrum()` step omit concentration
 points outside this interval. Fitting still uses the eligible observations
 outside it, which can constrain the fit and its uncertainty. Zero concentrations
 inside the interval remain valid, including zeros from blank correction. No
-observed sample events means no reported concentration points.
+observed sample events means no reported concentration points. Individual curves
+retain every calculated point inside their interval, including flagged values
+at saturation; combined decrease-selection rules do not trim them.
 
 CSV export keeps only existing analysis temperatures inside this interval,
 including when exporting an unfinalized estimate. It does not add off-grid event
@@ -431,12 +435,12 @@ the incomplete proposals first. Individual valid proposals remain visible in `in
 
 ### Apply ranges and interpret uncertainty
 
-The same `temperature_ranges_C` keyword is accepted by `cumulative_spectrum`,
-`estimate_concentration`, and `differential_spectrum`. Individual concentration rows
-outside a range retain their count columns but have missing concentration/error
-values and `selection_status="outside_temperature_range"`. The frozen-fraction
-table remains complete. Missing blank coverage outside a sample's selected range
-does not block analysis; eligible temperatures still require blank coverage.
+Apply `temperature_ranges_C` to combined curves in `estimate_concentration` or
+`analyze_concentration`. It controls which inputs contribute to each combined
+point. Individual curves and the `cumulative_spectrum` and `differential_spectrum`
+steps ignore these combination ranges and keep their input observations.
+The frozen-fraction table remains complete. Every calculated sample temperature
+still requires coverage from its assigned blanks when correction is enabled.
 
 The count model assumes independent physical droplet sets across measurements.
 MLE requires a fixed total and nondecreasing first-freezing counts within each
@@ -490,7 +494,9 @@ uncertainty. Their intervals are conditional on the supplied adjusted counts.
 ### Select the final concentration curve
 
 After concentration estimation, any requested blank subtraction, and unit conversion,
-`decrease_policy` selects concentration rows independently for each output curve.
+`decrease_policy` selects concentration rows independently for each combined curve.
+Individual curves keep every calculated point between their original first and last
+freezing events; these decrease rules do not remove individual values.
 It follows observation order and compares each finite concentration with the last
 retained value. Native observations use chronological `time_s` with stable ties,
 or retained input order when time is absent. Curves requiring alignment use their
@@ -509,7 +515,7 @@ margin of `1e-9`, with zero absolute margin, to avoid treating solver roundoff a
 a decrease. Outside this tiny margin, a decrease triggers the rule. This is not
 a user setting or a smoothing window; values and error bounds stay unchanged.
 The numerical margin is recorded in selection history.
-Nonfinite values are excluded and do not establish a comparison value. Negative
+For combined curves, nonfinite values are excluded and do not establish a comparison value. Negative
 finite concentrations are not clipped; this selection rule alone does not
 establish that they are scientifically usable.
 
@@ -919,7 +925,8 @@ outputs belong to named curves; no combined droplet counts or fractions are inve
 | `curve.excluded` | `CurveSpectrumTable` | Excluded native points with selection reasons |
 | `curve.differential` | `DifferentialSpectrumTable` or `None` | Optional activity per degree for an individual curve |
 
-Curve tables record `contributing_measurement_ids`, `contributor_count`, and
+Curve tables record `curve_kind` (`individual` or `combined`),
+`contributing_measurement_ids`, `contributor_count`, and
 `selection_status` (`single`, `combined`, or `no_eligible_measurements`).
 `available_measurement_ids` lists measurements covering a target before ranges;
 `source_measurement_ids` lists the group's members. ID lists are JSON strings.

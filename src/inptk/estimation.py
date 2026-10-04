@@ -76,7 +76,9 @@ def estimate_concentration(
     bounds use observed limits. Both endpoints are retained without rounding.
     All calculated points are returned with reporting limits from the original
     sample freezing events. finalize_spectrum selects the reportable points;
-    these limits never remove observations from estimation.
+    these limits never remove observations from estimation. Input temperature
+    ranges apply only to curves combining several physical inputs. Individual
+    curves use the complete input trajectory, independently of those exclusions.
     """
     EstimationSettings(
         method=method,
@@ -105,6 +107,7 @@ def estimate_concentration(
     joint_fits = {}
     for curve_id, group in groups.items():
         members = group["members"]
+        individual = len(members) == 1
         ids = sorted(member["measurement_id"] for member in members)
         supports = {}
         for member in members:
@@ -120,7 +123,7 @@ def estimate_concentration(
             frame,
             members,
             water_blank_map=experiment.water_blank_map,
-            temperature_ranges_C=ranges,
+            temperature_ranges_C={} if individual else ranges,
             temperature_step_C=temperature_step_C,
             temperature_start_C=temperature_start_C,
             temperature_end_C=temperature_end_C,
@@ -152,6 +155,7 @@ def estimate_concentration(
             record = {
                 "sample_id": group["sample_id"],
                 "curve_id": curve_id,
+                "curve_kind": "individual" if individual else "combined",
                 "point_id": point.point_id,
                 "point_order": point.point_order,
                 "temperature_C": point.temperature_C,
@@ -228,6 +232,7 @@ def estimate_concentration(
         "curves": curve_specifications(groups),
         "curve_sources": groups,
         "temperature_ranges_C": ranges,
+        "temperature_range_scope": "combined_curves_only",
         "temperature_step_C": temperature_step_C,
         "temperature_start_C": temperature_start_C,
         "temperature_end_C": temperature_end_C,

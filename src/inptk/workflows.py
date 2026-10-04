@@ -139,7 +139,7 @@ def _final_candidates(
     *,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"],
 ) -> SpectrumT:
-    """Mark native point selection in observation order without changing values."""
+    """Trim reporting intervals; apply decrease selection only to combined curves."""
     validate_decrease_policy(decrease_policy)
     if not isinstance(spectrum, CumulativeSpectrumTable):
         raise TypeError("spectrum must be a cumulative spectrum table")
@@ -168,6 +168,8 @@ def _final_candidates(
             reporting = row.get("reporting_status", "within_freezing_interval")
             if reporting != "within_freezing_interval":
                 status = reporting
+            elif row.get("curve_kind") == "individual":
+                status = "kept"
             elif not np.isfinite(concentration):
                 status = "nonfinite"
             elif stopped and decrease_policy == "stop_at_decrease":
@@ -230,6 +232,7 @@ def _final_candidates(
                 "reporting_rule": "observed_sample_freezing_interval"
                 if "reporting_status" in data else "no_count_limits_provided",
                 "decrease_policy": decrease_policy,
+                "decrease_policy_scope": "combined_curves_only",
                 "comparison_order": "point_order, or supplied observation order",
                 "numerical_relative_tolerance": 1e-9,
                 "numerical_absolute_tolerance": 0.0,
@@ -245,12 +248,15 @@ def finalize_spectrum(
     *,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = DEFAULTS.decrease_policy,
 ) -> SpectrumT:
-    """Keep reportable, nondecreasing concentration points in observation order.
+    """Keep individual points in their freezing interval; select combined points.
 
     Estimates outside the observed sample freezing interval are omitted when
     the estimation step has recorded those limits. Input observations still
     constrain the fit. No temperature sorting, rounding, value adjustment or
-    uncertainty reduction is performed. Segment IDs retain gaps for plotting.
+    uncertainty reduction is performed. Individual curves keep every calculated
+    point within their original interval, including flagged nonfinite values.
+    Decrease selection applies only to combined curves. Segment IDs retain gaps
+    for plotting.
     """
     return _final_candidates(spectrum, decrease_policy=decrease_policy).select(used_in_final=True)
 

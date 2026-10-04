@@ -96,27 +96,32 @@ def test_repeated_cycles_require_selection_and_remain_separate():
     ],
 )
 def test_cumulative_contains_retained_points_and_excluded_explains_the_rest(policy, expected):
+    counts = pd.DataFrame({
+        "measurement_id": ["first"] * 4,
+        "temperature_C": [-5, -6, -7, -8],
+        "n_total": [10] * 4,
+        "n_frozen": [1, 4, 3, 6],
+    })
     data = inptk.read_counts(
-        pd.DataFrame(
-            {
-                "measurement_id": ["first"] * 4,
-                "temperature_C": [-5, -6, -7, -8],
-                "n_total": [10] * 4,
-                "n_frozen": [1, 4, 3, 6],
-            }
-        ),
+        pd.concat([counts, counts.assign(measurement_id="second")], ignore_index=True),
         metadata=[
-            {"measurement_id": "first", "sample_id": "A", "dilution": 1, "droplet_volume_uL": 50}
+            {"measurement_id": name, "sample_id": "A", "dilution": 1, "droplet_volume_uL": 50}
+            for name in ("first", "second")
         ],
     )
     result = inptk.analyze_concentration(
-        data, curves={"chosen": {"inputs": ["first"]}}, decrease_policy=policy, method="average"
+        data, curves={"chosen": {"inputs": ["first", "second"]},
+                      "individual": {"inputs": ["first"]}},
+        decrease_policy=policy, method="average"
     )
     curve = result.curves["chosen"]
     assert curve.cumulative.to_dataframe().temperature_C.tolist() == expected
     assert not curve.excluded.to_dataframe().used_in_final.any()
     assert curve.excluded.to_dataframe().final_selection_status.iloc[0] == "decrease"
-    assert len(curve.cumulative) + len(curve.excluded) == len(data.counts)
+    assert len(curve.cumulative) + len(curve.excluded) == len(counts)
+    assert result.curves["individual"].cumulative.to_dataframe().temperature_C.tolist() == [
+        -5, -6, -7, -8]
+    assert result.curves["individual"].excluded.to_dataframe().empty
     assert not hasattr(result, "final") and not hasattr(result, "per_dilution")
 
 

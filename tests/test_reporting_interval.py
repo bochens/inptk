@@ -111,7 +111,7 @@ def test_ranges_and_count_recovery_do_not_create_new_freezing_events():
     groups = {"curve": {"members": [{"measurement_id": "A", "run_id": "R", "cycle_id": "1"}]}}
     assert freezing_intervals(frame, groups, {}) == {"curve": {"min_C": -9, "max_C": -6}}
     assert freezing_intervals(frame, groups, {"A": {"min_C": -8, "max_C": None}}) == {
-        "curve": {"min_C": -6, "max_C": -6}}
+        "curve": {"min_C": -9, "max_C": -6}}
 
 
 def test_step_finalization_and_csv_export_share_reporting_limits(tmp_path, capsys):
@@ -129,3 +129,64 @@ def test_step_finalization_and_csv_export_share_reporting_limits(tmp_path, capsy
     assert main(["finalize", str(tmp_path / "estimated"), "--out", str(tmp_path / "final")]) == 0
     restored = inptk.load(tmp_path / "final")
     pd.testing.assert_frame_equal(restored.tables["cumulative"].to_dataframe(), expected)
+
+
+@pytest.mark.parametrize("method", ["average", "mle"])
+def test_combination_exclusions_leave_individual_grid_curves_unchanged(method):
+    temperatures = [-4, -5, -6, -7, -8, -9, -10]
+    source = experiment([
+        ("A", "1", temperatures, [0, 1, 2, 4, 6, 6, 6]),
+        ("B", "1", temperatures, [0, 0, 1, 2, 3, 4, 4]),
+        ("water", "1", temperatures, [0, 0, 0, 1, 1, 2, 2]),
+    ], water_blank_map={"A": ["water"], "B": ["water"]})
+    curves = {"A": {"inputs": ["A"], "cycle": "1"},
+              "B": {"inputs": ["B"], "cycle": "1"},
+              "combined": {"inputs": ["A", "B"], "cycle": "1"}}
+    settings = {"method": method, "curves": curves, "temperature_step_C": .5,
+                "temperature_start_C": -4, "temperature_end_C": -10}
+    baseline = inptk.analyze_concentration(source, **settings)
+    ranges = {"A": {"min_C": -7, "max_C": -7},
+              "B": {"min_C": -8, "max_C": -8}}
+    restricted = inptk.analyze_concentration(source, temperature_ranges_C=ranges, **settings)
+    for name, expected in [("A", list(np.arange(-5, -8.5, -.5))),
+                           ("B", list(np.arange(-6, -9.5, -.5)))]:
+        individual = restricted.curves[name].cumulative.to_dataframe()
+        assert individual.temperature_C.tolist() == expected
+        pd.testing.assert_frame_equal(individual, baseline.curves[name].cumulative.to_dataframe())
+    combined_final = restricted.curves["combined"].cumulative.to_dataframe()
+    assert not combined_final.empty
+    assert combined_final.temperature_C.isin([-7, -8]).all()
+    combined = all_points(restricted).to_dataframe().query("curve_id == 'combined'")
+    assert combined.loc[combined.temperature_C.eq(-5), "contributor_count"].item() == 0
+    fractions = inptk.frozen_fraction(source)
+    step_settings = {key: value for key, value in settings.items() if key != "curves"}
+    original_individuals = inptk.cumulative_spectrum(fractions, experiment=source, **step_settings)
+    restricted_individuals = inptk.cumulative_spectrum(
+        fractions, experiment=source, temperature_ranges_C=ranges, **step_settings)
+    pd.testing.assert_frame_equal(original_individuals.to_dataframe(),
+                                  restricted_individuals.to_dataframe())
+
+
+@pytest.mark.parametrize("policy", ["skip_decreases", "stop_at_decrease"])
+def test_individual_reporting_does_not_remove_grid_estimates_or_saturation(policy):
+    source = experiment([("A", "1", [-5, -6, -7, -8, -9], [0, 2, 1, 4, 10])])
+    result = inptk.analyze_concentration(source, method="average", temperature_step_C=1,
+                                        decrease_policy=policy)
+    individual = result.to_dataframe()
+    assert individual.temperature_C.tolist() == [-6, -7, -8, -9]
+    assert individual.concentration.iloc[1] < individual.concentration.iloc[0]
+    assert np.isinf(individual.concentration.iloc[-1])
+    assert individual.final_selection_status.eq("kept").all()
+
+
+def test_cli_individual_estimate_ignores_combined_exclusions(tmp_path):
+    source = experiment([("A", "1", [-5, -6, -7, -8, -9], [0, 2, 3, 4, 4])])
+    source.save(tmp_path / "source")
+    ranges = {"A": {"min_C": -7, "max_C": -7}}
+    assert main(["estimate", str(tmp_path / "source"), "--format", "saved", "--individual",
+                 "--temperature-step", "0.5", "--temperature-ranges", json.dumps(ranges),
+                 "--out", str(tmp_path / "estimated")]) == 0
+    assert main(["finalize", str(tmp_path / "estimated"),
+                 "--out", str(tmp_path / "final")]) == 0
+    frame = inptk.load(tmp_path / "final").tables["cumulative"].to_dataframe()
+    assert frame.temperature_C.tolist() == [-6, -6.5, -7, -7.5, -8]
