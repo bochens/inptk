@@ -161,23 +161,7 @@ inptk analyze counts.csv --metadata measurements.csv \
 inptk export-csv analysis.inptk --out final_concentrations.csv
 ```
 
-For the CSU CSV layout, the repository helper formats an already saved final
-sampled-air spectrum:
-
-```bash
-python tools/csu_inp_processing.py analysis.inptk --out csu.csv \
-  --sample A --curve A --allow-missing-header
-```
-
-Selection flags can be omitted when only one sample/curve remains. Use
-`--header KEY=VALUE` for CSU header fields; `--allow-missing-header` leaves
-unavailable descriptive fields blank. Recorded normalization metadata cannot be
-changed. The exporter preserves the saved final points and errors without
-recalculating concentrations. Its columns are `degC`, `dilution`, `INPS_L`,
-`lower_CI`, and `upper_CI`; the two CI columns contain **error widths**, not
-interval endpoints. Points combining several dilutions leave `dilution` blank.
-Outputs must be new paths outside the saved analysis folder. Both CSV exporters
-export the saved analysis temperatures without another grid selection.
+CSV export uses the saved analysis temperatures without another grid selection.
 
 To read an existing CSU/OLAF reference for comparison:
 
