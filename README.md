@@ -74,8 +74,11 @@ For Mac users linking INP-toolkit to Icescopy, the standalone installer uses
 `/Applications/INP-toolkit/inptk`. The runtime is bundled; Python is not required.
 See [Mac packaging and release instructions](packaging/macos/README.md).
 Unsigned test installers are not yet a signed public release.
-A [Windows release handoff](packaging/windows/README.md) describes the equivalent
-`inptk.exe` installer to build and test on a PC.
+For Windows x64, use the unsigned test installer or portable ZIP from
+[GitHub Releases](https://github.com/bochens/inptk/releases). The runtime is bundled.
+Select `%LOCALAPPDATA%\Programs\INP-toolkit\inptk.exe` in Icescopy after installation,
+or select `inptk.exe` from the fully extracted portable folder. Keep `_internal`
+beside the executable. See [Windows packaging and verification](packaging/windows/README.md).
 
 For Python development from this repository:
 

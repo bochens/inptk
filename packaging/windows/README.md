@@ -1,9 +1,14 @@
-# Windows release handoff for the PC
+# Windows command-line distribution
 
-Build a standalone Windows command and installer from the merged INP-toolkit
-source. The Mac package has been built locally; Windows has not been built or
-tested in this work. Keep the Python calculations, CLI commands, JSON protocol
-and saved format identical on both systems.
+`packaging/build_windows.py` builds a standalone Windows x64 command, portable ZIP
+and per-user Inno Setup installer. Python calculations, CLI commands, JSON
+protocol 2 and saved format 4 remain identical to the Mac/Python distribution.
+
+The executable is a command-line program used directly by Icescopy. No separate
+Python or Conda installation is needed to run the bundle. After installation,
+select `%LOCALAPPDATA%\Programs\INP-toolkit\inptk.exe` in Icescopy. For a portable
+copy, extract the entire ZIP and select its `inptk.exe`. Keep `_internal` beside
+the executable; copying only the launcher will not work.
 
 ## Intended installation
 
@@ -21,30 +26,58 @@ Inno Setup supports installation without administrator rights through
 Use a stable installer AppId and destination for upgrades. Stop/restart Icescopy's
 active toolkit process before replacing DLLs; do not silently kill unrelated processes.
 
-## Build and verify
+## Build
 
-Use a clean native Windows Python 3.13 environment. The pinned build dependencies
-are currently in `packaging/macos/requirements.txt`; they are not Mac-only Python
-packages. Move common dependencies/entrypoint to a shared packaging location if
-useful when implementing the Windows builder, updating the Mac references too.
-The existing `packaging/macos/entrypoint.py` calls `inptk.cli.main` without GUI code.
+Use native Windows x64 Python 3.13 and Inno Setup 6.3 or newer. The Windows builder
+reuses the pinned requirements and CLI entrypoint from `packaging/macos`; these
+Python packages are cross-platform. In PowerShell, from the repository root:
 
-Implement `packaging/build_windows.py` and an Inno Setup script with these steps:
+```powershell
+py -3.13 -m venv tmp/windows-build-env
+tmp/windows-build-env/Scripts/python.exe -m pip install -r packaging/macos/requirements.txt . pytest
+tmp/windows-build-env/Scripts/python.exe -m pytest -q
+tmp/windows-build-env/Scripts/python.exe packaging/build_windows.py --unsigned
+tmp/windows-build-env/Scripts/python.exe packaging/check_windows_installer.py 'dist/windows/*-setup.exe'
+```
 
-1. Install the pinned build requirements and the current checkout into the build environment.
-2. Build the CLI with `--onedir --console --name inptk`, using the shared entrypoint.
-   Do not use `--windowed`: the Icescopy connection needs stdin and stdout.
-3. Run `python packaging/check_executable.py PATH\TO\inptk.exe` against the frozen
-   executable. This checks direct JSON upload, Average, joint MLE and uncertainty
-   against the Python API from a clean working directory.
-4. Run the package's full tests on Windows and verify saved-step commands, CSV and
-   .icescopy input, Unicode/spaced paths, explicit blanks, release, and error recovery.
-5. Keep the tested installer for upload to the GitHub Release.
-   Keep temporary files in a dedicated build directory; do not commit binaries.
-6. Include the exact source archive, package/Python licenses, dependency versions,
-   architecture and commit identity, following `packaging/build_macos.py`.
-7. Test installation, update and uninstall on a machine without Python, including
-   Icescopy's executable chooser and a long-lived `serve` session.
+Use `--iscc 'PATH\TO\ISCC.exe'` if the compiler is outside its standard installation
+directory. Commit source changes before building. For a local test of uncommitted
+packaging work, add `--allow-dirty`; the builder includes the exact source snapshot
+and file hashes and labels `source_dirty` in `BUILD.json`. It builds from that
+snapshot, preserving the relationship between the executable and shipped source.
+Only unsigned test artifacts are currently supported by this builder.
+
+Outputs in `dist/windows` are:
+
+- `inptk-VERSION-windows-x64-unsigned/inptk.exe` plus `_internal`, source and licenses.
+- `inptk-VERSION-windows-x64-unsigned.zip` for portable use.
+- `inptk-VERSION-windows-x64-unsigned-setup.exe` for per-user installation.
+- SHA-256 checksums for the ZIP and installer.
+
+Build scratch stays in `tmp/windows-package` and is cleaned on completion.
+Existing output artifacts are not overwritten. `SOURCE.tar.gz` contains the
+exact source; `BUILD.json` records the commit, source hashes, architecture, Python
+and installed dependency versions. Binaries remain ignored by Git.
+
+## Verification
+
+The builder runs `packaging/check_executable.py` before producing the installer.
+It compares Average, joint MLE and uncertainty with the Python API, then checks
+saved stages, explicit blanks, native CSV and `.icescopy` archives, spaced/Unicode
+paths, JSON import, named curves, release and recovery after failed requests.
+It runs outside the source tree with Python/Conda environment variables removed
+and, on Windows, only Windows system files on PATH.
+
+`check_windows_installer.py` installs into an isolated temporary directory, runs
+those executable checks, verifies an update is blocked while `serve` is active,
+then updates and uninstalls. Analysis files outside the installation survive.
+It refuses to run if this user already has an INP-toolkit installation, avoiding
+replacement of an existing installation's registration. Use a separate Windows
+test account in that case. Keep the full-suite and installer-check logs with the release validation records.
+
+These local checks do not establish downloaded-installer behavior on a separate
+clean PC, Windows signing/SmartScreen, or Icescopy's executable chooser. Complete
+those release checks before public distribution.
 
 Keep `--console` in the build. Icescopy should start it using QProcess with pipes
 without opening a separate terminal. Verify that behavior on Windows rather than
@@ -57,7 +90,7 @@ or temporary-CSV calculation loop should be introduced.
 
 ## Distribution
 
-Attach a signed `inptk-VERSION-windows-x64-setup.exe` to the same
+Attach a signed `inptk-VERSION-windows-x64-setup.exe` and checksum to the same
 GitHub Release as the Mac packages. Use Windows code signing when credentials are
 available, and test the downloaded installer on a clean PC. Keep unsigned builds
 explicitly marked as test installers; do not claim signing or SmartScreen behavior

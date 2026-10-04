@@ -368,7 +368,7 @@ def test_cli_cross_run_groups_preserve_own_blanks_and_export_saved_tables(
         assert exported.returncode == 0, exported.stderr
         assert destination.read_text() == quantity_for_check(
             result, table_name
-        ).to_dataframe().to_csv(index=False)
+        ).to_dataframe().to_csv(index=False, lineterminator="\n")
 
 
 def test_cli_rejects_group_member_removed_by_cycle_filter(tmp_path, cross_run_source):
