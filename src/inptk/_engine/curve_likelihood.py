@@ -19,6 +19,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import brentq, minimize  # type: ignore[import-untyped]
 
+from ..temperature_selection import temperature_grid
+
 
 @dataclass(frozen=True)
 class FreezingSeries:
@@ -166,12 +168,12 @@ class CurveLikelihood:
         else:
             if isinstance(fit_step_C, bool) or not np.isfinite(fit_step_C) or fit_step_C <= 0:
                 raise ValueError("fit_step_C must be finite and positive")
-            # Trial model: cumulative sample and blank concentrations are linear
-            # between regular knots. Evaluate this model at the ORIGINAL temperatures
-            # of observed freezing states; never round or interpolate counts.
-            lower = int(np.floor(observed[-1] / fit_step_C))
-            upper = int(np.ceil(observed[0] / fit_step_C))
-            self.temperatures = np.arange(upper, lower - 1, -1, dtype=float) * fit_step_C
+            # Anchor at the exact warm endpoint and retain the exact cold endpoint.
+            # The last interval can be shorter. Sample and blank curves are linear
+            # between these points; observed counts are never interpolated.
+            self.temperatures = np.asarray(
+                temperature_grid(observed, step_C=fit_step_C), dtype=float
+            )
         self.backgrounds = sorted({s.background for s in series if s.background})
         size = len(self.temperatures)
         width = size * (1 + len(self.backgrounds))

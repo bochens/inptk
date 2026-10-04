@@ -163,10 +163,11 @@ def test_joint_likelihood_is_invariant_to_duplicate_observation_rows_with_new_id
                                rtol=2e-6, atol=2e-6)
 
 
-def test_fitting_grid_preserves_off_grid_events_and_matches_direct_probability_fit():
+@pytest.mark.parametrize("offset", [0, .07])
+def test_fitting_grid_preserves_off_grid_events_and_matches_direct_probability_fit(offset):
     from scipy.optimize import minimize, minimize_scalar
 
-    temperatures = [-5, -5.4, -6]
+    temperatures = np.array([-5, -5.4, -6]) + offset
     inputs = [stream([1, 4, 7], 10, volume=1000, temperatures=temperatures),
               stream([0, 1, 3], 10, volume=1000, dilution=4, temperatures=temperatures)]
     original = [s.frozen.copy() for s in inputs]
@@ -187,6 +188,7 @@ def test_fitting_grid_preserves_off_grid_events_and_matches_direct_probability_f
                            options={"xatol": 1e-11, "fatol": 1e-11})
     assert independent.success
     model = CurveLikelihood(inputs, temperatures, fit_step_C=1)
+    np.testing.assert_array_equal(model.temperatures, temperatures[[0, -1]])
     values = [model.estimate(t, 1.96**2 / 2) for t in temperatures]
     np.testing.assert_allclose([values[0][0], values[-1][0]], independent.x, rtol=3e-6)
     center, lower, upper = values[1]
@@ -198,7 +200,7 @@ def test_fitting_grid_preserves_off_grid_events_and_matches_direct_probability_f
         )
         assert profile.fun - independent.fun == pytest.approx(1.96**2 / 2, rel=3e-5)
     # Fractional temperatures inside the same grid cell have distinct bounds.
-    other = model.estimate(-5.2, 1.96**2 / 2)
+    other = model.estimate(-5.2 + offset, 1.96**2 / 2)
     assert other[0] < center
     assert other[0] + other[2] < center + upper
     for s, counts in zip(inputs, original, strict=True):
@@ -217,6 +219,21 @@ def test_grid_at_observed_temperatures_retains_joint_blank_estimates_and_bounds(
                                    native.estimate(temperature, 1.96**2 / 2), rtol=3e-6)
 
 
+@pytest.mark.parametrize("step", [.5, .1])
+def test_fit_spacing_preserves_shifted_endpoints_and_short_last_interval(step):
+    temperatures = np.array([-5.23, -5.73, -6.23, -6.4])
+    inputs = [FreezingSeries(temperatures, np.array([1, 5, 9, 12]), 20, .05, .05, "run"),
+              FreezingSeries(temperatures, np.array([0, 1, 2, 4]), 20, 0., .05, "run")]
+    native = CurveLikelihood(inputs, temperatures)
+    fitted = CurveLikelihood(inputs, temperatures, fit_step_C=step)
+    assert fitted.temperatures[0] == temperatures[0]
+    assert fitted.temperatures[-1] == temperatures[-1]
+    assert 0 < fitted.temperatures[-2] - fitted.temperatures[-1] < step
+    for temperature in temperatures:
+        np.testing.assert_allclose(fitted.estimate(temperature, 1.96**2 / 2),
+                                   native.estimate(temperature, 1.96**2 / 2), rtol=3e-6)
+
+
 @pytest.mark.parametrize("step", [0, -1, True, np.nan, np.inf])
 def test_invalid_fitting_grid_steps_are_rejected(step):
     with pytest.raises(ValueError, match="finite and positive"):
@@ -230,6 +247,38 @@ def test_fitting_resolution_does_not_choose_output_temperatures():
     gridded = inptk.analyze_concentration(data, temperature_step_C=.5, fit_step_C=.5)
     assert gridded.to_dataframe().temperature_C.tolist() == [-5, -5.5, -6, -6.5, -7]
     pd.testing.assert_frame_equal(result.counts.to_dataframe(), gridded.counts.to_dataframe())
+
+
+@pytest.mark.parametrize("step", [.5, .1])
+@pytest.mark.parametrize("bounds, expected", [
+    ({}, (-4.93, -6.93)),
+    ({"temperature_start_C": -4.73, "temperature_end_C": -7.03}, (-4.73, -7.03)),
+    ({"temperature_start_C": -6.13, "temperature_end_C": -6.13}, (-6.13, -6.13)),
+])
+def test_public_fit_preserves_exact_grid_bounds(monkeypatch, step, bounds, expected):
+    models = []
+
+    class InspectLikelihood(CurveLikelihood):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            models.append(self)
+
+    monkeypatch.setattr("inptk.curve_fit.CurveLikelihood", InspectLikelihood)
+    data = experiment([("A", 20, [1, 5, 12], 1, 50), ("W", 10, [0, 1, 3], 1, 100)],
+                      blanks={"A": ["W"]})
+    original = data.counts.to_dataframe()
+    original["temperature_C"] += .07
+    data = inptk.Experiment(inptk.CountsTable(original), data.samples, data.measurements,
+                            water_blank_map=data.water_blank_map)
+    result = inptk.analyze_concentration(
+        data, temperature_step_C=.5, fit_step_C=step, **bounds,
+    )
+    assert models
+    for model in models:
+        assert model.temperatures[0] == expected[0]
+        assert model.temperatures[-1] == expected[1]
+    pd.testing.assert_frame_equal(result.counts.to_dataframe(), original)
+    assert result.to_dataframe().temperature_C.between(expected[1], expected[0]).all()
 
 
 def test_public_grid_fit_matches_complete_likelihood_and_profile_at_output_targets(tmp_path):

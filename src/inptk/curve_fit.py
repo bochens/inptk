@@ -90,9 +90,12 @@ def fit_curve(points, experiment, *, z, fit_step_C=None):
                 "observation_ids": selected.observation_id.tolist(),
                 "fit_temperatures_C": selected.temperature_C.tolist(),
             })
-    # The engine includes both original targets and each stream's own observed
-    # transitions, so blank intervals are not snapped onto sample temperatures.
-    model = CurveLikelihood(streams, targets, fit_step_C=fit_step_C)
+    # Preserve the complete count-grid range, including endpoints with no data.
+    # Estimates still use only targets with sample observations. Native analyses
+    # also retain each stream's observed transitions, including blank temperatures.
+    fit_targets = ([p.temperature_C for p in points]
+                   if "fit_temperature_C" in sample_pieces[0] else targets)
+    model = CurveLikelihood(streams, fit_targets, fit_step_C=fit_step_C)
     estimates = {temperature: model.estimate(temperature, z**2 / 2) for temperature in targets}
     details = {
         "physical_droplets": model.physical_droplets,
