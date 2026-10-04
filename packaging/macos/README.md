@@ -14,8 +14,8 @@ executable. Restart an existing toolkit process after installing an update.
 The installer does not change shell settings or replace another `inptk` on PATH.
 Terminal users can invoke the full path or add `/Applications/INP-toolkit` to PATH.
 
-Build separate packages for Apple Silicon (`arm64`) and Intel (`x86_64`). The
-installer requires macOS 14 or later and the matching architecture. Test on the
+Publish one Mac package for Apple Silicon (`arm64`). The
+installer requires macOS 14 or later on an M-series Mac. Test on the
 oldest supported system before advertising that minimum as verified; building
 on a newer Mac alone does not verify older systems. The package contains the
 Python runtime, NumPy, pandas and SciPy. The Python package remains separately
@@ -42,7 +42,7 @@ uncertainty bounds with the Python API. It needs no installation or administrato
 permission. This tests the bundled runtime; it does not test Installer upgrades
 or Gatekeeper on a different Mac.
 
-Run the build above on each target architecture.
+Run the build above on an Apple Silicon Mac with native ARM Python.
 
 ## Public release
 
@@ -65,10 +65,10 @@ For each public version:
 
 1. Merge reviewed changes and verify the version in `pyproject.toml` and
    `src/inptk/__init__.py`. Tag that exact commit, for example `v0.4.0`.
-2. Build, sign and notarize both architecture packages from that tag.
+2. Build, sign and notarize the Apple Silicon package from that tag.
 3. Test installation and upgrade on clean Macs, then test Icescopy's executable
    chooser, JSON session and save/export with the installed command.
-4. Attach the two `.pkg` files to the matching GitHub Release, with
+4. Attach the `.pkg` file to the matching GitHub Release, with
    supported macOS versions and the executable path prominently stated.
 5. Publish the wheel and source distribution for Python users when PyPI publishing
    is configured. Build these with `python -m build`; never ask normal Mac users
