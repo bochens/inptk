@@ -165,7 +165,7 @@ For the CSU CSV layout, the repository helper formats an already saved final
 sampled-air spectrum:
 
 ```bash
-python scripts/csu_inp_processing.py analysis.inptk --out csu.csv \
+python tools/csu_inp_processing.py analysis.inptk --out csu.csv \
   --sample A --curve A --allow-missing-header
 ```
 

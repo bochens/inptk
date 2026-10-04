@@ -13,7 +13,7 @@ from analysis_checks import retained
 
 import inptk
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "csu_inp_processing.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "tools" / "csu_inp_processing.py"
 
 
 @pytest.fixture

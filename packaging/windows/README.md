@@ -29,12 +29,12 @@ packages. Move common dependencies/entrypoint to a shared packaging location if
 useful when implementing the Windows builder, updating the Mac references too.
 The existing `packaging/macos/entrypoint.py` calls `inptk.cli.main` without GUI code.
 
-Implement `scripts/build_windows.py` and an Inno Setup script with these steps:
+Implement `build_scripts/build_windows.py` and an Inno Setup script with these steps:
 
 1. Install the pinned build requirements and the current checkout into the build environment.
 2. Build the CLI with `--onedir --console --name inptk`, using the shared entrypoint.
    Do not use `--windowed`: the Icescopy connection needs stdin and stdout.
-3. Run `python scripts/check_executable.py PATH\TO\inptk.exe` against the frozen
+3. Run `python build_scripts/check_executable.py PATH\TO\inptk.exe` against the frozen
    executable. This checks direct JSON upload, Average, joint MLE and uncertainty
    against the Python API from a clean working directory.
 4. Run the package's full tests on Windows and verify saved-step commands, CSV and
@@ -42,7 +42,7 @@ Implement `scripts/build_windows.py` and an Inno Setup script with these steps:
 5. Keep the tested installer for upload to the GitHub Release.
    Keep temporary files in a dedicated build directory; do not commit binaries.
 6. Include the exact source archive, package/Python licenses, dependency versions,
-   architecture and commit identity, following `scripts/build_macos.py`.
+   architecture and commit identity, following `build_scripts/build_macos.py`.
 7. Test installation, update and uninstall on a machine without Python, including
    Icescopy's executable chooser and a long-lived `serve` session.
 

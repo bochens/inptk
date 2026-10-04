@@ -28,7 +28,7 @@ Use a clean Python 3.13 environment to avoid bundling unrelated research tools:
 ```bash
 python3.13 -m venv /tmp/inptk-build
 /tmp/inptk-build/bin/python -m pip install -r packaging/macos/requirements.txt .
-/tmp/inptk-build/bin/python scripts/build_macos.py --unsigned
+/tmp/inptk-build/bin/python build_scripts/build_macos.py --unsigned
 ```
 
 Commit tracked changes before building. The builder includes the exact Git source
@@ -50,7 +50,7 @@ Use a Mac with Developer ID Application and Developer ID Installer identities
 in its keychain, plus a configured `notarytool` keychain profile:
 
 ```bash
-/tmp/inptk-build/bin/python scripts/build_macos.py \
+/tmp/inptk-build/bin/python build_scripts/build_macos.py \
   --application-identity 'Developer ID Application: YOUR NAME (TEAMID)' \
   --installer-identity 'Developer ID Installer: YOUR NAME (TEAMID)' \
   --notary-profile inptk-release
