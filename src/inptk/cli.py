@@ -469,6 +469,13 @@ def _capabilities(parser):
             },
             "release": {"id": "request ID", "release": ["@result"]},
         },
+        temperature_range_selection={
+            "domain": "calculation targets; select counts before applying input limits",
+            "boundaries": "inclusive; original source rows unchanged",
+            "full_range": "selecting the full useful span preserves MLE reporting constraints",
+            "resolved_settings": "resolved_temperature_ranges_C, keyed by curve then input",
+            "selected_counts": "source_observations in cumulative and excluded curve tables",
+        },
         concentration_reporting={
             "rule": "observed_sample_freezing_interval",
             "boundaries": "inclusive; original sample events; blanks do not extend the interval",

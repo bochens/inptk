@@ -9,7 +9,9 @@ from numbers import Integral
 import numpy as np
 import pandas as pd
 
+from .alignment import align_observations
 from .blank_controls import BlankControls
+from .temperature_selection import CountSelector
 from .experiment import Experiment
 from .methods import CombinationMember, resolve_curves
 from .processing import frozen_fraction
@@ -21,8 +23,11 @@ from .water_blank import analysis_experiment, estimate_point
 
 @dataclass
 class RangeSuggestions:
-    """Named range proposals and original observations with selection reasons.
+    """Named range proposals and calculation states with selection reasons.
 
+    With a grid, observations retain the selected source IDs and measured
+    temperatures in source_observation_id and observed_temperature_C. Without a
+    grid, original observation identities and temperatures remain unchanged.
     Inspect ``inputs`` even when an input has no usable range. The
     ``temperature_ranges_C`` property refuses incomplete proposals, so an
     omitted input cannot accidentally regain its unrestricted temperature range.
@@ -76,6 +81,27 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
             group["members"], key=lambda m: experiment.measurements[m["measurement_id"]].dilution
         )
         bases, rows_by_name = {}, {}
+        grid_rows = {}
+        if grid["temperature_step_C"] is not None:
+            # Count thresholds and suggested boundaries use the same selected
+            # target states as calculation, on the complete group's grid.
+            points = align_observations(
+                frame, members, water_blank_map={}, temperature_ranges_C={}, **grid,
+            )
+            records = {m["measurement_id"]: [] for m in members}
+            for point in points:
+                for sample in point.sample_records:
+                    row = dict(sample)
+                    row["observed_temperature_C"] = row["temperature_C"]
+                    row["source_observation_id"] = row["observation_id"]
+                    row["temperature_C"] = point.temperature_C
+                    row["observation_id"] = f"{point.point_id}:{row['observation_id']}"
+                    records[row["measurement_id"]].append(row)
+            grid_rows = {
+                name: pd.DataFrame(rows, columns=[*frame.columns, "observed_temperature_C",
+                                                  "source_observation_id"])
+                for name, rows in records.items()
+            }
         first_dilution = min(experiment.measurements[m["measurement_id"]].dilution for m in members)
         for member in members:
             name = member["measurement_id"]
@@ -90,6 +116,8 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
                 & frame.run_id.eq(member["run_id"])
                 & frame.cycle_id.eq(member["cycle_id"])
             ].copy()
+            if grid_rows:
+                rows = grid_rows[name].copy()
             first = experiment.measurements[name].dilution == first_dilution
             rows["too_few_frozen"] = (rows.n_frozen < min_frozen) & (not first)
             rows["too_few_liquid"] = rows.n_total - rows.n_frozen < min_unfrozen
@@ -108,6 +136,12 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
                     rows["blank_coverage"] &= rows.temperature_C.between(
                         observed.temperature_C.min(), observed.temperature_C.max()
                     )
+                    if grid_rows and grid["temperature_method"] == "window":
+                        selector = CountSelector(observed)
+                        rows["blank_coverage"] &= np.array([
+                            selector.select(t, method="window", window_C=grid["temperature_window_C"])
+                            is not None for t in rows.temperature_C
+                        ], dtype=bool)
             rows["range_eligible"] = (
                 ~rows.too_few_frozen & ~rows.too_few_liquid & rows.blank_coverage
             )
@@ -116,7 +150,9 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
             )
             bases[name] = _eligible_blocks(rows)
             rows_by_name[name] = rows
-        planner = RangePlanner(frame, members, experiment, bases, grid, z, cache, control)
+        planner = RangePlanner(
+            frame, members, experiment, bases, grid, z, cache, control, rows_by_name
+        )
         chosen = planner.choose([m["measurement_id"] for m in members])
         previous_cold = None
         for member in members:
@@ -177,7 +213,9 @@ def suggest_temperature_ranges(
     values are changed and no final decrease filter is needed for these ranges.
     Count thresholds are editable heuristics, not confidence criteria. The first
     dilution retains its initial observations without a minimum frozen count.
-    Repeated temperatures must pass in every observation; cycles remain separate.
+    With a grid, count thresholds and proposed limits use selected grid states;
+    without a grid, repeated temperatures must pass in every observation. Cycles
+    remain separate.
     Intervals reaching zero are flagged, not excluded for that reason. Reported
     confidence intervals do not include the uncertainty of selecting these ranges.
     Set include_observations=False for limits and reasons without constructing the
@@ -287,7 +325,10 @@ def suggest_temperature_ranges(
                 # Observation IDs are unique within this selected measurement/cycle.
                 # Build the report in arrays instead of searching and assigning
                 # individual DataFrame cells for every original image.
-                positions = {observation: i for i, observation in enumerate(rows.observation_id)}
+                gridded = temperature_step_C is not None
+                positions = {value: i for i, value in enumerate(
+                    rows.temperature_C if gridded else rows.observation_id
+                )}
                 concentrations = np.full((len(rows), 3), np.nan)
                 statuses = rows.blank_status.to_numpy(copy=True)
                 blank_ids = rows.blank_observation_ids.to_numpy(copy=True)
@@ -295,12 +336,15 @@ def suggest_temperature_ranges(
                     frame,
                     [member],
                     temperature_ranges_C={name: limits},
+                    **({**grid, "temperature_start_C": plans[name][0].temperature_C.max(),
+                        "temperature_end_C": plans[name][0].temperature_C.min()}
+                       if gridded else {}),
                 )
                 for point in points:
                     if point.samples.empty:
                         continue
                     sample = point.sample_records[0]
-                    index = positions[sample["observation_id"]]
+                    index = positions[point.temperature_C if gridded else sample["observation_id"]]
                     key = point.count_key()
                     if key not in cache:
                         cache[key] = estimate_point(
@@ -371,7 +415,8 @@ def suggest_temperature_ranges(
         **grid,
         "first_dilution": "retain first frozen observations; at least one frozen sample well",
         "same_dilution": "nonoverlapping; curve input order breaks dilution ties",
-        "repeated_temperatures": "all observations must pass",
+        "repeated_temperatures": "all selected states must pass",
+        "range_domain": "calculation grid" if temperature_step_C is not None else "native targets",
         "blank_flags_change_ranges": False,
         "uncertainty": "log-transformed Wilson binomial bounds with approximate propagation; "
         "excludes range-selection uncertainty",

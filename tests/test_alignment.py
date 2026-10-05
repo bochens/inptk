@@ -130,14 +130,15 @@ def test_unsynchronized_blank_uses_its_actual_latest_warmer_row():
     assert points[-1].blanks.iloc[0].temperature_C == -5.8
 
 
-def test_excluded_source_observation_cannot_return_through_warmer_alignment():
+def test_target_range_keeps_the_same_warmer_source_observation():
     points = align(
         [stream("M", [-5, -7], run="R1"), stream("D", [-5, -6, -7], run="R2")],
         [member("M", "R1"), member("D", "R2")],
         ranges={"M": {"max_C": -6}},
     )
     assert points[1].temperature_C == -6
-    assert points[1].samples.measurement_id.tolist() == ["D"]
+    assert points[1].samples.measurement_id.tolist() == ["M", "D"]
+    assert points[1].samples.set_index("measurement_id").loc["M", "temperature_C"] == -5
     assert set(points[-1].samples.measurement_id) == {"M", "D"}
 
 
@@ -159,7 +160,7 @@ def test_sample_support_is_not_extrapolated_and_fully_excluded_targets_remain():
     ranges = {name: {"min_C": -6, "max_C": -6} for name in ("M", "D")}
     points = align(frames, members, ranges=ranges)
     assert [point.temperature_C for point in points] == [-4, -5, -6, -7, -8]
-    assert [len(point.samples) for point in points] == [0, 0, 1, 0, 0]
+    assert [len(point.samples) for point in points] == [0, 0, 2, 0, 0]
 
 
 def test_repeated_members_and_same_run_multiple_cycles_are_not_pooled():
@@ -183,10 +184,13 @@ def test_pairwise_blank_acquisition_survives_missing_rows_in_another_sample(name
         ranges={"A": {"max_C": -5.9}},
     )
     point = next(point for point in points if point.temperature_C == -6)
-    assert set(point.samples.time_s) == {1}
+    full = align(frames, [member(name) for name in names], blanks={"A": ["W"], "B": ["W"]})
+    original = next(p for p in full if p.temperature_C == -6)
+    pd.testing.assert_frame_equal(point.samples, original.samples)
+    pd.testing.assert_frame_equal(point.blanks, original.blanks)
+    assert set(point.samples.time_s) == {1, 2}
     assert len(point.blanks) == 1
-    assert point.blanks.iloc[0].observation_id == "W:1"
-    assert point.blanks.iloc[0].n_frozen == 1
+    assert point.blanks.iloc[0].observation_id == "W:2"
 
 
 @pytest.mark.parametrize("names", [("A", "B"), ("B", "A")])

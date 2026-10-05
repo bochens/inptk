@@ -114,7 +114,7 @@ class CountSelector:
 
 def grid_points(
     frame, members, *, water_blank_map, ranges, step_C, method, window_C, start_C=None, end_C=None,
-    sample_freezing_intervals_C=None,
+    sample_freezing_intervals_C=None, retain_full_range_constraints=False,
 ):
     """Select each sample and blank independently; never pool repeated counts.
 
@@ -123,6 +123,7 @@ def grid_points(
     Empty sample windows create gaps; missing required blank states are errors.
     """
     from .alignment import AlignedPoint, _average_sample_eligible, _in_range, _ordered_rows
+    from .reporting import resolve_sample_range
 
     keys = [(str(m["measurement_id"]), str(m["run_id"]), str(m["cycle_id"])) for m in members]
     blank_keys = {
@@ -136,24 +137,50 @@ def grid_points(
             frame.measurement_id.eq(measurement) & frame.run_id.eq(run) & frame.cycle_id.eq(cycle)
         ])
         limits = ranges.get(measurement, {}) if key not in blank_keys else {}
-        minimum, maximum = limits.get("min_C"), limits.get("max_C")
-        eligible = rows.loc[rows.temperature_C.between(
-            -np.inf if minimum is None else minimum,
-            np.inf if maximum is None else maximum,
-        )]
-        streams[key] = (rows, CountSelector(eligible), limits,
+        streams[key] = (rows, CountSelector(rows), limits,
                         (rows.temperature_C.min(), rows.temperature_C.max()))
 
-    def select(key, target):
-        rows, selector, limits, (cold, warm) = streams[key]
-        if rows.empty or not cold <= target <= warm or not _in_range(target, limits):
-            return None
-        return selector.select(target, method=method, window_C=window_C)
-
     temperatures = pd.concat([streams[key][0].temperature_C for key in keys])
+    targets = temperature_grid(temperatures, step_C=step_C, start_C=start_C, end_C=end_C)
+    selections, resolved, range_details = {}, {}, {}
+    for key, (rows, selector, limits, (cold, warm)) in streams.items():
+        # Select from the complete observed stream once. Limits only select
+        # target states; they cannot change which acquisition supplies a state.
+        choices = {t: selector.select(t, method=method, window_C=window_C)
+                   for t in targets if cold <= t <= warm}
+        if key not in blank_keys:
+            requested = limits
+            limits, details = resolve_sample_range(
+                rows, [t for t, row in choices.items() if row is not None], limits
+            )
+            if not retain_full_range_constraints:
+                limits = requested
+            range_details[key[0]] = {
+                "run_id": key[1], "cycle_id": key[2], **details, "calculation_limits_C": limits,
+            }
+        if any(value is not None for value in limits.values()):
+            # Validate the retained observation span without changing selection.
+            # Source rows just outside a target boundary may supply its counts.
+            source_ids = [row["observation_id"] for t, row in choices.items()
+                          if row is not None and _in_range(t, limits)]
+            covered = rows.temperature_C.between(
+                -np.inf if limits.get("min_C") is None else limits["min_C"],
+                np.inf if limits.get("max_C") is None else limits["max_C"],
+            ) | rows.observation_id.isin(source_ids)
+            observed = rows.loc[covered]
+            fixed = observed.n_total.nunique() <= 1
+            cumulative = not observed.n_frozen.diff().lt(0).any()
+            for t, row in choices.items():
+                if row is not None and _in_range(t, limits):
+                    row["source_total_is_fixed"] = fixed
+                    row["source_frozen_is_cumulative"] = cumulative
+        selections[key], resolved[key] = choices, limits
+
+    def select(key, target):
+        return selections[key].get(target) if _in_range(target, resolved[key]) else None
+
     empty = frame.iloc[:0].copy()
     points = []
-    targets = temperature_grid(temperatures, step_C=step_C, start_C=start_C, end_C=end_C)
     for order, target in enumerate(targets):
         samples, needed = [], set()
         for key in keys:
@@ -177,6 +204,6 @@ def grid_points(
             point_id=f"point:{order}", temperature_C=target,
             samples=pd.DataFrame(samples).reset_index(drop=True) if samples else empty.copy(),
             blanks=pd.DataFrame(blanks).reset_index(drop=True) if blanks else empty.copy(),
-            alignment=method, point_order=order,
+            alignment=method, point_order=order, range_details=range_details,
         ))
     return points

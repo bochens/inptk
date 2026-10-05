@@ -11,12 +11,12 @@ from .water_blank import estimate_point
 class RangePlanner:
     """Prefer the longest earlier interval; shorten it only to enable a handoff.
 
-    Every trial uses the same alignment and estimator as analysis. In particular,
-    changing a range can change a max/window selection, so trials are recalculated
-    rather than slicing an already calculated curve.
+    Every trial selects the same aligned count states as analysis. Limits choose
+    calculation targets; they never change the source acquisition at a target.
     """
 
-    def __init__(self, frame, members, experiment, bases, grid, z, estimates, blank_controls):
+    def __init__(self, frame, members, experiment, bases, grid, z, estimates, blank_controls,
+                 calculation_rows):
         self.frame = frame
         self.members = members
         self.experiment = experiment
@@ -24,6 +24,7 @@ class RangePlanner:
         self.z = z
         self.estimates = estimates
         self.blank_controls = blank_controls
+        self.calculation_rows = calculation_rows
         self.trials = {}
         self.outside = float(frame.temperature_C.max()) + 1
         self.freezing_intervals = freezing_intervals(
@@ -39,7 +40,11 @@ class RangePlanner:
                 cold = max(block["min_C"], bounds["min_C"])
                 warm = min(block["max_C"], bounds["max_C"])
                 if cold <= warm:
-                    self.bases[name].append({"min_C": cold, "max_C": warm})
+                    temperatures = calculation_rows[name].temperature_C
+                    available = temperatures[temperatures.between(cold, warm)]
+                    if not available.empty:
+                        self.bases[name].append({"min_C": float(available.min()),
+                                                 "max_C": float(available.max())})
 
     def points(self, ranges):
         disabled = {"min_C": self.outside, "max_C": self.outside}
@@ -84,13 +89,10 @@ class RangePlanner:
             cold = max(cold, cold_limit)
         if previous is not None:
             # Inclusive ranges must not meet at the same temperature. Use an
-            # actual source temperature below the previous cold boundary.
-            member = next(m for m in self.members if m["measurement_id"] == name)
-            candidates = self.frame.loc[
-                self.frame.measurement_id.eq(name)
-                & self.frame.run_id.eq(member["run_id"])
-                & self.frame.cycle_id.eq(member["cycle_id"])
-                & self.frame.temperature_C.lt(previous["limits"]["min_C"]), "temperature_C"
+            # actual calculation temperature below the previous cold boundary.
+            rows = self.calculation_rows[name]
+            candidates = rows.loc[
+                rows.temperature_C.lt(previous["limits"]["min_C"]), "temperature_C"
             ]
             if candidates.empty:
                 return None

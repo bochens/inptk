@@ -166,7 +166,12 @@ result = inptk.analyze_concentration(
 
 Manual limits use input names, for example
 `{"A": {"min_C": -15, "max_C": -10}}`. They apply to combined curves.
-MLE accepts manual ranges.
+MLE accepts manual ranges. Limits select calculation-grid points after count
+selection, so moving a limit does not change the source counts at retained points.
+Selecting an input's full useful grid span gives the same result as Full range;
+MLE retains observations outside the reported span as fitting constraints.
+Results expose full and selected spans in `settings["resolved_temperature_ranges_C"]`.
+Selected source counts are recorded in each curve's `source_observations` column.
 
 A grid selects counts before calculation. Omit `temperature_step_C` to retain native
 observations. Optional `temperature_start_C` and `temperature_end_C` use the observed

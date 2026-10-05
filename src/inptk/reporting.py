@@ -11,8 +11,9 @@ def freezing_intervals(frame, groups, ranges):
     A new maximum frozen count marks an event; an initially positive count marks
     the first observed event. Repeated count states and recovery after a falling
     count do not create new events. Blank inputs never determine these limits.
-    Individual limits always use the original events. Combined limits use only
-    events inside the selected input ranges.
+    Individual limits always use the original events. Combined limits intersect
+    each original event interval with the selected calculation range. A cutoff
+    never removes an event and thereby invents a different freezing interval.
     """
     events = {}
     keys = ["measurement_id", "run_id", "cycle_id"]
@@ -28,14 +29,17 @@ def freezing_intervals(frame, groups, ranges):
         for member in group["members"]:
             identity = tuple(member[column] for column in keys)
             temperatures = events[identity]
+            if temperatures.empty:
+                continue
+            cold, warm = float(temperatures.min()), float(temperatures.max())
             if len(group["members"]) > 1:
                 limits = ranges.get(member["measurement_id"], {})
                 if limits.get("min_C") is not None:
-                    temperatures = temperatures[temperatures.ge(limits["min_C"])]
+                    cold = max(cold, limits["min_C"])
                 if limits.get("max_C") is not None:
-                    temperatures = temperatures[temperatures.le(limits["max_C"])]
-            if not temperatures.empty:
-                bounds.append((float(temperatures.min()), float(temperatures.max())))
+                    warm = min(warm, limits["max_C"])
+            if cold <= warm:
+                bounds.append((cold, warm))
         intervals[name] = {
             "min_C": min(bound[0] for bound in bounds) if bounds else None,
             "max_C": max(bound[1] for bound in bounds) if bounds else None,
@@ -69,3 +73,29 @@ def reportable_spectrum(spectrum):
     if "reporting_status" not in spectrum.columns:
         return spectrum
     return spectrum.select(reporting_status="within_freezing_interval")
+
+
+def resolve_sample_range(rows, temperatures, limits):
+    """Resolve a use range on available calculation temperatures, after alignment.
+
+    The full useful span is the existing calculation points inside the original
+    first-to-last freezing interval. Selecting either full edge is no exclusion:
+    MLE retains its outside reporting observations as fitting constraints. A cut
+    inside that span restricts calculation targets, never the source count rows.
+    """
+    previous = rows.n_frozen.cummax().shift(fill_value=0)
+    events = rows.loc[rows.n_frozen.gt(previous), "temperature_C"]
+    values = np.asarray(temperatures, dtype=float)
+    useful = values[(values >= events.min()) & (values <= events.max())]
+    full = {"min_C": float(useful.min()), "max_C": float(useful.max())} if useful.size else None
+    selected = useful[(useful >= (-np.inf if limits.get("min_C") is None else limits["min_C"]))
+                      & (useful <= (np.inf if limits.get("max_C") is None else limits["max_C"]))]
+    extent = ({"min_C": float(selected.min()), "max_C": float(selected.max())}
+              if selected.size else None)
+    effective = dict(limits)
+    if full is not None:
+        if limits.get("min_C") is not None and limits["min_C"] <= full["min_C"]:
+            effective["min_C"] = None
+        if limits.get("max_C") is not None and limits["max_C"] >= full["max_C"]:
+            effective["max_C"] = None
+    return effective, {"full_range_C": full, "selected_range_C": extent}

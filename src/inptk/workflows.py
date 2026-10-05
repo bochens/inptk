@@ -356,6 +356,7 @@ def analyze_concentration(
         "estimation_method": method,
         "fit_step_C": fit_step_C,
         "temperature_ranges_C": combined.history[-1]["temperature_ranges_C"],
+        "resolved_temperature_ranges_C": combined.history[-1]["resolved_temperature_ranges_C"],
         "temperature_step_C": temperature_step_C,
         "temperature_start_C": temperature_start_C,
         "temperature_end_C": temperature_end_C,
