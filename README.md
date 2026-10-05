@@ -136,6 +136,21 @@ events. Values and uncertainty outside the interval are `NaN`. Average contribut
 must lie within each input's own interval and have positive frozen sample counts.
 A zero concentration produced by blank correction remains valid inside the interval.
 
+Water blanks in each run and cycle form one assigned control, retaining each
+well's volume. `water_blank_temperature_range_C={"min_C": -25, "max_C": -10}`
+restricts blank observations with one shared range. Sample limits are separate.
+With latest selection, colder targets can use the last retained blank observation;
+MLE uses the retained control history. Missing Average blank observations give
+`NaN`, rather than an assumed zero background.
+
+Set `water_blank_after_first_freeze=True` to fix background and its uncertainty
+at zero before that control's original first freeze. A control that never freezes
+has zero background throughout. This optional assumption is off by default.
+The onset is determined separately for each run and cycle, before grid selection
+or sample exclusions. Results retain the resolved control onset and limits.
+CLI equivalents are `--water-blank-after-first-freeze` and
+`--water-blank-temperature-range '{"min_C": -25, "max_C": -10}'`.
+
 ### Temperature ranges and grid
 
 Average can suggest nonoverlapping ranges that preserve a nonnegative, nondecreasing

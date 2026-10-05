@@ -96,6 +96,14 @@ def _analysis_input_arguments(parser):
         action="store_true",
         help="Analyze sample counts without water correction while retaining raw blank context",
     )
+    parser.add_argument(
+        "--water-blank-after-first-freeze", action="store_true",
+        help="Fix each run/cycle's combined blank background at zero before its first freeze",
+    )
+    parser.add_argument(
+        "--water-blank-temperature-range",
+        help="JSON object or file with min_C/max_C observation limits shared by all water blanks",
+    )
     parser.add_argument("--run-id", default="1")
     parser.add_argument(
         "--sample",
@@ -275,6 +283,10 @@ def _estimation_settings(args):
         "curves": _json_object(args.curves, "--curves"),
         "z": args.z,
         "water_blank_correction": not args.no_water_blank_correction,
+        "water_blank_after_first_freeze": args.water_blank_after_first_freeze,
+        "water_blank_temperature_range_C": _json_object(
+            args.water_blank_temperature_range, "--water-blank-temperature-range"
+        ),
     }
 
 
@@ -876,6 +888,10 @@ def main(argv=None, *, store=None, parser=None):
                 temperature_method=args.temperature_method,
                 temperature_window_C=args.temperature_window_C,
                 water_blank_correction=not args.no_water_blank_correction,
+                water_blank_after_first_freeze=args.water_blank_after_first_freeze,
+                water_blank_temperature_range_C=_json_object(
+                    args.water_blank_temperature_range, "--water-blank-temperature-range"
+                ),
             )
             complete = all(item["range_C"] is not None for item in proposal.inputs.values())
             _print_json(

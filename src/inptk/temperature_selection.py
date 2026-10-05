@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from functools import cached_property
 from numbers import Real
 
 import numpy as np
@@ -54,6 +55,63 @@ def temperature_grid(temperatures, *, step_C, start_C=None, end_C=None):
     return targets
 
 
+class CountSelector:
+    """Index a stream once, selecting actual rows without interpolating counts."""
+
+    def __init__(self, rows):
+        self.rows = rows.copy()
+        self.rows["source_total_is_fixed"] = rows.n_total.nunique() <= 1
+        self.rows["source_frozen_is_cumulative"] = not rows.n_frozen.diff().lt(0).any()
+        self.temperatures = rows.temperature_C.to_numpy()
+        self.frozen = rows.n_frozen.to_numpy()
+        self.fractions = (rows.n_frozen / rows.n_total).to_numpy()
+
+    def select(self, target, *, method="latest", window_C=None, gridded=True):
+        if method == "window":
+            selected = (self.temperatures >= target - window_C / 2) & (
+                self.temperatures <= target + window_C / 2
+            )
+        else:
+            selected = self.temperatures >= target
+        positions = np.flatnonzero(selected)
+        if not positions.size:
+            return None
+        if method in ("max", "window"):
+            scores = self.fractions[positions] if method == "max" else self.frozen[positions]
+            positions = positions[scores == scores.max()]
+        chosen = self.rows.iloc[positions[-1]].copy()  # latest observation wins ties
+        if gridded:
+            chosen["fit_temperature_C"] = target
+            chosen["temperature_selection"] = method
+        return chosen
+
+    @cached_property
+    def acquisitions(self):
+        """Index exact images/timestamps only when native alignment needs them."""
+        indices = {}
+        for name in ("picture_id", "time_s"):
+            if name not in self.rows:
+                continue
+            lookup = {}
+            for position, (temperature, value) in enumerate(zip(self.temperatures, self.rows[name])):
+                if pd.isna(value) or value == "":
+                    continue
+                key = (temperature, value)
+                lookup[key] = -1 if key in lookup else position
+            indices[name] = lookup
+        return indices
+
+    def matching_acquisition(self, sample):
+        for name, lookup in self.acquisitions.items():
+            value = sample.get(name)
+            if pd.isna(value) or value == "":
+                continue
+            position = lookup.get((sample["temperature_C"], value), -1)
+            if position >= 0:
+                return position
+        return None
+
+
 def grid_points(
     frame, members, *, water_blank_map, ranges, step_C, method, window_C, start_C=None, end_C=None,
     sample_freezing_intervals_C=None,
@@ -82,38 +140,15 @@ def grid_points(
         eligible = rows.loc[rows.temperature_C.between(
             -np.inf if minimum is None else minimum,
             np.inf if maximum is None else maximum,
-        )].copy()
-        # Preserve these checks across selection: max must not conceal invalid
-        # raw trajectories from the whole-curve likelihood.
-        eligible["source_total_is_fixed"] = eligible.n_total.nunique() <= 1
-        eligible["source_frozen_is_cumulative"] = not eligible.n_frozen.diff().lt(0).any()
-        streams[key] = (
-            rows, eligible, limits,
-            (rows.temperature_C.min(), rows.temperature_C.max()),
-            eligible.temperature_C.to_numpy(), eligible.n_frozen.to_numpy(),
-            (eligible.n_frozen / eligible.n_total).to_numpy(),
-        )
+        )]
+        streams[key] = (rows, CountSelector(eligible), limits,
+                        (rows.temperature_C.min(), rows.temperature_C.max()))
 
     def select(key, target):
-        rows, eligible, limits, (cold, warm), temperatures, frozen, fractions = streams[key]
+        rows, selector, limits, (cold, warm) = streams[key]
         if rows.empty or not cold <= target <= warm or not _in_range(target, limits):
             return None
-        if method == "window":
-            selected = (temperatures >= target - window_C / 2) & (
-                temperatures <= target + window_C / 2
-            )
-        else:
-            selected = temperatures >= target
-        positions = np.flatnonzero(selected)
-        if not positions.size:
-            return None
-        if method in ("max", "window"):
-            scores = fractions[positions] if method == "max" else frozen[positions]
-            positions = positions[scores == scores.max()]
-        chosen = eligible.iloc[positions[-1]].copy()  # latest observation wins ties
-        chosen["fit_temperature_C"] = target
-        chosen["temperature_selection"] = method
-        return chosen
+        return selector.select(target, method=method, window_C=window_C)
 
     temperatures = pd.concat([streams[key][0].temperature_C for key in keys])
     empty = frame.iloc[:0].copy()

@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from .alignment import align_observations
+from .blank_controls import BlankControls
 from .context import prepare_fraction_analysis
 from .experiment import Experiment
 from .methods import curve_specifications, resolve_curves, validate_temperature_ranges
@@ -61,6 +61,8 @@ def estimate_concentration(
     curves=None,
     z: float = DEFAULTS.z,
     water_blank_correction: bool = DEFAULTS.water_blank_correction,
+    water_blank_after_first_freeze: bool = DEFAULTS.water_blank_after_first_freeze,
+    water_blank_temperature_range_C=None,
 ) -> CurveSpectrumTable:
     """Estimate named curves from original states with separate run backgrounds.
 
@@ -80,6 +82,10 @@ def estimate_concentration(
     interval, intersected with user ranges. Input temperature
     ranges apply only to curves combining several physical inputs. Individual
     curves use the complete input trajectory, independently of those exclusions.
+    water_blank_temperature_range_C is one observation range shared by all assigned
+    controls; it does not restrict sample temperatures. water_blank_after_first_freeze
+    optionally fixes each run/cycle's background at zero before its combined control's
+    original first freeze, including uncertainty. Both settings precede estimation.
     """
     EstimationSettings(
         method=method,
@@ -91,6 +97,8 @@ def estimate_concentration(
         temperature_window_C=temperature_window_C,
         z=z,
         water_blank_correction=water_blank_correction,
+        water_blank_after_first_freeze=water_blank_after_first_freeze,
+        water_blank_temperature_range_C=water_blank_temperature_range_C,
     )
     fractions, experiment = prepare_fraction_analysis(
         fractions, experiment, water_blank_correction=water_blank_correction
@@ -112,7 +120,11 @@ def estimate_concentration(
         }
         input_intervals = freezing_intervals(source, input_groups, {})
     records, notices, group_alignment, cache = [], [], {}, {}
-    joint_fits = {}
+    joint_fits, controls = {}, {}
+    raw_counts = experiment.counts.to_dataframe() if (
+        experiment.water_blank_map
+        and (water_blank_after_first_freeze or water_blank_temperature_range_C)
+    ) else None
     for curve_id, group in groups.items():
         members = group["members"]
         individual = len(members) == 1
@@ -127,10 +139,15 @@ def estimate_concentration(
                 float(selected.temperature_C.min()),
                 float(selected.temperature_C.max()),
             )
-        points = align_observations(
+        control = BlankControls(
+            experiment, members, raw_counts=raw_counts,
+            after_first_freeze=water_blank_after_first_freeze,
+            temperature_range_C=water_blank_temperature_range_C,
+        )
+        controls[curve_id] = control.details
+        points = control.align(
             frame,
             members,
-            water_blank_map=experiment.water_blank_map,
             temperature_ranges_C={} if individual else ranges,
             temperature_step_C=temperature_step_C,
             temperature_start_C=temperature_start_C,
@@ -149,7 +166,7 @@ def estimate_concentration(
             from .curve_fit import fit_curve
 
             estimates, joint_fits[curve_id] = fit_curve(
-                points, experiment, z=z, fit_step_C=fit_step_C
+                points, experiment, z=z, fit_step_C=fit_step_C, blank_controls=control
             )
             # Evaluate each selected temperature once. Repeated observations
             # remain in the experiment and never become independent droplets.
@@ -209,6 +226,8 @@ def estimate_concentration(
                     finite = bool(np.isfinite([estimate, lower, upper]).all())
                     fit = (estimate, lower, upper, finite)
                 else:
+                    if point.blank_state is not None and point.blank_state.unavailable:
+                        record["selection_status"] = "missing_blank_observations"
                     key = _state_key(point)
                     if key not in cache:
                         cache[key] = estimate_point(
@@ -217,6 +236,7 @@ def estimate_concentration(
                             experiment,
                             z=z,
                             method=method,
+                            blank_state=point.blank_state,
                         )
                     fit = cache[key]
                 record.update(
@@ -257,6 +277,10 @@ def estimate_concentration(
         "water_blank_correction": water_blank_correction,
         "water_blank_correction_applied": bool(experiment.water_blank_map),
         "water_blank_model": "volume_scaled",
+        "water_blank_after_first_freeze": water_blank_after_first_freeze,
+        "water_blank_temperature_range_C": control.limits,
+        "water_blank_range_scope": "blank_observations_only; shared by assigned controls",
+        "water_blank_controls": controls,
         "background_groups": "separate by run and selected cycle",
         "water_blank_map": dict(experiment.water_blank_map),
         "joint_curve_fits": joint_fits,

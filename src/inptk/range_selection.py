@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from .alignment import align_observations
 from .reporting import freezing_intervals
 from .water_blank import estimate_point
 
@@ -17,13 +16,14 @@ class RangePlanner:
     rather than slicing an already calculated curve.
     """
 
-    def __init__(self, frame, members, experiment, bases, grid, z, estimates):
+    def __init__(self, frame, members, experiment, bases, grid, z, estimates, blank_controls):
         self.frame = frame
         self.members = members
         self.experiment = experiment
         self.grid = grid
         self.z = z
         self.estimates = estimates
+        self.blank_controls = blank_controls
         self.trials = {}
         self.outside = float(frame.temperature_C.max()) + 1
         self.freezing_intervals = freezing_intervals(
@@ -43,8 +43,8 @@ class RangePlanner:
 
     def points(self, ranges):
         disabled = {"min_C": self.outside, "max_C": self.outside}
-        return align_observations(
-            self.frame, self.members, water_blank_map=self.experiment.water_blank_map,
+        return self.blank_controls.align(
+            self.frame, self.members,
             temperature_ranges_C={m["measurement_id"]: ranges.get(m["measurement_id"], disabled)
                                   for m in self.members},
             sample_freezing_intervals_C=self.freezing_intervals,
@@ -61,6 +61,7 @@ class RangePlanner:
                 self.estimates[key] = estimate_point(
                     point.samples, point.blanks, self.experiment, method="average",
                     z=self.z,
+                    blank_state=point.blank_state,
                 )
             records.append((float(point.temperature_C), self.estimates[key][0]))
         return records

@@ -545,7 +545,7 @@ def test_report_keeps_observation_identity_with_shuffled_input_rows():
     None, ([0, 0, 1, 1, 2, 2, 3], [-5, -6, -7, -8, -9, -10, -11], 20, 25),
 ])
 def test_summary_preserves_ranges_and_reasons_without_report(method, blank, monkeypatch):
-    from inptk import ranges
+    from inptk.blank_controls import BlankControls
 
     data = source(blank=blank)
     settings = {"temperature_step_C": 1, "temperature_method": method}
@@ -553,10 +553,14 @@ def test_summary_preserves_ranges_and_reasons_without_report(method, blank, monk
         settings["temperature_window_C"] = 1
     full = inptk.suggest_temperature_ranges(data, **settings)
 
-    def no_report_alignment(*args, **kwargs):
-        raise AssertionError("A summary must not calculate the per-observation report")
+    original = BlankControls.align
 
-    monkeypatch.setattr(ranges, "align_observations", no_report_alignment)
+    def no_report_alignment(self, *args, **kwargs):
+        if kwargs.get("temperature_step_C") is None:
+            raise AssertionError("A summary must not calculate the per-observation report")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(BlankControls, "align", no_report_alignment)
     summary = inptk.suggest_temperature_ranges(data, include_observations=False, **settings)
     assert summary.observations is None
     assert summary.inputs == full.inputs

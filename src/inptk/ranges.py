@@ -9,14 +9,13 @@ from numbers import Integral
 import numpy as np
 import pandas as pd
 
-from .alignment import align_observations
+from .blank_controls import BlankControls
 from .experiment import Experiment
 from .methods import CombinationMember, resolve_curves
 from .processing import frozen_fraction
 from .range_selection import RangePlanner
-from .settings import DEFAULTS
+from .settings import DEFAULTS, EstimationSettings
 from .tables import FrozenFractionTable
-from .temperature_selection import validate_temperature_selection
 from .water_blank import analysis_experiment, estimate_point
 
 
@@ -67,10 +66,11 @@ def _eligible_blocks(rows):
     return [{"min_C": block[-1], "max_C": block[0]} for block in blocks]
 
 
-def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, grid, z, cache):
+def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, grid, z, cache, controls):
     """Build count-eligible blocks, then choose monotone nonoverlapping ranges."""
     plans, membership = {}, {}
-    for group in groups.values():
+    for curve_id, group in groups.items():
+        control = controls[curve_id]
         signature = tuple(member["measurement_id"] for member in group["members"])
         members = sorted(
             group["members"], key=lambda m: experiment.measurements[m["measurement_id"]].dilution
@@ -94,15 +94,20 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
             rows["too_few_frozen"] = (rows.n_frozen < min_frozen) & (not first)
             rows["too_few_liquid"] = rows.n_total - rows.n_frozen < min_unfrozen
             rows["blank_coverage"] = True
-            for blank in experiment.water_blank_map.get(name, []):
-                observed = frame.loc[
-                    frame.measurement_id.eq(blank)
-                    & frame.run_id.eq(member["run_id"])
-                    & frame.cycle_id.eq(member["cycle_id"])
-                ]
-                rows["blank_coverage"] &= rows.temperature_C.between(
-                    observed.temperature_C.min(), observed.temperature_C.max()
-                )
+            if control.active:
+                # Pre-onset zero needs no observed blank at that target. Assess
+                # native support in arrays; grid trials still use actual selections.
+                rows["blank_coverage"] = control.native_coverage(member, rows.temperature_C)
+            else:
+                for blank in experiment.water_blank_map.get(name, []):
+                    observed = frame.loc[
+                        frame.measurement_id.eq(blank)
+                        & frame.run_id.eq(member["run_id"])
+                        & frame.cycle_id.eq(member["cycle_id"])
+                    ]
+                    rows["blank_coverage"] &= rows.temperature_C.between(
+                        observed.temperature_C.min(), observed.temperature_C.max()
+                    )
             rows["range_eligible"] = (
                 ~rows.too_few_frozen & ~rows.too_few_liquid & rows.blank_coverage
             )
@@ -111,7 +116,7 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
             )
             bases[name] = _eligible_blocks(rows)
             rows_by_name[name] = rows
-        planner = RangePlanner(frame, members, experiment, bases, grid, z, cache)
+        planner = RangePlanner(frame, members, experiment, bases, grid, z, cache, control)
         chosen = planner.choose([m["measurement_id"] for m in members])
         previous_cold = None
         for member in members:
@@ -146,7 +151,9 @@ def suggest_temperature_ranges(
     include_observations: bool = True,
     min_frozen: int = 3,
     min_unfrozen: int = 3,
-    water_blank_correction: bool = True,
+    water_blank_correction: bool = DEFAULTS.water_blank_correction,
+    water_blank_after_first_freeze: bool = DEFAULTS.water_blank_after_first_freeze,
+    water_blank_temperature_range_C=None,
     z: float = 1.96,
     temperature_step_C: float | None = DEFAULTS.temperature_step_C,
     temperature_start_C: float | None = DEFAULTS.temperature_start_C,
@@ -178,12 +185,15 @@ def suggest_temperature_ranges(
     """
     if not isinstance(include_observations, bool):
         raise TypeError("include_observations must be a bool (True or False)")
-    validate_temperature_selection(
-        temperature_step_C,
-        temperature_method,
-        temperature_window_C,
-        temperature_start_C,
-        temperature_end_C,
+    EstimationSettings(
+        method="average", z=z, water_blank_correction=water_blank_correction,
+        water_blank_after_first_freeze=water_blank_after_first_freeze,
+        water_blank_temperature_range_C=water_blank_temperature_range_C,
+        temperature_step_C=temperature_step_C,
+        temperature_method=temperature_method,
+        temperature_window_C=temperature_window_C,
+        temperature_start_C=temperature_start_C,
+        temperature_end_C=temperature_end_C,
     )
     grid = {
         "temperature_step_C": temperature_step_C,
@@ -194,8 +204,6 @@ def suggest_temperature_ranges(
     }
     min_frozen = _positive_count(min_frozen, "min_frozen")
     min_unfrozen = _positive_count(min_unfrozen, "min_unfrozen")
-    if isinstance(z, bool) or not np.isfinite(z) or z <= 0:
-        raise ValueError("z must be finite and positive")
     view = analysis_experiment(experiment, water_blank_correction=water_blank_correction)
     fractions = frozen_fraction(view)
     frame = fractions.to_dataframe()
@@ -212,6 +220,20 @@ def suggest_temperature_ranges(
             members[name] = member
     if not members:
         raise ValueError("No sample inputs selected for range suggestions")
+    raw_counts = view.counts.to_dataframe() if (
+        view.water_blank_map and (water_blank_after_first_freeze or water_blank_temperature_range_C)
+    ) else None
+    controls = {
+        curve_id: BlankControls(
+            view, group["members"], raw_counts=raw_counts,
+            after_first_freeze=water_blank_after_first_freeze,
+            temperature_range_C=water_blank_temperature_range_C,
+        ) for curve_id, group in groups.items()
+    }
+    controls_by_name = {
+        member["measurement_id"]: controls[curve_id]
+        for curve_id, group in groups.items() for member in group["members"]
+    }
     cache: dict = {}
     plans = _sequential_ranges(
         frame,
@@ -222,6 +244,7 @@ def suggest_temperature_ranges(
         grid=grid,
         z=float(z),
         cache=cache,
+        controls=controls,
     )
     proposals, reports = {}, []
     for name, member in members.items():
@@ -268,10 +291,9 @@ def suggest_temperature_ranges(
                 concentrations = np.full((len(rows), 3), np.nan)
                 statuses = rows.blank_status.to_numpy(copy=True)
                 blank_ids = rows.blank_observation_ids.to_numpy(copy=True)
-                points = align_observations(
+                points = controls_by_name[name].align(
                     frame,
                     [member],
-                    water_blank_map=view.water_blank_map,
                     temperature_ranges_C={name: limits},
                 )
                 for point in points:
@@ -287,6 +309,7 @@ def suggest_temperature_ranges(
                             view,
                             method="average",
                             z=float(z),
+                            blank_state=point.blank_state,
                         )
                     concentration, lower, upper, finite = cache[key]
                     concentrations[index] = (concentration, lower, upper)
@@ -339,6 +362,9 @@ def suggest_temperature_ranges(
         "min_unfrozen": min_unfrozen,
         "z": float(z),
         "water_blank_correction": water_blank_correction,
+        "water_blank_after_first_freeze": water_blank_after_first_freeze,
+        "water_blank_temperature_range_C": next(iter(controls.values())).limits,
+        "water_blank_controls": {key: control.details for key, control in controls.items()},
         "rule": "ascending dilution; nonoverlapping nonnegative monotone intervals and handoffs",
         "negative_concentrations": "adjust contiguous input limits; retain individual values",
         "range_check_starts": "each input's original first freezing event",

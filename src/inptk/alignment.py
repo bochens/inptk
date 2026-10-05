@@ -5,9 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .blank_controls import BlankState
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,7 @@ class AlignedPoint:
     blanks: pd.DataFrame
     alignment: str
     point_order: int
+    blank_state: BlankState | None = None
 
     @cached_property
     def sample_records(self):
@@ -32,8 +37,9 @@ class AlignedPoint:
     def count_key(self):
         """Physical identities and counts; temperature does not change a point fit."""
         keys = ("measurement_id", "run_id", "cycle_id", "n_frozen", "n_total")
-        return tuple(tuple(sorted(tuple(row[key] for key in keys) for row in records))
-                     for records in (self.sample_records, self.blank_records))
+        counts = tuple(tuple(sorted(tuple(row[key] for key in keys) for row in records))
+                       for records in (self.sample_records, self.blank_records))
+        return counts if self.blank_state is None else (*counts, self.blank_state)
 
 
 def _records(frame):

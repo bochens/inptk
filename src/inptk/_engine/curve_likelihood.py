@@ -32,6 +32,7 @@ class FreezingSeries:
     sample_exposure: float
     blank_exposure: float = 0.0
     background: str = ""
+    background_onset_C: float | None = None
 
 
 class _Likelihood:
@@ -175,6 +176,15 @@ class CurveLikelihood:
                 temperature_grid(observed, step_C=fit_step_C), dtype=float
             )
         self.backgrounds = sorted({s.background for s in series if s.background})
+        onsets = {}
+        for stream in series:
+            onset = stream.background_onset_C
+            if onset is not None and not np.isfinite(onset):
+                raise ValueError("Background onset must be finite")
+            if stream.background:
+                if stream.background in onsets and onsets[stream.background] != onset:
+                    raise ValueError("A shared background must use one onset")
+                onsets[stream.background] = onset
         size = len(self.temperatures)
         width = size * (1 + len(self.backgrounds))
         linear = np.zeros(width)
@@ -194,7 +204,9 @@ class CurveLikelihood:
                 state = np.zeros(width)
                 mask = self._basis(temperature)
                 state[:size] = mask * stream.sample_exposure
-                if stream.background:
+                if stream.background and (
+                    stream.background_onset_C is None or temperature <= stream.background_onset_C
+                ):
                     component = 1 + self.backgrounds.index(stream.background)
                     state[component * size:(component + 1) * size] = mask * stream.blank_exposure
                 number = int(frozen) - previous_count
