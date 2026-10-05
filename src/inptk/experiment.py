@@ -26,7 +26,7 @@ def _positive(name: str, value: float | None) -> float:
 
 @dataclass(frozen=True)
 class SampleMetadata:
-    """The original sampled material, shared by all its dilution measurements."""
+    """The sampled material or assay control, shared by its droplet sets."""
 
     sample_id: str
     sample_name: str = ""
@@ -39,8 +39,13 @@ class SampleMetadata:
     def __post_init__(self):
         if not isinstance(self.sample_id, str) or not self.sample_id.strip():
             raise ValueError("sample_id must be non-empty text")
-        if self.sample_type not in ("air", "soil", "other"):
-            raise ValueError("sample_type must be air, soil, or other")
+        if self.sample_type not in ("air", "soil", "other", "water blank"):
+            raise ValueError("sample_type must be air, soil, other, or water blank")
+        if self.sample_type == "water blank":
+            for name in (
+                "air_volume_L", "suspension_volume_mL", "filter_fraction_used", "dry_mass_g"
+            ):
+                object.__setattr__(self, name, None)
         for name in ("air_volume_L", "suspension_volume_mL", "filter_fraction_used", "dry_mass_g"):
             value = getattr(self, name)
             if value is not None:
@@ -125,6 +130,16 @@ class Experiment:
                 )
         self._validate_water_blank_map()
 
+    @property
+    def water_blank_ids(self) -> set[str]:
+        """Catalog controls and explicitly assigned controls, including unused blanks."""
+        typed = {
+            key for key, item in self.measurements.items()
+            if self.samples[item.sample_id].sample_type == "water blank"
+        }
+        assigned = {name for names in self.water_blank_map.values() for name in names}
+        return typed | assigned
+
     def _validate_water_blank_map(self) -> None:
         if not isinstance(self.water_blank_map, Mapping):
             raise TypeError(
@@ -144,7 +159,7 @@ class Experiment:
                 raise ValueError(f"Duplicate water-blank names for measurement {sample_id!r}")
             mapping[sample_id] = list(assigned)
         sample_ids = set(mapping)
-        blank_ids = {name for assigned in mapping.values() for name in assigned}
+        blank_ids = self.water_blank_ids
         unknown = (sample_ids | blank_ids) - set(self.measurements)
         if unknown:
             raise ValueError(f"Unknown measurements in water_blank_map: {sorted(unknown)}")
@@ -156,6 +171,9 @@ class Experiment:
                 raise ValueError(
                     f"water_blank_map must assign every nonblank measurement: {sorted(unassigned)}"
                 )
+        for blank_id in blank_ids:
+            if self.measurements[blank_id].dilution != 1:
+                raise ValueError(f"Water-blank measurement {blank_id!r} must have dilution=1")
         backgrounds: dict[tuple[str, str], frozenset[str]] = {}
         for sample_id, assigned in mapping.items():
             sample = self.measurements[sample_id]
@@ -168,8 +186,6 @@ class Experiment:
             backgrounds[group] = blank_group
             for blank_id in assigned:
                 blank = self.measurements[blank_id]
-                if blank.dilution != 1:
-                    raise ValueError(f"Water-blank measurement {blank_id!r} must have dilution=1")
                 if sample.run_id != blank.run_id:
                     raise ValueError(
                         f"Measurement {sample_id!r} and water blank {blank_id!r} "

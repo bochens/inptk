@@ -32,6 +32,7 @@ from .cli_steps import (
 from .cli_store import ResultStore
 from .experiment import Experiment, ProcessingResult
 from .io import FORMAT_VERSION, _encode, _table_frame, _table_payload
+from .readers import _default_water_blank_map
 from .settings import DEFAULTS
 from .tables import CountsTable
 
@@ -85,7 +86,10 @@ def _analysis_input_arguments(parser):
     )
     parser.add_argument(
         "--water-blank-map",
-        help="JSON object or file mapping raw native or Icescopy inputs to blank input names",
+        help=(
+            "JSON object or file mapping inputs to blanks; omitted uses all entries "
+            "typed 'water blank' in the same run, {} disables correction"
+        ),
     )
     parser.add_argument(
         "--no-water-blank-correction",
@@ -309,7 +313,7 @@ def _select_experiment(experiment, sample_ids, cycle_ids):
     if sample_ids is None and cycle_ids is None:
         return experiment
     original = experiment.counts.to_dataframe()
-    blank_ids = {name for assigned in experiment.water_blank_map.values() for name in assigned}
+    blank_ids = experiment.water_blank_ids
     frame = original.loc[~original.measurement_id.isin(blank_ids)]
     selection = {}
     for column, values in (("sample_id", sample_ids), ("cycle_id", cycle_ids)):
@@ -445,7 +449,9 @@ def _capabilities(parser):
                     "out": "@input",
                     "counts": "Native count records or an object of column arrays",
                     "metadata": "Complete measurement metadata records or column arrays",
-                    "water_blank_map": "Optional explicit sample-to-blank mapping",
+                    "water_blank_map": (
+                        "Optional mapping; omitted uses typed blanks by run, {} disables correction"
+                    ),
                     "run_id": "Optional default run identity",
                 },
             },
@@ -493,7 +499,7 @@ def _capabilities(parser):
 
 
 def _preview(args, store):
-    blank_map = {}
+    blank_map = None
     if args.format == "saved":
         if args.metadata or args.sample_map:
             raise ValueError("Saved input already contains its metadata and sample mapping")
@@ -523,6 +529,8 @@ def _preview(args, store):
         imported = counts.history[-1]
         metadata = imported["measurement_metadata"]
         provisional = imported["provisional_sample_assignments"]
+    if blank_map is None:
+        blank_map = _default_water_blank_map(metadata)
     # Check concentration metadata with the same importer, without any fitting.
     # Blank coverage, selected groups/ranges and output normalization are checked
     # only by analyze, after the user has made those decisions.

@@ -76,7 +76,12 @@ Air concentration also requires `sample_type="air"`, `air_volume_L`,
 
 `read_icescopy()` accepts `freeze_count_timeseries.csv` and `.icescopy` projects,
 including their exported metadata. Supply missing physical metadata through
-`metadata=`. Sample grouping and water-blank assignment are explicit:
+`metadata=`. Sample grouping uses `sample_map`. Entries with
+`sample_type="water blank"` retain their counts and well volume as assay controls.
+When `water_blank_map` is omitted, each sample uses all typed blanks in its run.
+Supply a map to choose specific controls, or `{}` to disable correction. These
+rules also apply to native counts metadata; blank dilution and air/soil fields
+are ignored.
 
 ```python
 import inptk

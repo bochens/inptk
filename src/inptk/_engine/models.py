@@ -9,8 +9,8 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-SampleType = Literal["air", "soil", "other"]
-SAMPLE_TYPES: tuple[str, ...] = ("air", "soil", "other")
+SampleType = Literal["air", "soil", "other", "water blank"]
+SAMPLE_TYPES: tuple[str, ...] = ("air", "soil", "other", "water blank")
 SpectrumBasis = Literal["suspension", "sampled_air", "dry_soil", "other"]
 
 
@@ -96,7 +96,7 @@ def _normalize_sample_type(value: Any) -> SampleType:
     raise ValueError(
         f"Unknown sample_type {value!r}. Use 'air' for aerosol/filter samples normalized "
         "by sampled air volume, 'soil' for dry-soil normalization, or 'other' for "
-        "suspension units."
+        "suspension units, or 'water blank' for assay controls."
     )
 
 
@@ -145,6 +145,12 @@ class SampleMetadata:
         ):
             object.__setattr__(self, name, _text_or_empty(getattr(self, name)))
         object.__setattr__(self, "sample_type", _normalize_sample_type(self.sample_type))
+        if self.sample_type == "water blank":
+            object.__setattr__(self, "dilution", 1.0)
+            for name in (
+                "air_volume_L", "filter_fraction_used", "suspension_volume_mL", "dry_mass_g"
+            ):
+                object.__setattr__(self, name, None)
         for name in (
             "well_volume_uL",
             "reset_temperature_C",

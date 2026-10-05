@@ -19,11 +19,7 @@ from .tables import CountsTable
 
 def sample_rows(frame: pd.DataFrame, experiment: Experiment) -> pd.DataFrame:
     """Exclude physical water blanks from the sample analysis groups."""
-    return frame.loc[
-        ~frame.measurement_id.isin(
-            {key for ids in experiment.water_blank_map.values() for key in ids}
-        )
-    ].copy()
+    return frame.loc[~frame.measurement_id.isin(experiment.water_blank_ids)].copy()
 
 
 def analysis_experiment(

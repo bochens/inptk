@@ -110,7 +110,7 @@ def resolve_curves(
     for name in required:
         if frame[name].isna().any() or frame[name].astype(str).str.strip().eq("").any():
             raise ValueError(f"Combination input {name} must contain non-empty identities")
-    blank_ids = {name for names in experiment.water_blank_map.values() for name in names}
+    blank_ids = experiment.water_blank_ids
     available: dict[tuple[str, str], CombinationMember] = {}
     for row in frame[sorted(required)].drop_duplicates().itertuples(index=False):
         measurement_id, cycle_id = str(row.measurement_id), str(row.cycle_id)

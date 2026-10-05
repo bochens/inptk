@@ -48,12 +48,41 @@ def _clean(value):
     return None if value is None or pd.isna(value) or value == "" else value
 
 
+def _normalize_blank_record(record: dict) -> dict:
+    """Ignore inactive physical fields on explicitly typed assay controls."""
+    if record.get("sample_type") != "water blank":
+        return record
+    return {
+        **record,
+        "dilution": 1.0,
+        "air_volume_L": None,
+        "suspension_volume_mL": None,
+        "filter_fraction_used": None,
+        "dry_mass_g": None,
+    }
+
+
+def _default_water_blank_map(records: list[dict], run_id: str = "1") -> dict[str, list[str]]:
+    """Pair samples with all catalog controls in their own run when no map is given."""
+    blanks: dict[str, list[str]] = {}
+    samples = []
+    for record in records:
+        name = str(record.get("measurement_id", record["sample_id"]))
+        run = str(run_id if _clean(record.get("run_id")) is None else record["run_id"])
+        if record.get("sample_type") == "water blank":
+            blanks.setdefault(run, []).append(name)
+        else:
+            samples.append((name, run))
+    return {name: list(blanks[run]) for name, run in samples if run in blanks}
+
+
 def _metadata(records: pd.DataFrame, run_id: str):
     samples: dict[str, SampleMetadata] = {}
     measurements: dict[str, MeasurementMetadata] = {}
     sample_fields = {item.name for item in fields(SampleMetadata)}
     numeric_fields = {"air_volume_L", "suspension_volume_mL", "filter_fraction_used", "dry_mass_g"}
     for record in records.to_dict("records"):
+        record = _normalize_blank_record(record)
         if _clean(record.get("sample_id")) is None:
             raise ValueError("Metadata sample_id must be non-empty")
         if "measurement_id" in record and _clean(record["measurement_id"]) is None:
@@ -97,6 +126,9 @@ def read_counts(
     IDs are assigned in input order; repeated temperatures are preserved.
     Metadata has one row per measurement with sample_id, measurement_id,
     dilution, droplet_volume_uL and any sample normalization inputs.
+    sample_type="water blank" marks assay controls. If water_blank_map is omitted,
+    samples use all typed controls in their run. An explicit map takes priority;
+    an empty map disables correction while retaining the controls as blanks.
     With water_blank_map, supply raw counts for samples and water blanks. Map
     each sample measurement name to a list of blank measurement names; import preserves
     the observations unchanged. Do not map counts already corrected by Icescopy.
@@ -140,7 +172,10 @@ def read_counts(
             "format": "native",
             "path": str(source) if isinstance(source, (str, Path)) else None,
         },
-        water_blank_map={} if water_blank_map is None else water_blank_map,
+        water_blank_map=(
+            _default_water_blank_map(records.to_dict("records"), str(run_id))
+            if water_blank_map is None else water_blank_map
+        ),
     )
 
 
@@ -314,7 +349,10 @@ def read_icescopy(
     Map exact measurement names to parent samples explicitly. Supplied metadata
     overrides only the named fields; missing values retain export-header values.
     Use read_observations for counts/fractions before physical metadata is ready.
-    For raw exports, water_blank_map assigns physical blank sets explicitly.
+    Entries typed "water blank" are controls. When water_blank_map is omitted,
+    each sample uses all typed blanks in its run. An explicit map selects the
+    controls; an empty map disables correction. Counts and actual well volumes
+    are retained, and inactive blank dilution and normalization fields are ignored.
     Archives read freeze_count_timeseries.csv and its saved session metadata
     without extracting files. Explicit metadata overrides still take precedence.
     Every complete count row is retained; an image ID is not required.
@@ -420,7 +458,7 @@ def read_observations(
                 if _clean(record.get(column)) is not None and str(record[column]) != values[0]:
                     raise ValueError(f"Count identities disagree with metadata for {name!r}")
                 record[column] = str(values[0])
-            records.append(record)
+            records.append(_normalize_blank_record(record))
     else:
         raise ValueError("Observation format must be 'native' or 'icescopy'")
     if data.empty:

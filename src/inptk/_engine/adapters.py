@@ -15,7 +15,6 @@ from .models import (
     CountsTable,
     SampleMetadata,
     TemperatureFrozenFractionTable,
-    _normalize_sample_type,
     _optional_float,
     _optional_int,
     processing_metadata_for,
@@ -163,7 +162,7 @@ def _read_metadata_lines(
 
 
 def _sample_metadata_from_record(session_metadata, raw_sample_metadata, sample_id):
-    """Normalize explicitly stored export metadata; never choose analysis roles."""
+    """Read catalog metadata; SampleMetadata normalizes each catalog type."""
     return SampleMetadata(
         format_name=session_metadata.get("format_name", ""),
         file_version=session_metadata.get("file_version", ""),
@@ -180,12 +179,12 @@ def _sample_metadata_from_record(session_metadata, raw_sample_metadata, sample_i
         sample_long_name=raw_sample_metadata.get("sample_long_name", ""),
         collection_start=raw_sample_metadata.get("collection_start", ""),
         collection_end=raw_sample_metadata.get("collection_end", ""),
-        sample_type=_normalize_sample_type(raw_sample_metadata.get("sample_type", "other")),
-        dilution=_optional_float(raw_sample_metadata.get("dilution")),
-        air_volume_L=_optional_float(raw_sample_metadata.get("air_volume_L")),
-        filter_fraction_used=_optional_float(raw_sample_metadata.get("filter_fraction_used")),
-        suspension_volume_mL=_optional_float(raw_sample_metadata.get("suspension_volume_mL")),
-        dry_mass_g=_optional_float(raw_sample_metadata.get("dry_mass_g")),
+        sample_type=raw_sample_metadata.get("sample_type", "other"),
+        dilution=raw_sample_metadata.get("dilution"),
+        air_volume_L=raw_sample_metadata.get("air_volume_L"),
+        filter_fraction_used=raw_sample_metadata.get("filter_fraction_used"),
+        suspension_volume_mL=raw_sample_metadata.get("suspension_volume_mL"),
+        dry_mass_g=raw_sample_metadata.get("dry_mass_g"),
         total_cells=_optional_int(raw_sample_metadata.get("cell_number")),
         raw_preamble=session_metadata,
         raw_sample_metadata=raw_sample_metadata,

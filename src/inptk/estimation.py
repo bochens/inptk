@@ -99,7 +99,7 @@ def estimate_concentration(
     source = sample_rows(frame, experiment)
     if source.empty:
         raise ValueError("No sample observations are available for concentration calculation")
-    blank_ids = {key for ids in experiment.water_blank_map.values() for key in ids}
+    blank_ids = experiment.water_blank_ids
     ranges = validate_temperature_ranges(
         temperature_ranges_C, measurement_ids=set(experiment.measurements) - blank_ids
     )
