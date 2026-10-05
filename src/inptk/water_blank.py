@@ -71,6 +71,7 @@ def estimate_point(
     *,
     z: float,
     method: str = "mle",
+    blank_state=None,
 ) -> tuple[float, float, float, bool]:
     """Estimate one concentration from explicitly selected physical observations.
 
@@ -84,7 +85,9 @@ def estimate_point(
     while their samples share one original-sample concentration for MLE. Average
     directly calculates each sample concentration, subtracts its run's blank
     concentration, and takes the arithmetic mean with propagated uncertainty.
-    Without a map, blanks must be empty and no correction is applied.
+    Without a map, blanks must be empty and no correction is applied. An explicit
+    blank_state from the control selector can restrict assigned observations or
+    fix a run's background at zero; missing required background states give NaN.
     """
     if not isinstance(experiment, Experiment):
         raise TypeError("experiment must be an Experiment")
@@ -152,6 +155,15 @@ def estimate_point(
             (blank_id, str(row.cycle_id))
             for blank_id in experiment.water_blank_map[str(row.measurement_id)]
         )
+    zero_groups = ()
+    if blank_state is not None:
+        if blank_state.unavailable:
+            return np.nan, np.nan, np.nan, False
+        selected_pairs = set(blank_state.expected_pairs)
+        if not selected_pairs <= expected:
+            raise ValueError("Selected control contains an unassigned blank")
+        expected = selected_pairs
+        zero_groups = blank_state.zero_groups
     supplied = set() if blanks.empty else set(zip(blanks.measurement_id, blanks.cycle_id))
     if supplied != expected:
         missing_pairs, extra_pairs = sorted(expected - supplied), sorted(supplied - expected)
@@ -166,9 +178,11 @@ def estimate_point(
 
     return estimate(
         **common,
-        blank_frozen=blanks.n_frozen.to_numpy(),
-        blank_total=blanks.n_total.to_numpy(),
-        blank_volume_uL=[item.droplet_volume_uL for item in blank_metadata],
+        blank_frozen=blanks.n_frozen.to_numpy() if not blanks.empty else None,
+        blank_total=blanks.n_total.to_numpy() if not blanks.empty else None,
+        blank_volume_uL=([item.droplet_volume_uL for item in blank_metadata]
+                         if not blanks.empty else None),
         sample_blank_group=groups(samples),
         blank_group=groups(blanks),
+        fixed_zero_groups=zero_groups,
     )

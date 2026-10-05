@@ -278,6 +278,8 @@ def analyze_concentration(
     differential: bool = DEFAULTS.differential,
     blank_by_curve: dict[str, CumulativeSpectrumTable] | None = None,
     water_blank_correction: bool = DEFAULTS.water_blank_correction,
+    water_blank_after_first_freeze: bool = DEFAULTS.water_blank_after_first_freeze,
+    water_blank_temperature_range_C=None,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = DEFAULTS.decrease_policy,
 ) -> AnalysisResult:
     """Run the public calculation steps using native or initially gridded counts."""
@@ -293,6 +295,8 @@ def analyze_concentration(
         temperature_window_C=temperature_window_C,
         z=z,
         water_blank_correction=water_blank_correction,
+        water_blank_after_first_freeze=water_blank_after_first_freeze,
+        water_blank_temperature_range_C=water_blank_temperature_range_C,
         output_basis=output_basis,
         differential=differential,
         decrease_policy=decrease_policy,
@@ -326,6 +330,8 @@ def analyze_concentration(
         curves=curves,
         z=z,
         water_blank_correction=water_blank_correction,
+        water_blank_after_first_freeze=water_blank_after_first_freeze,
+        water_blank_temperature_range_C=water_blank_temperature_range_C,
     )
     candidates = subtract_blanks(combined, blank_by_curve) if blank_by_curve else combined
     if output_basis != "suspension":
@@ -350,6 +356,7 @@ def analyze_concentration(
         "estimation_method": method,
         "fit_step_C": fit_step_C,
         "temperature_ranges_C": combined.history[-1]["temperature_ranges_C"],
+        "resolved_temperature_ranges_C": combined.history[-1]["resolved_temperature_ranges_C"],
         "temperature_step_C": temperature_step_C,
         "temperature_start_C": temperature_start_C,
         "temperature_end_C": temperature_end_C,
@@ -368,6 +375,9 @@ def analyze_concentration(
         "water_blank_correction_applied": water_blank_correction
         and bool(experiment.water_blank_map),
         "water_blank_model": "volume_scaled",
+        "water_blank_after_first_freeze": water_blank_after_first_freeze,
+        "water_blank_temperature_range_C": combined.history[-1]["water_blank_temperature_range_C"],
+        "water_blank_controls": combined.history[-1]["water_blank_controls"],
         "decrease_policy": decrease_policy,
         "reporting_rule": "observed_sample_freezing_interval",
         "reporting_intervals_C": combined.history[-1]["reporting_intervals_C"],

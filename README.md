@@ -136,6 +136,21 @@ events. Values and uncertainty outside the interval are `NaN`. Average contribut
 must lie within each input's own interval and have positive frozen sample counts.
 A zero concentration produced by blank correction remains valid inside the interval.
 
+Water blanks in each run and cycle form one assigned control, retaining each
+well's volume. `water_blank_temperature_range_C={"min_C": -25, "max_C": -10}`
+restricts blank observations with one shared range. Sample limits are separate.
+With latest selection, colder targets can use the last retained blank observation;
+MLE uses the retained control history. Missing Average blank observations give
+`NaN`, rather than an assumed zero background.
+
+Set `water_blank_after_first_freeze=True` to fix background and its uncertainty
+at zero before that control's original first freeze. A control that never freezes
+has zero background throughout. This optional assumption is off by default.
+The onset is determined separately for each run and cycle, before grid selection
+or sample exclusions. Results retain the resolved control onset and limits.
+CLI equivalents are `--water-blank-after-first-freeze` and
+`--water-blank-temperature-range '{"min_C": -25, "max_C": -10}'`.
+
 ### Temperature ranges and grid
 
 Average can suggest nonoverlapping ranges that preserve a nonnegative, nondecreasing
@@ -151,7 +166,12 @@ result = inptk.analyze_concentration(
 
 Manual limits use input names, for example
 `{"A": {"min_C": -15, "max_C": -10}}`. They apply to combined curves.
-MLE accepts manual ranges.
+MLE accepts manual ranges. Limits select calculation-grid points after count
+selection, so moving a limit does not change the source counts at retained points.
+Selecting an input's full useful grid span gives the same result as Full range;
+MLE retains observations outside the reported span as fitting constraints.
+Results expose full and selected spans in `settings["resolved_temperature_ranges_C"]`.
+Selected source counts are recorded in each curve's `source_observations` column.
 
 A grid selects counts before calculation. Omit `temperature_step_C` to retain native
 observations. Optional `temperature_start_C` and `temperature_end_C` use the observed

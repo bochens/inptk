@@ -5,9 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .blank_controls import BlankState
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,8 @@ class AlignedPoint:
     blanks: pd.DataFrame
     alignment: str
     point_order: int
+    blank_state: BlankState | None = None
+    range_details: dict | None = None
 
     @cached_property
     def sample_records(self):
@@ -32,8 +38,9 @@ class AlignedPoint:
     def count_key(self):
         """Physical identities and counts; temperature does not change a point fit."""
         keys = ("measurement_id", "run_id", "cycle_id", "n_frozen", "n_total")
-        return tuple(tuple(sorted(tuple(row[key] for key in keys) for row in records))
-                     for records in (self.sample_records, self.blank_records))
+        counts = tuple(tuple(sorted(tuple(row[key] for key in keys) for row in records))
+                       for records in (self.sample_records, self.blank_records))
+        return counts if self.blank_state is None else (*counts, self.blank_state)
 
 
 def _records(frame):
@@ -89,14 +96,7 @@ def _average_sample_eligible(row, temperature, intervals):
 def _latest_position(rows: pd.DataFrame, temperature: float, limits: Mapping) -> int | None:
     if not _in_support(rows, temperature) or not _in_range(temperature, limits):
         return None
-    # This temporary mask must be writable with pandas Copy-on-Write enabled.
-    eligible = rows.temperature_C.ge(temperature).to_numpy(copy=True)
-    minimum, maximum = limits.get("min_C"), limits.get("max_C")
-    if minimum is not None:
-        eligible &= rows.temperature_C.ge(minimum).to_numpy()
-    if maximum is not None:
-        eligible &= rows.temperature_C.le(maximum).to_numpy()
-    positions = np.flatnonzero(eligible)
+    positions = np.flatnonzero(rows.temperature_C.ge(temperature).to_numpy())
     return int(positions[-1]) if positions.size else None
 
 
@@ -125,6 +125,7 @@ def align_observations(
     temperature_method: str = "latest",
     temperature_window_C: float | None = None,
     sample_freezing_intervals_C: Mapping[str, Mapping] | None = None,
+    retain_full_range_constraints: bool = False,
 ) -> list[AlignedPoint]:
     """Keep native sequences, or explicitly select counts on a regular grid.
 
@@ -134,6 +135,8 @@ def align_observations(
     Each physical blank enters a point once. Matching sample/blank acquisitions
     move together for synchronized runs. No source sequence is cooling-trimmed.
     An explicit grid selects samples and blanks independently by the same rule.
+    Limits choose targets after count selection. Joint MLE can retain outside
+    reporting constraints when a limit selects an input's full useful edge.
     """
     from .temperature_selection import grid_points, validate_temperature_selection
 
@@ -181,6 +184,7 @@ def align_observations(
             step_C=temperature_step_C, start_C=temperature_start_C, end_C=temperature_end_C,
             method=temperature_method, window_C=temperature_window_C,
             sample_freezing_intervals_C=sample_freezing_intervals_C,
+            retain_full_range_constraints=retain_full_range_constraints,
         )
 
     blank_streams: dict[tuple[str, str, str], pd.DataFrame] = {}
@@ -219,6 +223,21 @@ def align_observations(
             np.concatenate([rows.temperature_C.to_numpy(dtype=float) for rows in streams.values()])
         )[::-1]
     )
+    from .reporting import resolve_sample_range
+
+    range_details, resolved = {}, {}
+    values = np.asarray(targets, dtype=float)
+    for key, rows in streams.items():
+        support = values[(values >= rows.temperature_C.min()) & (values <= rows.temperature_C.max())]
+        requested = ranges.get(key[0], {})
+        limits, details = resolve_sample_range(rows, support, requested)
+        if not retain_full_range_constraints:
+            limits = requested
+        range_details[key[0]] = {
+            "run_id": key[1], "cycle_id": key[2], **details, "calculation_limits_C": limits,
+        }
+        resolved[key[0]] = limits
+    ranges = resolved
     empty = frame.iloc[:0].copy()
     points = []
     for point_order, target in enumerate(targets):
@@ -235,9 +254,7 @@ def align_observations(
                         else _latest_position(streams[key], temperature, limits)
                     )
                     if position is not None and _in_range(temperature, limits):
-                        observed_temperature = float(streams[key].iloc[position].temperature_C)
-                        if _in_range(observed_temperature, limits):
-                            positions.append(position)
+                        positions.append(position)
                 if not positions:
                     continue
                 # A synchronized run contributes one acquisition state. A range
@@ -246,9 +263,8 @@ def align_observations(
                 for key in keys:
                     row = streams[key].iloc[position]
                     limits = ranges.get(key[0], {})
-                    if (_in_range(temperature, limits) and _in_range(
-                        float(row.temperature_C), limits
-                    ) and _average_sample_eligible(row, temperature, sample_freezing_intervals_C)):
+                    if (_in_range(temperature, limits)
+                            and _average_sample_eligible(row, temperature, sample_freezing_intervals_C)):
                         selected[key] = (row, position)
             else:
                 for key in keys:
@@ -321,6 +337,7 @@ def align_observations(
                 blanks=blanks.reset_index(drop=True),
                 alignment=alignment,
                 point_order=point_order,
+                range_details=range_details,
             )
         )
     return points

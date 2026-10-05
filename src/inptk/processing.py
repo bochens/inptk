@@ -58,6 +58,8 @@ def cumulative_spectrum(
     method: Literal["mle", "average"] = DEFAULTS.method,
     fit_step_C: float | None = DEFAULTS.fit_step_C,
     water_blank_correction: bool = DEFAULTS.water_blank_correction,
+    water_blank_after_first_freeze: bool = DEFAULTS.water_blank_after_first_freeze,
+    water_blank_temperature_range_C=None,
 ) -> CumulativeSpectrumTable:
     """Estimate individual spectra using the same method as the named-curve workflow.
 
@@ -96,6 +98,8 @@ def cumulative_spectrum(
         temperature_method=temperature_method,
         temperature_window_C=temperature_window_C,
         water_blank_correction=water_blank_correction,
+        water_blank_after_first_freeze=water_blank_after_first_freeze,
+        water_blank_temperature_range_C=water_blank_temperature_range_C,
     )
     return _individual_spectra(estimated, fractions, view)
 
@@ -190,6 +194,8 @@ def differential_spectrum(
     fit_step_C: float | None = DEFAULTS.fit_step_C,
     z: float = DEFAULTS.z,
     water_blank_correction: bool = DEFAULTS.water_blank_correction,
+    water_blank_after_first_freeze: bool = DEFAULTS.water_blank_after_first_freeze,
+    water_blank_temperature_range_C=None,
 ) -> DifferentialSpectrumTable:
     """Calculate adjacent concentration changes in observation order.
 
@@ -211,6 +217,8 @@ def differential_spectrum(
         fit_step_C=fit_step_C,
         z=z,
         water_blank_correction=water_blank_correction,
+        water_blank_after_first_freeze=water_blank_after_first_freeze,
+        water_blank_temperature_range_C=water_blank_temperature_range_C,
     )
     return differentiate_spectrum(cumulative)
 

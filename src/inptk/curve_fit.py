@@ -55,12 +55,14 @@ def _trajectory(rows, *, name):
     return selected.iloc[keep], len(rows)
 
 
-def fit_curve(points, experiment, *, z, fit_step_C=None):
+def fit_curve(points, experiment, *, z, fit_step_C=None, blank_controls=None):
     """Fit selected streams and evaluate estimates and bounds at their temperatures."""
     sample_pieces = [point.samples for point in points if not point.samples.empty]
     if not sample_pieces:
         return {}, {"physical_droplets": 0, "observation_count": 0}
     blank_pieces = [point.blanks for point in points if not point.blanks.empty]
+    if blank_controls is not None and blank_controls.active:
+        blank_pieces = blank_controls.fit_rows(points)
     streams, identities = [], []
     observation_count = 0
     targets = sorted({p.temperature_C for p in points if not p.samples.empty}, reverse=True)
@@ -76,6 +78,13 @@ def fit_curve(points, experiment, *, z, fit_step_C=None):
             metadata = experiment.measurements[measurement]
             volume = metadata.droplet_volume_uL / 1000
             background = json.dumps([run, cycle]) if experiment.water_blank_map else ""
+            onset = None
+            if blank_controls is not None and blank_controls.active:
+                group = blank_controls.groups[(run, cycle)]
+                if group["fixed_zero_throughout"]:
+                    background = ""
+                elif blank_controls.after_first_freeze:
+                    onset = group["first_freeze_temperature_C"]
             streams.append(FreezingSeries(
                 temperatures=selected.temperature_C.to_numpy(dtype=float),
                 frozen=selected.n_frozen.to_numpy(dtype=int),
@@ -83,6 +92,7 @@ def fit_curve(points, experiment, *, z, fit_step_C=None):
                 sample_exposure=volume / metadata.dilution if role == "sample" else 0.0,
                 blank_exposure=volume if background else 0.0,
                 background=background,
+                background_onset_C=onset,
             ))
             identities.append({
                 "measurement_id": measurement, "run_id": run, "cycle_id": cycle,
@@ -116,5 +126,6 @@ def fit_curve(points, experiment, *, z, fit_step_C=None):
         "curve_shape": ("native_temperature_steps" if fit_step_C is None
                         else "piecewise_linear_cumulative_concentration"),
         "sources": identities,
+        "water_blank_controls": blank_controls.details if blank_controls is not None else [],
     }
     return estimates, details

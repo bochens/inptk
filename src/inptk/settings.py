@@ -12,7 +12,7 @@ from typing import Literal
 
 import numpy as np
 
-from .methods import validate_combination_method
+from .methods import validate_combination_method, validate_water_blank_range
 from .tables import UNITS
 from .temperature_selection import validate_temperature_selection
 
@@ -43,6 +43,8 @@ class EstimationSettings:
     temperature_window_C: float | None = None
     z: float = 1.96
     water_blank_correction: bool = True
+    water_blank_after_first_freeze: bool = False
+    water_blank_temperature_range_C: dict | None = None
 
     def __post_init__(self):
         validate_combination_method(self.method)
@@ -56,6 +58,9 @@ class EstimationSettings:
         positive_number("z", self.z)
         if not isinstance(self.water_blank_correction, bool):
             raise TypeError("water_blank_correction must be a bool (True or False)")
+        if not isinstance(self.water_blank_after_first_freeze, bool):
+            raise TypeError("water_blank_after_first_freeze must be a bool (True or False)")
+        validate_water_blank_range(self.water_blank_temperature_range_C)
         if self.fit_step_C is not None:
             positive_number("fit_step_C", self.fit_step_C)
             if self.method != "mle":

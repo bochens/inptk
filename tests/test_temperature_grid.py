@@ -71,10 +71,13 @@ def test_window_selects_maximum_count_and_latest_tie_without_synthetic_zeros():
     assert points(data, "window", .1)[0].samples.temperature_C.tolist() == [-5.01]
 
 
-def test_range_checks_both_source_and_target():
+def test_range_selects_targets_without_changing_window_source():
     data = source()
+    full = points(data, "window", .5)
     chosen = points(data, "window", .5, {"sample": {"min_C": -7}})
-    assert chosen[0].samples.n_frozen.tolist() == [0]  # -7.024 is outside range
+    pd.testing.assert_frame_equal(chosen[0].samples, full[0].samples)
+    assert chosen[0].samples.n_frozen.tolist() == [1]
+    assert chosen[0].samples.temperature_C.tolist() == [-7.024]
     assert chosen[1].samples.empty
 
 

@@ -507,7 +507,8 @@ def test_unselected_cycles_do_not_change_handoff_limits():
     assert actual.temperature_ranges_C == expected.temperature_ranges_C
 
 
-def test_report_keeps_observation_identity_with_shuffled_input_rows():
+@pytest.mark.parametrize("step", [None, .5])
+def test_report_keeps_source_identity_with_shuffled_input_rows(step):
     data = source((0, 4, 8, 12, 16),
                   blank=([0, 0, 1, 1, 2], [-5, -6, -7, -8, -9], 32, 50))
     original = data.counts.to_dataframe().sample(frac=1, random_state=7)
@@ -516,19 +517,29 @@ def test_report_keeps_observation_identity_with_shuffled_input_rows():
         water_blank_map=data.water_blank_map,
     )
     report = inptk.suggest_temperature_ranges(
-        shuffled, temperature_step_C=.5
+        shuffled, temperature_step_C=step
     ).observations.to_dataframe()
     expected = inptk.cumulative_spectrum(
-        inptk.frozen_fraction(shuffled), experiment=shuffled, method="average"
-    ).to_dataframe().set_index("observation_id")
-    assert report.observation_id.tolist() == original.loc[
-        original.measurement_id.eq("001"), "observation_id"
-    ].tolist()
-    assert len(report) == 5
+        inptk.frozen_fraction(shuffled), experiment=shuffled, method="average",
+        temperature_step_C=step,
+    ).to_dataframe()
+    if step is None:
+        assert report.observation_id.tolist() == original.loc[
+            original.measurement_id.eq("001"), "observation_id"
+        ].tolist()
+        assert len(report) == 5
+    else:
+        assert report.temperature_C.tolist() == list(np.arange(-5, -9.5, -.5))
+        assert report.source_observation_id.tolist() == ["0", "0", "1", "1", "2", "2", "3", "3", "4"]
+        raw = original.loc[original.measurement_id.eq("001")].set_index("observation_id")
+        for row in report.itertuples():
+            assert row.observed_temperature_C == raw.loc[row.source_observation_id, "temperature_C"]
+            assert row.n_frozen == raw.loc[row.source_observation_id, "n_frozen"]
     columns = ["concentration", "lower_error", "upper_error"]
     pd.testing.assert_frame_equal(
-        report.set_index("observation_id")[columns].sort_index(),
-        expected[columns].sort_index(),
+        report.set_index("temperature_C")[columns].sort_index(),
+        expected.set_index("temperature_C")[columns].sort_index(),
+        check_index_type=False,
     )
     for row in report.itertuples():
         if not row.in_suggested_range:
@@ -536,8 +547,9 @@ def test_report_keeps_observation_identity_with_shuffled_input_rows():
             continue
         assert json.loads(row.blank_observation_ids) == [{
             "measurement_id": "water", "run_id": "R", "cycle_id": "01",
-            "observation_id": row.observation_id,
+            "observation_id": row.observation_id if step is None else row.source_observation_id,
         }]
+    pd.testing.assert_frame_equal(original.reset_index(drop=True), shuffled.counts.to_dataframe())
 
 
 @pytest.mark.parametrize("method", ["latest", "max", "window"])
@@ -545,7 +557,7 @@ def test_report_keeps_observation_identity_with_shuffled_input_rows():
     None, ([0, 0, 1, 1, 2, 2, 3], [-5, -6, -7, -8, -9, -10, -11], 20, 25),
 ])
 def test_summary_preserves_ranges_and_reasons_without_report(method, blank, monkeypatch):
-    from inptk import ranges
+    from inptk.blank_controls import BlankControls
 
     data = source(blank=blank)
     settings = {"temperature_step_C": 1, "temperature_method": method}
@@ -553,10 +565,14 @@ def test_summary_preserves_ranges_and_reasons_without_report(method, blank, monk
         settings["temperature_window_C"] = 1
     full = inptk.suggest_temperature_ranges(data, **settings)
 
-    def no_report_alignment(*args, **kwargs):
-        raise AssertionError("A summary must not calculate the per-observation report")
+    original = BlankControls.align
 
-    monkeypatch.setattr(ranges, "align_observations", no_report_alignment)
+    def no_report_alignment(self, *args, **kwargs):
+        if kwargs.get("temperature_step_C") is None:
+            raise AssertionError("A summary must not calculate the per-observation report")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(BlankControls, "align", no_report_alignment)
     summary = inptk.suggest_temperature_ranges(data, include_observations=False, **settings)
     assert summary.observations is None
     assert summary.inputs == full.inputs

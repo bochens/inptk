@@ -105,12 +105,13 @@ def _blank_arrays(
 
 
 def _blank_groups(
-    sample_blank_group: Any, blank_group: Any, sample_count: int, blank_count: int
+    sample_blank_group: Any, blank_group: Any, sample_count: int, blank_count: int,
+    fixed_zero_groups=(),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Require exact row labels; physical blank identity remains the caller's job."""
     if sample_blank_group is None and blank_group is None:
         return np.repeat("shared", sample_count), np.repeat("shared", blank_count)
-    if not blank_count:
+    if not blank_count and not fixed_zero_groups:
         raise ValueError("Blank group labels require blank observations")
     if sample_blank_group is None or blank_group is None:
         raise ValueError("sample_blank_group and blank_group must be supplied together")
@@ -126,7 +127,10 @@ def _blank_groups(
             raise ValueError(f"{name} labels must be nonempty strings")
         labels.append(array)
     sample_labels, blank_labels = labels
-    if set(sample_labels) != set(blank_labels):
+    zero = set(fixed_zero_groups)
+    if zero & set(blank_labels) or not zero <= set(sample_labels):
+        raise ValueError("Fixed-zero backgrounds must label samples and have no blank rows")
+    if set(sample_labels) - zero != set(blank_labels):
         raise ValueError("Every sample blank group must have blanks, with no unused blank groups")
     return sample_labels, blank_labels
 
@@ -221,6 +225,7 @@ def fit_concentration(
     blank_volume_uL: Any = None,
     sample_blank_group: Any = None,
     blank_group: Any = None,
+    fixed_zero_groups=(),
 ) -> tuple[float, float, float, bool]:
     """Return concentration, lower/upper error widths and a finite-result flag.
 
@@ -269,7 +274,7 @@ def fit_concentration(
         well_volume_uL, blank_frozen, blank_total, blank_volume_uL
     )
     sample_labels, blank_labels = _blank_groups(
-        sample_blank_group, blank_group, len(frozen), len(blank_x)
+        sample_blank_group, blank_group, len(frozen), len(blank_x), fixed_zero_groups
     )
     with_blank = bool(len(blank_x))
     drop = _scalar(confidence_drop, name="confidence_drop")
@@ -281,7 +286,8 @@ def fit_concentration(
         for label in dict.fromkeys(sample_labels):
             sample_mask, blank_mask = sample_labels == label, blank_labels == label
             if not (
-                np.all(frozen[sample_mask] == total[sample_mask])
+                np.any(blank_mask)
+                and np.all(frozen[sample_mask] == total[sample_mask])
                 and np.all(blank_x[blank_mask] == blank_n[blank_mask])
             ):
                 informative_groups.append(label)
@@ -486,6 +492,7 @@ def average_concentration(
     blank_volume_uL: Any = None,
     sample_blank_group: Any = None,
     blank_group: Any = None,
+    fixed_zero_groups=(),
 ) -> tuple[float, float, float, bool]:
     """Direct blank-corrected concentrations, arithmetic mean and propagated errors.
 
@@ -513,7 +520,7 @@ def average_concentration(
         well_volume_uL, blank_frozen, blank_total, blank_volume_uL
     )
     sample_labels, blank_labels = _blank_groups(
-        sample_blank_group, blank_group, len(frozen), len(blank_x)
+        sample_blank_group, blank_group, len(frozen), len(blank_x), fixed_zero_groups
     )
     sample_rate, sample_lower, sample_upper = _direct_concentration(frozen, total, volumes, z)
     weights = dilutions / len(frozen)

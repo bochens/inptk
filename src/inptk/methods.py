@@ -39,6 +39,17 @@ def _temperature_bound(value, *, measurement_id: str, boundary: str) -> float | 
     return number
 
 
+def validate_water_blank_range(value):
+    """One inclusive observation range shared by all assigned water controls."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("water_blank_temperature_range_C must be a range object")
+    return validate_temperature_ranges(
+        {"water control": value}, measurement_ids={"water control"}
+    )["water control"]
+
+
 def validate_temperature_ranges(
     value, *, measurement_ids: set[str]
 ) -> dict[str, dict[str, float | None]]:
