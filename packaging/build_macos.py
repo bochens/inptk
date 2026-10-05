@@ -6,7 +6,6 @@ application/installer certificates and a notarytool keychain profile.
 """
 
 import argparse
-import hashlib
 import importlib.metadata
 import json
 import platform
@@ -178,9 +177,6 @@ def main():
             run("xcrun", "stapler", "staple", work / target.name)
             run("spctl", "--assess", "--type", "install", work / target.name)
         shutil.copy2(work / target.name, target)
-    with target.open("rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    target.with_suffix(".pkg.sha256").write_text(f"{digest}  {target.name}\n")
     print(
         f"Built {target}\nIcescopy executable after installation: /Applications/INP-toolkit/inptk"
     )

@@ -222,11 +222,6 @@ def main():
             str(zip_path.with_suffix("")), "zip", root_dir=output, base_dir=folder.name
         )
         shutil.copy2(work / installer.name, installer)
-    for path in (zip_path, installer):
-        path.with_suffix(path.suffix + ".sha256").write_text(
-            f"{digest(path)}  {path.name}\n",
-            encoding="utf-8",
-        )
     print(f"Built executable: {folder / 'inptk.exe'}\nPortable ZIP: {zip_path}")
     print(f"Unsigned test installer: {installer}")
 

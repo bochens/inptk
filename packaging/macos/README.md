@@ -33,8 +33,8 @@ python3.13 -m venv /tmp/inptk-build
 
 Commit tracked changes before building. The builder includes the exact Git source
 archive, dependency licenses, and `BUILD.json` with versions and commit identity.
-It uses a temporary build directory and leaves only the installer and its SHA-256
-checksum in `dist/macos`. Existing output packages are not overwritten.
+It uses a temporary build directory and leaves only the installer in `dist/macos`.
+Existing output packages are not overwritten.
 
 The executable check starts the bundled process outside the source tree, uploads
 raw sample/blank counts through JSON, and compares Average, joint MLE and their

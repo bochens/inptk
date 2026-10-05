@@ -52,7 +52,6 @@ Outputs in `dist/windows` are:
 - `inptk-VERSION-windows-x64-unsigned/inptk.exe` plus `_internal`, source and licenses.
 - `inptk-VERSION-windows-x64-unsigned.zip` for portable use.
 - `inptk-VERSION-windows-x64-unsigned-setup.exe` for per-user installation.
-- SHA-256 checksums for the ZIP and installer.
 
 Build scratch stays in `tmp/windows-package` and is cleaned on completion.
 Existing output artifacts are not overwritten. `SOURCE.tar.gz` contains the
@@ -92,7 +91,7 @@ or temporary-CSV calculation loop should be introduced.
 
 ## Distribution
 
-Attach a signed `inptk-VERSION-windows-x64-setup.exe` and checksum to the same
+Attach a signed `inptk-VERSION-windows-x64-setup.exe` to the same
 GitHub Release as the Mac packages. Use Windows code signing when credentials are
 available, and test the downloaded installer on a clean PC. Keep unsigned builds
 explicitly marked as test installers; do not claim signing or SmartScreen behavior
