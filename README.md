@@ -133,7 +133,8 @@ concentration uncertainty from the likelihood.
 
 Reported concentrations span the original sample's first through last freezing
 events. Values and uncertainty outside the interval are `NaN`. Average contributors
-must lie within each input's own interval and have positive frozen sample counts.
+must lie within each input's own interval and have at least one frozen and one
+unfrozen well, including when using the full range.
 A zero concentration produced by blank correction remains valid inside the interval.
 
 Water blanks in each run and cycle form one assigned control, retaining each

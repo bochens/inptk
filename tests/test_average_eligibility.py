@@ -75,6 +75,79 @@ def test_manual_overlap_averages_only_inputs_that_have_started_freezing():
     assert result.loc[-7, "concentration"] == pytest.approx((-np.log(.6) - 2*np.log(.9)) / .1)
 
 
+@pytest.mark.parametrize("grid", [
+    {"temperature_step_C": None},
+    {"temperature_step_C": .5},
+    {"temperature_step_C": .5, "temperature_method": "max"},
+    {"temperature_step_C": .5, "temperature_method": "window", "temperature_window_C": 1},
+])
+@pytest.mark.parametrize("selected_range", [False, True])
+@pytest.mark.parametrize("correct_blank", [False, True])
+def test_average_excludes_all_frozen_inputs_before_mean_and_uncertainty(
+    grid, selected_range, correct_blank,
+):
+    streams = [("A", [0, 2, 10, 10, 10], 1), ("B", [0, 1, 3, 6, 10], 10)]
+    blanks = None
+    if correct_blank:
+        streams.append(("water", [0, 0, 1, 1, 2], 1))
+        blanks = {"A": ["water"], "B": ["water"]}
+    data = experiment(streams, blanks=blanks)
+    original = data.counts.to_dataframe()
+    options = {"temperature_ranges_C": {
+        "A": {"min_C": -9, "max_C": -5}, "B": {"min_C": -9, "max_C": -5},
+    }} if selected_range else {}
+    result = inptk.estimate_concentration(
+        inptk.frozen_fraction(data), experiment=data, method="average",
+        curves={"B": {"inputs": ["B"]}, "combined": {"inputs": ["A", "B"]}},
+        **grid, **options,
+    ).to_dataframe()
+    combined = result.loc[result.curve_id.eq("combined")].set_index("temperature_C")
+    single = result.loc[result.curve_id.eq("B")].set_index("temperature_C")
+    values = ["concentration", "lower_error", "upper_error"]
+    assert combined.loc[-6, "contributor_count"] == 2
+    # A's last event at -7 freezes every well. It must not spoil B's finite estimate.
+    for temperature in (-7, -8):
+        point = combined.loc[temperature]
+        assert point.contributor_count == 1
+        assert json.loads(point.contributing_measurement_ids) == ["B"]
+        np.testing.assert_allclose(point[values].to_numpy(dtype=float),
+                                   single.loc[temperature, values].to_numpy(dtype=float))
+        assert np.isfinite(point[values].to_numpy(dtype=float)).all()
+        assert {row["measurement_id"] for row in json.loads(point.source_observations)
+                if row["role"] == "sample"} == {"B"}
+    assert combined.loc[-9, values].isna().all()
+    assert combined.loc[-9, "contributor_count"] == 0
+    assert combined.loc[-9, "selection_status"] == "no_eligible_measurements"
+    # Individual spectra expose the direct all-frozen calculation.
+    assert np.isinf(single.loc[-9, "concentration"])
+    assert single.loc[-9, ["lower_error", "upper_error"]].isna().all()
+    pd.testing.assert_frame_equal(data.counts.to_dataframe(), original)
+
+
+@pytest.mark.parametrize("ranges", [
+    {}, {"A": {"min_C": -7, "max_C": -6}, "B": {"min_C": -7, "max_C": -6}},
+])
+def test_cli_average_excludes_all_frozen_in_full_and_selected_ranges(tmp_path, capsys, ranges):
+    from inptk.cli import main
+
+    data = experiment([("A", [0, 2, 10], 1), ("B", [0, 1, 3], 10)])
+    source, output = tmp_path / "source.inptk", tmp_path / "average.inptk"
+    data.save(source)
+    assert main([
+        "analyze", str(source), "--format", "saved", "--method", "average",
+        "--curves", json.dumps({"combined": {"inputs": ["A", "B"]}}),
+        "--temperature-step", "0.5", "--temperature-ranges", json.dumps(ranges),
+        "--out", str(output), "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
+    table = inptk.load(output).to_dataframe()
+    point = table.loc[table.curve_id.eq("combined") & table.temperature_C.eq(-7)].iloc[0]
+    assert point.concentration == pytest.approx(-10 * np.log(.7) / .05)
+    assert np.isfinite([point.concentration, point.lower_error, point.upper_error]).all()
+    assert point.contributor_count == 1
+    assert json.loads(point.contributing_measurement_ids) == ["B"]
+
+
 def test_corrected_zero_with_positive_sample_counts_remains_a_contributor():
     data = experiment([("A", [1, 2], 1), ("B", [3, 4], 1), ("water", [1, 2], 1)],
                       blanks={"A": ["water"], "B": ["water"]})

@@ -501,8 +501,8 @@ def _capabilities(parser):
             },
             "average": {
                 "calculation": "direct corrected concentrations; arithmetic mean in overlap",
-                "contributors": "positive frozen sample counts within each input's "
-                "first-to-last freezing interval and selected ranges",
+                "contributors": "sample counts with 0 < n_frozen < n_total within "
+                "each input's first-to-last freezing interval and selected ranges",
                 "uncertainty": "propagated Wilson binomial bounds; shared blank counted once",
                 "output_order": "native observation order, latest-warmer alignment when needed",
             },

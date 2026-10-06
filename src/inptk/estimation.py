@@ -298,8 +298,8 @@ def estimate_concentration(
         "joint_curve_fits": joint_fits,
         **({"average_blank_aggregation": "equal-volume counts pooled; different volumes "
             "weighted by total assayed volume",
-            "average_contributors": "positive frozen sample counts within each input's "
-            "original first-to-last freezing interval, intersected with selected ranges"}
+            "average_contributors": "sample counts with 0 < n_frozen < n_total within "
+            "each input's original first-to-last freezing interval, intersected with selected ranges"}
            if method == "average" else {}),
         "uncertainty_assumption": (
             "Independent physical droplet sets, repeated observations never pooled; "

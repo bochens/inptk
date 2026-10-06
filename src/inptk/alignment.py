@@ -85,11 +85,11 @@ def _in_range(temperature: float, limits: Mapping) -> bool:
 
 
 def _average_sample_eligible(row, temperature, intervals):
-    """Average uses positive sample counts inside that input's freezing interval."""
+    """Average requires frozen and unfrozen wells within the input's interval."""
     if intervals is None:
         return True
     limits = intervals[str(row["measurement_id"])]
-    return (row["n_frozen"] > 0 and limits["min_C"] is not None
+    return (0 < row["n_frozen"] < row["n_total"] and limits["min_C"] is not None
             and _in_range(temperature, limits))
 
 
