@@ -830,6 +830,171 @@ def serve_client(parser):
     return 0
 
 
+def _preview_command(args, store, json_mode):
+    preview = _preview(args, store)
+    if json_mode:
+        _print_json(preview)
+    else:
+        print(
+            f"Read {len(preview['table']['rows'])} original observations "
+            f"from {len(preview['measurements'])} measurements"
+        )
+        if not preview["suspension_metadata"]["valid"]:
+            print(
+                f"Concentration metadata incomplete or invalid: "
+                f"{preview['suspension_metadata']['error']}"
+            )
+        print("No concentrations calculated. Use --json for plot data and metadata.")
+    return 0
+
+
+def _suggest_ranges_command(args, store, command):
+    proposal = suggest_temperature_ranges(
+        _read_analysis_input(args, store),
+        curves=_json_object(args.curves, "--curves"),
+        include_observations=not args.summary,
+        min_frozen=args.min_frozen,
+        min_unfrozen=args.min_unfrozen,
+        z=args.z,
+        temperature_step_C=args.temperature_step_C,
+        temperature_start_C=args.temperature_start_C,
+        temperature_end_C=args.temperature_end_C,
+        temperature_method=args.temperature_method,
+        temperature_window_C=args.temperature_window_C,
+        water_blank_correction=not args.no_water_blank_correction,
+        water_blank_after_first_freeze=args.water_blank_after_first_freeze,
+        water_blank_temperature_range_C=_json_object(
+            args.water_blank_temperature_range, "--water-blank-temperature-range"
+        ),
+    )
+    complete = all(item["range_C"] is not None for item in proposal.inputs.values())
+    _print_json(
+        _response(
+            command,
+            complete=complete,
+            temperature_ranges_C=proposal.temperature_ranges_C if complete else None,
+            inputs=proposal.inputs,
+            settings=proposal.settings,
+            **(
+                {"table": _table_payload(proposal.observations)}
+                if proposal.observations is not None
+                else {}
+            ),
+            warnings=[]
+            if complete
+            else [
+                "Some inputs have no usable range. Review thresholds or selected inputs."
+            ],
+        )
+    )
+    return 0
+
+
+def _table_command(args, store, json_mode, command):
+    value = store.load(args.input)
+    if args.table is None:
+        if args.curve or args.columns is not None or args.no_history:
+            raise ValueError("--curve, --columns and --no-history require --table")
+        summary = table_summary(value)
+        if json_mode:
+            _print_json(_response(command, tables=summary))
+        else:
+            for name, info in summary.items():
+                print(f"{name}: {info['row_count']} rows ({info['type']})")
+    else:
+        table = select_table(value, args.table, args.curve)
+        if json_mode:
+            _print_json(
+                _response(
+                    command,
+                    table_name=args.table,
+                    curve_id=args.curve,
+                    table=_table_payload(
+                        table, columns=args.columns, include_history=not args.no_history
+                    ),
+                    warnings=table.warnings,
+                )
+            )
+        else:
+            print(_table_frame(table, args.columns).to_string(index=False))
+    return 0
+
+
+def _export_csv_command(args, store, json_mode, command):
+    if str(args.out).startswith("@"):
+        raise ValueError(
+            "CSV export requires a file path; use table --json for client data"
+        )
+    result = store.load(args.input)
+    table = select_table(result, args.table, args.curve)
+    if args.table == "cumulative":
+        from .reporting import reportable_spectrum
+
+        table = reportable_spectrum(table)
+    table.to_dataframe().to_csv(args.out, index=False, mode="x")
+    if json_mode:
+        _print_json(
+            _response(
+                command,
+                output=store.output_name(args.out),
+                table=args.table,
+                curve_id=args.curve,
+            )
+        )
+    return 0
+
+
+def _analyze_command(args, store, json_mode, command):
+    experiment = _read_analysis_input(args, store)
+    result = analyze_concentration(
+        experiment,
+        **_estimation_settings(args),
+        output_basis=args.output_basis,
+        differential=args.differential,
+        decrease_policy=args.decrease_policy,
+    )
+    store.save(result, args.out)
+    if json_mode:
+        _print_json(
+            _response(
+                command,
+                output=store.output_name(args.out),
+                warnings=result.warnings,
+                settings=result.settings,
+                observation_tables={
+                    "counts": {"type": "CountsTable", "row_count": len(result.counts)},
+                    "frozen_fraction": {
+                        "type": "FrozenFractionTable",
+                        "row_count": len(result.frozen_fraction),
+                    },
+                },
+                curves={
+                    name: {
+                        "curve_id": curve.curve_id,
+                        "kind": curve.kind,
+                        "sources": curve.sources,
+                        "tables": {
+                            quantity: {"type": type(table).__name__, "row_count": len(table)}
+                            for quantity in (
+                                "cumulative",
+                                "excluded",
+                                "differential",
+                            )
+                            if (table := getattr(curve, quantity)) is not None
+                        },
+                    }
+                    for name, curve in result.curves.items()
+                },
+            )
+        )
+    else:
+        for warning in result.warnings:
+            print(f"Warning: {warning}")
+        count = sum(len(curve.cumulative) for curve in result.curves.values())
+        print(f"Saved {count} concentration rows in {len(result.curves)} curves to {args.out}")
+    return 0
+
+
 def main(argv=None, *, store=None, parser=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser() if parser is None else parser
@@ -851,89 +1016,11 @@ def main(argv=None, *, store=None, parser=None):
             _print_json(_capabilities(parser))
             return 0
         if command == "preview":
-            preview = _preview(args, store)
-            if json_mode:
-                _print_json(preview)
-            else:
-                print(
-                    f"Read {len(preview['table']['rows'])} original observations "
-                    f"from {len(preview['measurements'])} measurements"
-                )
-                if not preview["suspension_metadata"]["valid"]:
-                    print(
-                        f"Concentration metadata incomplete or invalid: "
-                        f"{preview['suspension_metadata']['error']}"
-                    )
-                print("No concentrations calculated. Use --json for plot data and metadata.")
-            return 0
+            return _preview_command(args, store, json_mode)
         if command == "suggest-ranges":
-            proposal = suggest_temperature_ranges(
-                _read_analysis_input(args, store),
-                curves=_json_object(args.curves, "--curves"),
-                include_observations=not args.summary,
-                min_frozen=args.min_frozen,
-                min_unfrozen=args.min_unfrozen,
-                z=args.z,
-                temperature_step_C=args.temperature_step_C,
-                temperature_start_C=args.temperature_start_C,
-                temperature_end_C=args.temperature_end_C,
-                temperature_method=args.temperature_method,
-                temperature_window_C=args.temperature_window_C,
-                water_blank_correction=not args.no_water_blank_correction,
-                water_blank_after_first_freeze=args.water_blank_after_first_freeze,
-                water_blank_temperature_range_C=_json_object(
-                    args.water_blank_temperature_range, "--water-blank-temperature-range"
-                ),
-            )
-            complete = all(item["range_C"] is not None for item in proposal.inputs.values())
-            _print_json(
-                _response(
-                    command,
-                    complete=complete,
-                    temperature_ranges_C=proposal.temperature_ranges_C if complete else None,
-                    inputs=proposal.inputs,
-                    settings=proposal.settings,
-                    **(
-                        {"table": _table_payload(proposal.observations)}
-                        if proposal.observations is not None
-                        else {}
-                    ),
-                    warnings=[]
-                    if complete
-                    else [
-                        "Some inputs have no usable range. Review thresholds or selected inputs."
-                    ],
-                )
-            )
-            return 0
+            return _suggest_ranges_command(args, store, command)
         if command == "table":
-            value = store.load(args.input)
-            if args.table is None:
-                if args.curve or args.columns is not None or args.no_history:
-                    raise ValueError("--curve, --columns and --no-history require --table")
-                summary = table_summary(value)
-                if json_mode:
-                    _print_json(_response(command, tables=summary))
-                else:
-                    for name, info in summary.items():
-                        print(f"{name}: {info['row_count']} rows ({info['type']})")
-            else:
-                table = select_table(value, args.table, args.curve)
-                if json_mode:
-                    _print_json(
-                        _response(
-                            command,
-                            table_name=args.table,
-                            curve_id=args.curve,
-                            table=_table_payload(
-                                table, columns=args.columns, include_history=not args.no_history
-                            ),
-                            warnings=table.warnings,
-                        )
-                    )
-                else:
-                    print(_table_frame(table, args.columns).to_string(index=False))
-            return 0
+            return _table_command(args, store, json_mode, command)
         if store.exists(args.out):
             raise FileExistsError(f"Output already exists: {args.out}")
         if command == "save":
@@ -960,74 +1047,8 @@ def main(argv=None, *, store=None, parser=None):
             _save_step(result, args, json_mode, store)
             return 0
         if command == "export-csv":
-            if str(args.out).startswith("@"):
-                raise ValueError(
-                    "CSV export requires a file path; use table --json for client data"
-                )
-            result = store.load(args.input)
-            table = select_table(result, args.table, args.curve)
-            if args.table == "cumulative":
-                from .reporting import reportable_spectrum
-
-                table = reportable_spectrum(table)
-            table.to_dataframe().to_csv(args.out, index=False, mode="x")
-            if json_mode:
-                _print_json(
-                    _response(
-                        command,
-                        output=store.output_name(args.out),
-                        table=args.table,
-                        curve_id=args.curve,
-                    )
-                )
-            return 0
-        experiment = _read_analysis_input(args, store)
-        result = analyze_concentration(
-            experiment,
-            **_estimation_settings(args),
-            output_basis=args.output_basis,
-            differential=args.differential,
-            decrease_policy=args.decrease_policy,
-        )
-        store.save(result, args.out)
-        if json_mode:
-            _print_json(
-                _response(
-                    command,
-                    output=store.output_name(args.out),
-                    warnings=result.warnings,
-                    settings=result.settings,
-                    observation_tables={
-                        "counts": {"type": "CountsTable", "row_count": len(result.counts)},
-                        "frozen_fraction": {
-                            "type": "FrozenFractionTable",
-                            "row_count": len(result.frozen_fraction),
-                        },
-                    },
-                    curves={
-                        name: {
-                            "curve_id": curve.curve_id,
-                            "kind": curve.kind,
-                            "sources": curve.sources,
-                            "tables": {
-                                quantity: {"type": type(table).__name__, "row_count": len(table)}
-                                for quantity in (
-                                    "cumulative",
-                                    "excluded",
-                                    "differential",
-                                )
-                                if (table := getattr(curve, quantity)) is not None
-                            },
-                        }
-                        for name, curve in result.curves.items()
-                    },
-                )
-            )
-        else:
-            for warning in result.warnings:
-                print(f"Warning: {warning}")
-            count = sum(len(curve.cumulative) for curve in result.curves.values())
-            print(f"Saved {count} concentration rows in {len(result.curves)} curves to {args.out}")
+            return _export_csv_command(args, store, json_mode, command)
+        return _analyze_command(args, store, json_mode, command)
     except _UsageError as error:
         if json_mode:
             _print_json(
