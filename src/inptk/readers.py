@@ -278,7 +278,7 @@ def _icescopy_observations(
             data = data.drop(columns="cycle")
     has_time = "time_s" in data or "timestamp" in data
     has_image_identity = "picture" in data or "image_name" in data
-    grouped = read_export(data, format="icescopy", metadata=header_metadata)
+    grouped = read_export(data, metadata=header_metadata)
     known = {
         str(name) for tables in grouped.values() for table in tables for name in table.sample_id
     }
