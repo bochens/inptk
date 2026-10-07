@@ -20,9 +20,7 @@ def freezing_intervals(frame, groups, ranges):
     for identity, rows in frame.groupby(keys, sort=False):
         if "time_s" in rows:
             rows = rows.sort_values("time_s", kind="stable")
-        previous = rows.n_frozen.cummax().shift(fill_value=0)
-        temperatures = rows.loc[rows.n_frozen.gt(previous), "temperature_C"]
-        events[identity] = temperatures
+        events[identity] = _event_temperatures(rows)
     intervals = {}
     for name, group in groups.items():
         bounds = []
@@ -75,15 +73,19 @@ def reportable_spectrum(spectrum):
     return spectrum.select(reporting_status="within_freezing_interval")
 
 
-def resolve_sample_range(rows, temperatures, limits):
-    """Resolve a use range on available calculation temperatures, after alignment.
-
-    The full useful span is the existing calculation points inside the original
-    first-to-last freezing interval. Explicit limits restrict calculation targets
-    without changing their source count rows or widening the requested range.
-    """
+def _event_temperatures(rows):
+    """Temperatures where the frozen count reaches a new maximum (freezing events)."""
     previous = rows.n_frozen.cummax().shift(fill_value=0)
-    events = rows.loc[rows.n_frozen.gt(previous), "temperature_C"]
+    return rows.loc[rows.n_frozen.gt(previous), "temperature_C"]
+
+
+def sample_range_details(rows, temperatures, limits):
+    """Report an input's full and selected spans on the available calculation points.
+
+    The full span is the calculation points inside the original first-to-last
+    freezing interval. The selected span is the part of it inside the limits.
+    """
+    events = _event_temperatures(rows)
     values = np.asarray(temperatures, dtype=float)
     useful = values[(values >= events.min()) & (values <= events.max())]
     full = {"min_C": float(useful.min()), "max_C": float(useful.max())} if useful.size else None
@@ -91,4 +93,4 @@ def resolve_sample_range(rows, temperatures, limits):
                       & (useful <= (np.inf if limits.get("max_C") is None else limits["max_C"]))]
     extent = ({"min_C": float(selected.min()), "max_C": float(selected.max())}
               if selected.size else None)
-    return dict(limits), {"full_range_C": full, "selected_range_C": extent}
+    return {"full_range_C": full, "selected_range_C": extent}

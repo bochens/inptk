@@ -223,19 +223,17 @@ def align_observations(
             np.concatenate([rows.temperature_C.to_numpy(dtype=float) for rows in streams.values()])
         )[::-1]
     )
-    from .reporting import resolve_sample_range
+    from .reporting import sample_range_details
 
-    range_details, resolved = {}, {}
+    range_details = {}
     values = np.asarray(targets, dtype=float)
     for key, rows in streams.items():
         support = values[(values >= rows.temperature_C.min()) & (values <= rows.temperature_C.max())]
-        requested = ranges.get(key[0], {})
-        limits, details = resolve_sample_range(rows, support, requested)
+        limits = dict(ranges.get(key[0], {}))
         range_details[key[0]] = {
-            "run_id": key[1], "cycle_id": key[2], **details, "calculation_limits_C": limits,
+            "run_id": key[1], "cycle_id": key[2], **sample_range_details(rows, support, limits),
+            "calculation_limits_C": limits,
         }
-        resolved[key[0]] = limits
-    ranges = resolved
     empty = frame.iloc[:0].copy()
     points = []
     for point_order, target in enumerate(targets):

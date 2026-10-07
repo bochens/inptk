@@ -123,7 +123,7 @@ def grid_points(
     Empty sample windows create gaps; missing required blank states are errors.
     """
     from .alignment import AlignedPoint, _sample_eligible, _in_range, _ordered_rows
-    from .reporting import resolve_sample_range
+    from .reporting import sample_range_details
 
     keys = [(str(m["measurement_id"]), str(m["run_id"]), str(m["cycle_id"])) for m in members]
     blank_keys = {
@@ -149,7 +149,8 @@ def grid_points(
         choices = {t: selector.select(t, method=method, window_C=window_C)
                    for t in targets if cold <= t <= warm}
         if key not in blank_keys:
-            limits, details = resolve_sample_range(
+            limits = dict(limits)
+            details = sample_range_details(
                 rows, [t for t, row in choices.items() if row is not None], limits
             )
             range_details[key[0]] = {
