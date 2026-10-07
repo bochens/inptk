@@ -18,10 +18,6 @@ from .tables import CurveSpectrumTable, FrozenFractionTable
 from .water_blank import estimate_point, sample_rows
 
 
-def _state_key(point) -> tuple:
-    return point.count_key()
-
-
 def _sources(point) -> list[dict]:
     records = []
     for role, rows in (("sample", point.sample_records), ("blank", point.blank_records)):
@@ -249,7 +245,7 @@ def estimate_concentration(
                 else:
                     if point.blank_state is not None and point.blank_state.unavailable:
                         record["selection_status"] = "missing_blank_observations"
-                    key = _state_key(point)
+                    key = point.count_key()
                     if key not in cache:
                         cache[key] = estimate_point(
                             point.samples,
