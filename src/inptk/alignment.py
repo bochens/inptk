@@ -50,6 +50,13 @@ def _records(frame):
     return [dict(zip(columns, row)) for row in frame.to_numpy()]
 
 
+def _rows_for(frame: pd.DataFrame, measurement, run, cycle) -> pd.DataFrame:
+    """Rows of one measurement in one run and cycle, in their original order."""
+    return frame.loc[
+        frame.measurement_id.eq(measurement) & frame.run_id.eq(run) & frame.cycle_id.eq(cycle)
+    ]
+
+
 def _ordered_rows(rows: pd.DataFrame) -> pd.DataFrame:
     if "time_s" in rows:
         rows = rows.sort_values("time_s", kind="stable")
@@ -166,9 +173,7 @@ def align_observations(
         if key in streams:
             raise ValueError(f"Repeated physical sample member: {key}")
         measurement, run, cycle = key
-        rows = frame.loc[
-            frame.measurement_id.eq(measurement) & frame.run_id.eq(run) & frame.cycle_id.eq(cycle)
-        ]
+        rows = _rows_for(frame, measurement, run, cycle)
         if rows.empty:
             raise ValueError(f"No observations for sample member {key}")
         streams[key] = _ordered_rows(rows)
@@ -192,13 +197,7 @@ def align_observations(
         for blank_id in water_blank_map.get(measurement, []):
             key = (str(blank_id), run, cycle)
             if key not in blank_streams:
-                blank_streams[key] = _ordered_rows(
-                    frame.loc[
-                        frame.measurement_id.eq(blank_id)
-                        & frame.run_id.eq(run)
-                        & frame.cycle_id.eq(cycle)
-                    ]
-                )
+                blank_streams[key] = _ordered_rows(_rows_for(frame, blank_id, run, cycle))
     synchronized_runs = {
         identity: all(_synchronized(streams[keys[0]], streams[key]) for key in keys[1:])
         for identity, keys in run_members.items()
