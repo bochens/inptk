@@ -293,69 +293,11 @@ def suggest_temperature_ranges(
             if limits is not None and not view.water_blank_map:
                 rows.loc[rows.in_suggested_range, "blank_status"] = "not_applied"
             elif limits is not None:
-                # Observation IDs are unique within this selected measurement/cycle.
-                # Build the report in arrays instead of searching and assigning
-                # individual DataFrame cells for every original image.
-                gridded = temperature_step_C is not None
-                positions = {value: i for i, value in enumerate(
-                    rows.temperature_C if gridded else rows.observation_id
-                )}
-                concentrations = np.full((len(rows), 3), np.nan)
-                statuses = rows.blank_status.to_numpy(copy=True)
-                blank_ids = rows.blank_observation_ids.to_numpy(copy=True)
-                points = controls_by_name[name].align(
-                    frame,
-                    [member],
-                    temperature_ranges_C={name: limits},
-                    **({**grid, "temperature_start_C": plans[name][0].temperature_C.max(),
-                        "temperature_end_C": plans[name][0].temperature_C.min()}
-                       if gridded else {}),
+                _fill_observation_report(
+                    rows, name, member, limits, view=view, frame=frame, plans=plans,
+                    grid=grid, temperature_step_C=temperature_step_C,
+                    controls_by_name=controls_by_name, cache=cache, z=z,
                 )
-                for point in points:
-                    if point.samples.empty:
-                        continue
-                    sample = point.sample_records[0]
-                    index = positions[point.temperature_C if gridded else sample["observation_id"]]
-                    key = point.count_key()
-                    if key not in cache:
-                        cache[key] = estimate_point(
-                            point.samples,
-                            point.blanks,
-                            view,
-                            method="average",
-                            z=float(z),
-                            blank_state=point.blank_state,
-                        )
-                    concentration, lower, upper, finite = cache[key]
-                    concentrations[index] = (concentration, lower, upper)
-                    lower_bound = concentration - lower
-                    status = (
-                        "uncertainty_unavailable"
-                        if not finite
-                        else (
-                            "not_distinguished_from_blank"
-                            if lower_bound <= 0 or np.isclose(lower_bound, 0, rtol=0, atol=1e-12)
-                            else "distinguished_from_blank"
-                        )
-                    )
-                    statuses[index] = status
-                    blank_ids[index] = json.dumps(
-                        [
-                            {
-                                key: str(r[key])
-                                for key in (
-                                    "measurement_id",
-                                    "run_id",
-                                    "cycle_id",
-                                    "observation_id",
-                                )
-                            }
-                            for r in point.blank_records
-                        ]
-                    )
-                rows[["concentration", "lower_error", "upper_error"]] = concentrations
-                rows["blank_status"] = statuses
-                rows["blank_observation_ids"] = blank_ids
         proposals[name] = {
             "run_id": member["run_id"],
             "cycle_id": member["cycle_id"],
@@ -442,6 +384,76 @@ def _exclusion_reasons(rows) -> list[str]:
             )
         reasons.append(json.dumps(excluded))
     return reasons
+
+
+def _fill_observation_report(
+    rows, name, member, limits, *, view, frame, plans, grid, temperature_step_C,
+    controls_by_name, cache, z,
+):
+    """Add Average concentrations and blank status for the observations in range."""
+    # Observation IDs are unique within this selected measurement/cycle.
+    # Build the report in arrays instead of searching and assigning
+    # individual DataFrame cells for every original image.
+    gridded = temperature_step_C is not None
+    positions = {value: i for i, value in enumerate(
+        rows.temperature_C if gridded else rows.observation_id
+    )}
+    concentrations = np.full((len(rows), 3), np.nan)
+    statuses = rows.blank_status.to_numpy(copy=True)
+    blank_ids = rows.blank_observation_ids.to_numpy(copy=True)
+    points = controls_by_name[name].align(
+        frame,
+        [member],
+        temperature_ranges_C={name: limits},
+        **({**grid, "temperature_start_C": plans[name][0].temperature_C.max(),
+            "temperature_end_C": plans[name][0].temperature_C.min()}
+           if gridded else {}),
+    )
+    for point in points:
+        if point.samples.empty:
+            continue
+        sample = point.sample_records[0]
+        index = positions[point.temperature_C if gridded else sample["observation_id"]]
+        key = point.count_key()
+        if key not in cache:
+            cache[key] = estimate_point(
+                point.samples,
+                point.blanks,
+                view,
+                method="average",
+                z=float(z),
+                blank_state=point.blank_state,
+            )
+        concentration, lower, upper, finite = cache[key]
+        concentrations[index] = (concentration, lower, upper)
+        lower_bound = concentration - lower
+        status = (
+            "uncertainty_unavailable"
+            if not finite
+            else (
+                "not_distinguished_from_blank"
+                if lower_bound <= 0 or np.isclose(lower_bound, 0, rtol=0, atol=1e-12)
+                else "distinguished_from_blank"
+            )
+        )
+        statuses[index] = status
+        blank_ids[index] = json.dumps(
+            [
+                {
+                    key: str(r[key])
+                    for key in (
+                        "measurement_id",
+                        "run_id",
+                        "cycle_id",
+                        "observation_id",
+                    )
+                }
+                for r in point.blank_records
+            ]
+        )
+    rows[["concentration", "lower_error", "upper_error"]] = concentrations
+    rows["blank_status"] = statuses
+    rows["blank_observation_ids"] = blank_ids
 
 
 def _edge_reason(rows, limits, *, warm):
