@@ -763,6 +763,13 @@ def _save_step(result, args, json_mode, store):
             print(f"Warning: {warning}")
 
 
+def _write_client_reply(payload, request_id):
+    print(
+        json.dumps(_encode({**payload, "id": request_id}), allow_nan=False, separators=(",", ":")),
+        flush=True,
+    )
+
+
 def serve_client(parser):
     store = ResultStore(memory=True)
     for line in sys.stdin:
@@ -777,12 +784,7 @@ def serve_client(parser):
             if set(request) == {"id", "release"}:
                 store.release(request["release"])
                 reply = _response("release", released=request["release"])
-                print(
-                    json.dumps(
-                        _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
-                    ),
-                    flush=True,
-                )
+                _write_client_reply(reply, request_id)
                 continue
             if set(request) == {"id", "import"}:
                 try:
@@ -800,12 +802,7 @@ def serve_client(parser):
                         status="error",
                         error={"code": _error_code(error), "message": str(error)},
                     )
-                print(
-                    json.dumps(
-                        _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
-                    ),
-                    flush=True,
-                )
+                _write_client_reply(reply, request_id)
                 continue
             if set(request) != {"id", "args"}:
                 raise ValueError("Client request requires id and one of args, import or release")
@@ -818,14 +815,7 @@ def serve_client(parser):
                 )
 
             def write_reply(payload, request_id=request_id):
-                print(
-                    json.dumps(
-                        _encode({**payload, "id": request_id}),
-                        allow_nan=False,
-                        separators=(",", ":"),
-                    ),
-                    flush=True,
-                )
+                _write_client_reply(payload, request_id)
 
             token = _CLIENT_WRITER.set(write_reply)
             try:
@@ -836,12 +826,7 @@ def serve_client(parser):
             reply = _response(
                 None, status="error", error={"code": "invalid_request", "message": str(error)}
             )
-            print(
-                json.dumps(
-                    _encode({**reply, "id": request_id}), allow_nan=False, separators=(",", ":")
-                ),
-                flush=True,
-            )
+            _write_client_reply(reply, request_id)
     return 0
 
 
