@@ -9,7 +9,7 @@ from numbers import Integral
 import numpy as np
 import pandas as pd
 
-from .alignment import align_observations
+from .alignment import _rows_for, align_observations
 from .blank_controls import BlankControls
 from .temperature_selection import CountSelector
 from .experiment import Experiment
@@ -111,11 +111,7 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
                     "range suggestions separately for each set; their switch points may differ."
                 )
             membership[name] = signature
-            rows = frame.loc[
-                frame.measurement_id.eq(name)
-                & frame.run_id.eq(member["run_id"])
-                & frame.cycle_id.eq(member["cycle_id"])
-            ].copy()
+            rows = _rows_for(frame, name, member["run_id"], member["cycle_id"]).copy()
             if grid_rows:
                 rows = grid_rows[name].copy()
             first = experiment.measurements[name].dilution == first_dilution
@@ -128,11 +124,7 @@ def _sequential_ranges(frame, groups, experiment, *, min_frozen, min_unfrozen, g
                 rows["blank_coverage"] = control.native_coverage(member, rows.temperature_C)
             else:
                 for blank in experiment.water_blank_map.get(name, []):
-                    observed = frame.loc[
-                        frame.measurement_id.eq(blank)
-                        & frame.run_id.eq(member["run_id"])
-                        & frame.cycle_id.eq(member["cycle_id"])
-                    ]
+                    observed = _rows_for(frame, blank, member["run_id"], member["cycle_id"])
                     rows["blank_coverage"] &= rows.temperature_C.between(
                         observed.temperature_C.min(), observed.temperature_C.max()
                     )

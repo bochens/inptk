@@ -122,7 +122,7 @@ def grid_points(
     fit_temperature_C records where the selected state will enter the fit.
     Empty sample windows create gaps; missing required blank states are errors.
     """
-    from .alignment import AlignedPoint, _sample_eligible, _in_range, _ordered_rows
+    from .alignment import AlignedPoint, _sample_eligible, _in_range, _ordered_rows, _rows_for
     from .reporting import sample_range_details
 
     keys = [(str(m["measurement_id"]), str(m["run_id"]), str(m["cycle_id"])) for m in members]
@@ -133,9 +133,7 @@ def grid_points(
     streams = {}
     for key in dict.fromkeys([*keys, *sorted(blank_keys)]):
         measurement, run, cycle = key
-        rows = _ordered_rows(frame.loc[
-            frame.measurement_id.eq(measurement) & frame.run_id.eq(run) & frame.cycle_id.eq(cycle)
-        ])
+        rows = _ordered_rows(_rows_for(frame, measurement, run, cycle))
         limits = ranges.get(measurement, {}) if key not in blank_keys else {}
         streams[key] = (rows, CountSelector(rows), limits,
                         (rows.temperature_C.min(), rows.temperature_C.max()))

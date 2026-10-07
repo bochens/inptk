@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 import pandas as pd
 
-from .alignment import _ordered_rows, align_observations
+from .alignment import _ordered_rows, _rows_for, align_observations
 from .methods import validate_water_blank_range
 from .temperature_selection import CountSelector
 
@@ -57,9 +57,7 @@ class BlankControls:
             first = []
             originals = {}
             for name in sorted(names):
-                rows = _ordered_rows(raw.loc[
-                    raw.measurement_id.eq(name) & raw.run_id.eq(run) & raw.cycle_id.eq(cycle)
-                ])
+                rows = _ordered_rows(_rows_for(raw, name, run, cycle))
                 if rows.empty:
                     raise ValueError(
                         f"Blank {name!r} has no observations in run {run!r}, cycle {cycle!r}"
