@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ._csv import read_csv_with_preamble
 from .experiment import Experiment, MeasurementMetadata, SampleMetadata
 from .tables import CountsTable
 
@@ -33,10 +34,9 @@ def _frame(source) -> pd.DataFrame:
     if isinstance(source, (str, Path)):
         path = Path(source)
         if path.suffix.lower() == ".json":
-            return pd.DataFrame(json.loads(path.read_text()))
-        return pd.read_csv(
+            return pd.DataFrame(json.loads(path.read_text(encoding="utf-8")))
+        return read_csv_with_preamble(
             path,
-            comment="#",
             dtype={name: str for name in IDENTIFIERS},
             keep_default_na=False,
             na_values=[""],

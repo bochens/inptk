@@ -11,6 +11,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from .._csv import read_csv_with_preamble
 from .models import (
     CountsTable,
     SampleMetadata,
@@ -102,9 +103,8 @@ def read_sync(path: str | Path) -> tuple[pd.DataFrame, dict[str, str]]:
 
 
 def _read_sync_data(source):
-    return pd.read_csv(
+    return read_csv_with_preamble(
         source,
-        comment="#",
         dtype={"sample_id": str, "cycle": str, "observation_id": str},
         keep_default_na=False,
         na_values=[""],

@@ -84,16 +84,19 @@ def test_average_is_equal_weight_concentration_mean_while_mle_uses_counts():
     assert mean.concentration != pytest.approx(mle.concentration)
 
 
-def test_saturated_measurements_are_not_silently_discarded():
+def test_saturated_measurements_contribute_to_mle_but_not_average():
     source = observations([("A", 4, [4], 1, 50), ("B", 32, [8], 10, 50)], (-5,))
     mle = fit_estimates(inptk.analyze_concentration(source, method="mle")).to_dataframe().iloc[0]
     mean = (
         fit_estimates(inptk.analyze_concentration(source, method="average")).to_dataframe().iloc[0]
     )
     assert np.isfinite(mle.concentration)
-    assert np.isinf(mean.concentration)
-    assert mle.contributor_count == mean.contributor_count == 2
-    assert mean.qc_flag & 1
+    assert mle.contributor_count == 2
+    assert mean.concentration == pytest.approx(-10 * np.log(24 / 32) / 0.05)
+    assert mean.contributor_count == 1
+    assert json.loads(mean.available_measurement_ids) == ["A", "B"]
+    assert json.loads(mean.contributing_measurement_ids) == ["B"]
+    assert mean.qc_flag == 0
 
 
 def test_equal_exposure_contributor_change_does_not_create_a_false_decrease():
