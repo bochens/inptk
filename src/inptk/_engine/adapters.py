@@ -15,7 +15,6 @@ from .._csv import read_csv_with_preamble
 from .models import (
     CountsTable,
     SampleMetadata,
-    TemperatureFrozenFractionTable,
     _optional_float,
     _optional_int,
     processing_metadata_for,
@@ -36,26 +35,13 @@ LONG_COUNT_COLUMNS = {"sample_id", "temperature_C", "n_total", "n_frozen"}
 SAMPLE_METADATA_FIELDS = {field.name for field in fields(SampleMetadata)}
 
 __all__ = [
-    "infer_dilution_groups",
-    "infer_icescopy_dilution_group_map",
     "map_count_columns",
-    "metadata_frame",
-    "parse_icescopy_wide_temperature_sync",
-    "parse_olaf_frozen_at_temp",
-    "parse_olaf_frozen_at_temp_csv",
     "parse_sync_wide",
-    "read_commented_preamble",
     "read_counts",
-    "read_icescopy_freeze_count_timeseries_csv",
-    "read_icescopy_sample_metadata",
-    "read_icescopy_temperature_sync_csv",
     "read_metadata",
     "read_preamble",
     "read_sync",
-    "sample_metadata_to_dataframe",
     "split_metadata_rows",
-    "strip_temperature_sync_metadata_rows",
-    "tables_to_dataframe",
 ]
 
 SAMPLE_VALUE_RE = re.compile(r"^(?P<sample>.+?)\s+number\s+(?P<kind>total|frozen)$")
@@ -299,61 +285,6 @@ def _sample_ids_from_dataframe(df: pd.DataFrame) -> tuple[str, ...]:
     if "sample_id" not in df:
         return ()
     return tuple(str(value) for value in pd.Series(df["sample_id"]).dropna().unique())
-
-
-def metadata_frame(metadata_source: Any) -> pd.DataFrame:
-    """Return sample metadata as a human-readable DataFrame."""
-
-    metadata_by_sample_id = _metadata_mapping_from_source(metadata_source)
-    return pd.DataFrame(
-        [
-            {
-                "sample_id": sample_id,
-                "sample_name": metadata.sample_name,
-                "sample_long_name": metadata.sample_long_name,
-                "sample_type": metadata.sample_type,
-                "dilution": metadata.dilution,
-                "well_volume_uL": metadata.well_volume_uL,
-                "air_volume_L": metadata.air_volume_L,
-                "filter_fraction_used": metadata.filter_fraction_used,
-                "suspension_volume_mL": metadata.suspension_volume_mL,
-                "dry_mass_g": metadata.dry_mass_g,
-            }
-            for sample_id, metadata in metadata_by_sample_id.items()
-        ]
-    )
-
-
-def tables_to_dataframe(table_or_tables: Any) -> pd.DataFrame:
-    """Return a display DataFrame from one INP-toolkit table or a list of tables."""
-
-    if isinstance(table_or_tables, dict):
-        frames = []
-        for group_id, value in table_or_tables.items():
-            frame = tables_to_dataframe(value)
-            if not frame.empty:
-                frame.insert(0, "group_id", group_id)
-            frames.append(frame)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if isinstance(table_or_tables, (list, tuple)):
-        frames = [table.to_dataframe() for table in table_or_tables]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if not hasattr(table_or_tables, "to_dataframe"):
-        raise TypeError("Expected an INP-toolkit table or a list of INP-toolkit tables")
-    return table_or_tables.to_dataframe()
-
-
-def infer_dilution_groups(
-    metadata_by_sample_id: dict[str, SampleMetadata],
-) -> dict[str, str]:
-    """Infer parent sample IDs from Icescopy long names like sample_A_10."""
-
-    return {
-        sample_id: _strip_trailing_numeric_token(
-            metadata.sample_long_name or metadata.sample_name or sample_id
-        )
-        for sample_id, metadata in metadata_by_sample_id.items()
-    }
 
 
 def split_metadata_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -756,71 +687,3 @@ def _to_float_or_nan(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float("nan")
-
-
-def _strip_trailing_numeric_token(value: str) -> str:
-    parts = str(value).rsplit("_", 1)
-    if len(parts) != 2:
-        return str(value)
-    try:
-        float(parts[1])
-    except ValueError:
-        return str(value)
-    return parts[0]
-
-
-def parse_olaf_frozen_at_temp(
-    df: pd.DataFrame,
-    *,
-    n_total_by_sample: dict[str, float],
-) -> list[TemperatureFrozenFractionTable]:
-    """Convert an OLAF frozen_at_temp table into one table per sample column."""
-
-    if "degC" not in df:
-        raise ValueError("OLAF frozen_at_temp data must include a 'degC' column")
-    tables: list[TemperatureFrozenFractionTable] = []
-    for column in df.columns:
-        if column == "degC":
-            continue
-        if column not in n_total_by_sample:
-            raise KeyError(f"Missing n_total for sample column {column!r}")
-        records: list[dict[str, Any]] = []
-        for _, row in df.iterrows():
-            frozen = _to_float_or_nan(row[column])
-            if not np.isfinite(frozen):
-                continue
-            records.append(
-                {
-                    "sample_id": column,
-                    "temperature_C": float(row["degC"]),
-                    "n_total": float(n_total_by_sample[column]),
-                    "n_frozen": frozen,
-                }
-            )
-        if records:
-            result = pd.DataFrame.from_records(records)
-            tables.append(
-                TemperatureFrozenFractionTable(
-                    sample_id=result["sample_id"].to_numpy(dtype=object),
-                    temperature_C=result["temperature_C"].to_numpy(dtype=float),
-                    n_total=result["n_total"].to_numpy(dtype=float),
-                    n_frozen=result["n_frozen"].to_numpy(dtype=float),
-                    processing_metadata=processing_metadata_for(
-                        "parse_olaf_frozen_at_temp",
-                        parameters={"n_total": float(n_total_by_sample[column])},
-                        source_sample_ids=(column,),
-                    ),
-                )
-            )
-    return tables
-
-
-read_commented_preamble = read_preamble
-read_icescopy_temperature_sync_csv = read_sync
-read_icescopy_sample_metadata = read_metadata
-read_icescopy_freeze_count_timeseries_csv = read_counts
-sample_metadata_to_dataframe = metadata_frame
-infer_icescopy_dilution_group_map = infer_dilution_groups
-strip_temperature_sync_metadata_rows = split_metadata_rows
-parse_icescopy_wide_temperature_sync = parse_sync_wide
-parse_olaf_frozen_at_temp_csv = parse_olaf_frozen_at_temp
