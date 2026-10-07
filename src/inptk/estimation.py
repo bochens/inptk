@@ -45,6 +45,21 @@ def _sources(point) -> list[dict]:
     return records
 
 
+def _supports(source, members) -> dict:
+    """Each input's coldest and warmest observed sample temperature."""
+    supports = {}
+    for member in members:
+        selected = source[
+            (source.measurement_id == member["measurement_id"])
+            & (source.cycle_id == member["cycle_id"])
+        ]
+        supports[member["measurement_id"]] = (
+            float(selected.temperature_C.min()),
+            float(selected.temperature_C.max()),
+        )
+    return supports
+
+
 def _point_record(
     point, contributors, *, group, curve_id, individual, ids, supports, experiment, method
 ) -> dict:
@@ -176,16 +191,7 @@ def estimate_concentration(
         members = group["members"]
         individual = len(members) == 1
         ids = sorted(member["measurement_id"] for member in members)
-        supports = {}
-        for member in members:
-            selected = source[
-                (source.measurement_id == member["measurement_id"])
-                & (source.cycle_id == member["cycle_id"])
-            ]
-            supports[member["measurement_id"]] = (
-                float(selected.temperature_C.min()),
-                float(selected.temperature_C.max()),
-            )
+        supports = _supports(source, members)
         control = BlankControls(
             experiment, members, raw_counts=raw_counts,
             after_first_freeze=water_blank_after_first_freeze,
