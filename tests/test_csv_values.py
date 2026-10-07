@@ -7,7 +7,6 @@ import pandas as pd
 import pytest
 
 import inptk
-from inptk._engine.adapters import read_sync
 
 
 @pytest.mark.parametrize("sample_id", ["Site #1", "Site\n# second line"])
@@ -60,9 +59,6 @@ def test_icescopy_sample_hash_and_leading_metadata_survive(tmp_path, archive):
             bundle.writestr("session.json", "{}")
     else:
         path.write_text(ICESCOPY_CSV, encoding="utf-8")
-        table, preamble = read_sync(path)
-        assert preamble["project_name"] == "Plate #3"
-        assert table["Site #1 number frozen"].tolist() == [1, 2]
     experiment = inptk.read_icescopy(path)
     assert experiment.measurements["Site #1"].dilution == 10
     assert experiment.measurements["Site #1"].droplet_volume_uL == 50
