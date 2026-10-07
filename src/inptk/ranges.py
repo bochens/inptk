@@ -246,16 +246,7 @@ def suggest_temperature_ranges(
     fractions = frozen_fraction(view)
     frame = fractions.to_dataframe()
     groups = resolve_curves(curves, view, frame)
-    members: dict[str, CombinationMember] = {}
-    for group in groups.values():
-        for member in group["members"]:
-            name = member["measurement_id"]
-            if name in members and members[name] != member:
-                raise ValueError(
-                    f"Range suggestions require one cycle per measurement: {name!r}. "
-                    "Request each cycle separately using curves."
-                )
-            members[name] = member
+    members = _selected_members(groups)
     if not members:
         raise ValueError("No sample inputs selected for range suggestions")
     raw_counts = view.counts.to_dataframe() if (
@@ -292,27 +283,7 @@ def suggest_temperature_ranges(
             rows["in_suggested_range"] = rows.temperature_C.between(
                 limits["min_C"], limits["max_C"]
             )
-        reasons = []
-        for row in rows.itertuples():
-            excluded = []
-            if row.too_few_frozen:
-                excluded.append("too_few_frozen")
-            if row.too_few_liquid:
-                excluded.append("too_few_liquid")
-            if not row.blank_coverage:
-                excluded.append("missing_blank_coverage")
-            if row.previous_dilution_active:
-                excluded.append("previous_dilution_active")
-            if row.monotone_limit_reason and not excluded:
-                excluded.append(row.monotone_limit_reason)
-            if not excluded and not row.in_suggested_range:
-                excluded.append(
-                    "outside_selected_contiguous_block"
-                    if row.temperature_eligible
-                    else "another_observation_at_same_temperature_failed"
-                )
-            reasons.append(json.dumps(excluded))
-        rows["range_exclusion_reasons"] = reasons
+        rows["range_exclusion_reasons"] = _exclusion_reasons(rows)
         if include_observations:
             rows["blank_status"] = "not_assessed_outside_range"
             rows["concentration_unit"] = "INP_per_mL_suspension"
@@ -431,6 +402,46 @@ def suggest_temperature_ranges(
         else None,
         settings,
     )
+
+
+def _selected_members(groups) -> dict[str, CombinationMember]:
+    """Each selected measurement's member; a measurement may use only one cycle."""
+    members: dict[str, CombinationMember] = {}
+    for group in groups.values():
+        for member in group["members"]:
+            name = member["measurement_id"]
+            if name in members and members[name] != member:
+                raise ValueError(
+                    f"Range suggestions require one cycle per measurement: {name!r}. "
+                    "Request each cycle separately using curves."
+                )
+            members[name] = member
+    return members
+
+
+def _exclusion_reasons(rows) -> list[str]:
+    """Why each observation is outside the suggested range, as JSON lists."""
+    reasons = []
+    for row in rows.itertuples():
+        excluded = []
+        if row.too_few_frozen:
+            excluded.append("too_few_frozen")
+        if row.too_few_liquid:
+            excluded.append("too_few_liquid")
+        if not row.blank_coverage:
+            excluded.append("missing_blank_coverage")
+        if row.previous_dilution_active:
+            excluded.append("previous_dilution_active")
+        if row.monotone_limit_reason and not excluded:
+            excluded.append(row.monotone_limit_reason)
+        if not excluded and not row.in_suggested_range:
+            excluded.append(
+                "outside_selected_contiguous_block"
+                if row.temperature_eligible
+                else "another_observation_at_same_temperature_failed"
+            )
+        reasons.append(json.dumps(excluded))
+    return reasons
 
 
 def _edge_reason(rows, limits, *, warm):
