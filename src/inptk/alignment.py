@@ -120,6 +120,57 @@ def _matching_acquisition(sample: pd.Series, blank: pd.DataFrame) -> int | None:
     return None
 
 
+def _select_blanks(
+    selected, temperature, alignment, *, water_blank_map, blank_streams, blank_support,
+    synchronized_blanks,
+):
+    """Choose one observation from each needed blank for one target temperature."""
+    blank_positions: dict[tuple[str, str, str], list[int]] = {}
+    for key, (sample, position) in selected.items():
+        measurement, run, cycle = key
+        for blank_id in water_blank_map.get(measurement, []):
+            blank_key = (str(blank_id), run, cycle)
+            blank = blank_streams[blank_key]
+            minimum, maximum = blank_support[blank_key]
+            if not minimum <= temperature <= maximum:
+                raise ValueError(
+                    f"Blank {blank_id!r} lacks observed temperature coverage for "
+                    f"measurement {measurement!r}, run {run!r}, cycle {cycle!r}, "
+                    f"temperature {temperature:g} C; no blank extrapolation is performed"
+                )
+            match = None
+            if synchronized_blanks[(key, blank_key)]:
+                match = position
+            else:
+                match = _matching_acquisition(sample, blank)
+            if match is None:
+                match = _latest_position(blank, temperature, {})
+                alignment = "latest"
+            if match is None:
+                raise ValueError(
+                    f"Blank {blank_id!r} has no observation at or warmer than "
+                    f"{temperature:g} C in run {run!r}, cycle {cycle!r}"
+                )
+            blank_positions.setdefault(blank_key, []).append(match)
+    selected_blanks = {}
+    for blank_key, positions in sorted(blank_positions.items()):
+        blank = blank_streams[blank_key]
+        if len(set(positions)) == 1:
+            match = positions[0]
+        else:
+            # Asynchronous sample states can request different acquisitions
+            # from one physical blank. Resolve at the common target with the
+            # same latest-warmer rule; never duplicate that blank's droplets
+            # or let member order determine the background observation.
+            latest = _latest_position(blank, temperature, {})
+            if latest is None:
+                raise ValueError(f"Blank {blank_key!r} has no state at {temperature:g} C")
+            match = latest
+            alignment = "latest"
+        selected_blanks[blank_key] = (blank.iloc[match], match)
+    return selected_blanks, alignment
+
+
 def align_observations(
     frame: pd.DataFrame,
     members: Sequence[Mapping[str, object]],
@@ -273,50 +324,12 @@ def align_observations(
                         ):
                             selected[key] = (row, position)
 
-        blank_positions: dict[tuple[str, str, str], list[int]] = {}
         alignment = "native" if native else "latest"
-        for key, (sample, position) in selected.items():
-            measurement, run, cycle = key
-            for blank_id in water_blank_map.get(measurement, []):
-                blank_key = (str(blank_id), run, cycle)
-                blank = blank_streams[blank_key]
-                minimum, maximum = blank_support[blank_key]
-                if not minimum <= temperature <= maximum:
-                    raise ValueError(
-                        f"Blank {blank_id!r} lacks observed temperature coverage for "
-                        f"measurement {measurement!r}, run {run!r}, cycle {cycle!r}, "
-                        f"temperature {temperature:g} C; no blank extrapolation is performed"
-                    )
-                match = None
-                if synchronized_blanks[(key, blank_key)]:
-                    match = position
-                else:
-                    match = _matching_acquisition(sample, blank)
-                if match is None:
-                    match = _latest_position(blank, temperature, {})
-                    alignment = "latest"
-                if match is None:
-                    raise ValueError(
-                        f"Blank {blank_id!r} has no observation at or warmer than "
-                        f"{temperature:g} C in run {run!r}, cycle {cycle!r}"
-                    )
-                blank_positions.setdefault(blank_key, []).append(match)
-        selected_blanks = {}
-        for blank_key, positions in sorted(blank_positions.items()):
-            blank = blank_streams[blank_key]
-            if len(set(positions)) == 1:
-                match = positions[0]
-            else:
-                # Asynchronous sample states can request different acquisitions
-                # from one physical blank. Resolve at the common target with the
-                # same latest-warmer rule; never duplicate that blank's droplets
-                # or let member order determine the background observation.
-                latest = _latest_position(blank, temperature, {})
-                if latest is None:
-                    raise ValueError(f"Blank {blank_key!r} has no state at {temperature:g} C")
-                match = latest
-                alignment = "latest"
-            selected_blanks[blank_key] = (blank.iloc[match], match)
+        selected_blanks, alignment = _select_blanks(
+            selected, temperature, alignment, water_blank_map=water_blank_map,
+            blank_streams=blank_streams, blank_support=blank_support,
+            synchronized_blanks=synchronized_blanks,
+        )
         if len(selected) == 1:
             key, (_, position) = next(iter(selected.items()))
             samples = streams[key].iloc[position:position + 1]
