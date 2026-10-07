@@ -213,6 +213,21 @@ def _group_profile(
     return profile
 
 
+def _bisect(low, high, move_low, message):
+    """Halve [low, high] until it is within tolerance; move_low says which half to keep."""
+    for _ in range(_ITERATIONS):
+        midpoint = low + (high - low) / 2
+        if move_low(midpoint):
+            low = midpoint
+        else:
+            high = midpoint
+        if high - low <= _TOLERANCE * max(1.0, midpoint):
+            break
+    else:
+        raise RuntimeError(message)
+    return low + (high - low) / 2
+
+
 def fit_concentration(
     n_frozen: Any,
     n_total: Any,
@@ -367,34 +382,18 @@ def fit_concentration(
         high = max(1.0, float(np.sum(frozen) / sample_unfrozen_exposure))
         if not np.isfinite(high):
             raise ValueError("Count/dilution scale exceeds the finite concentration range")
-        for _ in range(_ITERATIONS):
-            midpoint = low + (high - low) / 2
-            if profile(midpoint)[1] > 0:
-                low = midpoint
-            else:
-                high = midpoint
-            if high - low <= _TOLERANCE * max(1.0, midpoint):
-                break
-        else:
-            raise RuntimeError("Concentration fit did not converge")
-        estimate_c = low + (high - low) / 2
+        estimate_c = _bisect(
+            low, high, lambda c: profile(c)[1] > 0, "Concentration fit did not converge"
+        )
     target = profile(estimate_c)[0] - drop
 
     if estimate_c == 0 or log_at_zero >= target:
         lower_c = 0.0
     else:
-        low, high = 0.0, estimate_c
-        for _ in range(_ITERATIONS):
-            midpoint = low + (high - low) / 2
-            if profile(midpoint)[0] < target:
-                low = midpoint
-            else:
-                high = midpoint
-            if high - low <= _TOLERANCE * max(1.0, midpoint):
-                break
-        else:
-            raise RuntimeError("Concentration lower profile limit did not converge")
-        lower_c = low + (high - low) / 2
+        lower_c = _bisect(
+            0.0, estimate_c, lambda c: profile(c)[0] < target,
+            "Concentration lower profile limit did not converge",
+        )
 
     # Every frozen-droplet log term is <=0, so the profile is bounded above
     # by -c*sum(unfrozen_sample*sample_exposure). This brackets the upper limit
@@ -407,17 +406,10 @@ def fit_concentration(
         high *= 2
     else:
         raise RuntimeError("Could not bracket concentration upper profile limit")
-    for _ in range(_ITERATIONS):
-        midpoint = low + (high - low) / 2
-        if profile(midpoint)[0] > target:
-            low = midpoint
-        else:
-            high = midpoint
-        if high - low <= _TOLERANCE * max(1.0, midpoint):
-            break
-    else:
-        raise RuntimeError("Concentration upper profile limit did not converge")
-    upper_c = low + (high - low) / 2
+    upper_c = _bisect(
+        low, high, lambda c: profile(c)[0] > target,
+        "Concentration upper profile limit did not converge",
+    )
     estimate = estimate_c / volume if analytic_estimate is None else analytic_estimate
     lower_error = max(0.0, estimate_c - lower_c) / volume
     upper_error = max(0.0, upper_c - estimate_c) / volume
