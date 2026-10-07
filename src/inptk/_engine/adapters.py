@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import fields, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -20,25 +20,11 @@ from .models import (
     processing_metadata_for,
 )
 
-CountInputFormat = Literal["auto", "long", "canonical", "icescopy", "icescopy_wide", "wide"]
-CountColumn = Literal[
-    "sample_id",
-    "temperature_C",
-    "n_total",
-    "n_frozen",
-    "time_s",
-    "cycle",
-    "observation_id",
-]
-CountColumnMap = dict[CountColumn, str]
-LONG_COUNT_COLUMNS = {"sample_id", "temperature_C", "n_total", "n_frozen"}
 SAMPLE_METADATA_FIELDS = {field.name for field in fields(SampleMetadata)}
 
 __all__ = [
-    "map_count_columns",
     "parse_sync_wide",
     "read_counts",
-    "read_metadata",
     "read_preamble",
     "read_sync",
     "split_metadata_rows",
@@ -95,15 +81,6 @@ def _read_sync_data(source):
         keep_default_na=False,
         na_values=[""],
     )
-
-
-def read_metadata(
-    path: str | Path,
-) -> tuple[dict[str, str], dict[str, SampleMetadata]]:
-    """Read Icescopy commented session/sample metadata from a freeze-count CSV."""
-
-    with Path(path).open("r", encoding="utf-8") as handle:
-        return _read_metadata_lines(handle)
 
 
 def read_icescopy_csv_text(text: str) -> tuple[pd.DataFrame, dict[str, SampleMetadata]]:
@@ -178,86 +155,19 @@ def _sample_metadata_from_record(session_metadata, raw_sample_metadata, sample_i
 
 
 def read_counts(
-    source: str | Path | pd.DataFrame,
+    source: pd.DataFrame,
     *,
-    format: CountInputFormat = "auto",
-    columns: CountColumnMap | None = None,
-    metadata: Any = None,
+    metadata: dict[str, SampleMetadata],
 ) -> dict[str, list[CountsTable]]:
-    """Read count observations into sample/dilution table(s).
+    """Read an Icescopy wide count table into one table per sample, grouped by cycle.
 
-    Supported inputs:
-    - canonical long tables with sample_id, temperature_C, n_total, n_frozen
-    - arbitrary long tables with a user-supplied columns mapping
-    - Icescopy wide freeze_count_timeseries exports with "number total/frozen" columns
-    - optional metadata as SampleMetadata, dict[str, SampleMetadata],
-      dict[str, dict], metadata DataFrame, or a dict of common metadata defaults
-
-    All cycles are preserved as labelled lists of measurement tables.
+    metadata maps sample names to their Icescopy header metadata.
     """
 
-    df = source.copy() if isinstance(source, pd.DataFrame) else read_sync(source)[0]
-    metadata_source = metadata if metadata is not None else _metadata_from_path(source)
-    if columns is not None:
-        mapped_df = map_count_columns(df, columns)
-        count_tables = _count_tables_from_long_dataframe(mapped_df, metadata_source)
-        return _preserve_count_cycles(count_tables)
-
-    resolved_format = _resolve_counts_format(df, format)
-
-    if resolved_format == "long":
-        count_tables = _count_tables_from_long_dataframe(df, metadata_source)
-        return _preserve_count_cycles(count_tables)
-
-    count_tables = parse_sync_wide(df, metadata=metadata_source)
+    df = source.copy()
+    _require_wide_count_columns(df)
+    count_tables = parse_sync_wide(df, metadata=metadata)
     return _preserve_count_cycles(count_tables)
-
-
-def map_count_columns(df: pd.DataFrame, columns: CountColumnMap) -> pd.DataFrame:
-    """Map an arbitrary long count table into INP-toolkit's canonical column names."""
-
-    unknown = sorted(set(columns) - _count_column_names())
-    if unknown:
-        raise ValueError(f"Unknown canonical count columns: {', '.join(unknown)}")
-    required = {"sample_id", "temperature_C", "n_total", "n_frozen"}
-    missing_required = sorted(required - set(columns))
-    if missing_required:
-        raise ValueError(f"Column mapping is missing: {', '.join(missing_required)}")
-    missing_input = sorted({source for source in columns.values() if source not in df.columns})
-    if missing_input:
-        raise ValueError(f"Input table is missing mapped columns: {', '.join(missing_input)}")
-
-    renamed = {source: target for target, source in columns.items()}
-    mapped = df[list(columns.values())].rename(columns=renamed)
-    return mapped.loc[:, [column for column in _ordered_count_columns() if column in mapped]]
-
-
-def _count_tables_from_long_dataframe(
-    df: pd.DataFrame,
-    metadata: Any,
-) -> list[CountsTable]:
-    tables: list[CountsTable] = []
-    groups = [
-        (str(sample_id), sample_df) for sample_id, sample_df in df.groupby("sample_id", sort=False)
-    ]
-    metadata_by_sample = _metadata_mapping_for_sample_ids(
-        metadata,
-        [sample_id for sample_id, _ in groups],
-    )
-    for sample_key, sample_df in groups:
-        tables.append(
-            CountsTable.from_dataframe(
-                sample_df.reset_index(drop=True),
-                metadata=_metadata_for_sample_id(metadata_by_sample, sample_key),
-                processing_metadata=processing_metadata_for(
-                    "read_counts_input",
-                    parameters={"format": "long"},
-                    source_sample_ids=(sample_key,),
-                    source_cycles=_cycle_keys(_with_cycle_key(sample_df)),
-                ),
-            )
-        )
-    return tables
 
 
 def _preserve_count_cycles(tables: list[CountsTable]) -> dict[str, list[CountsTable]]:
@@ -303,7 +213,7 @@ def split_metadata_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 def parse_sync_wide(
     df: pd.DataFrame,
     *,
-    metadata: Any = None,
+    metadata: dict[str, SampleMetadata],
 ) -> list[CountsTable]:
     """Convert an Icescopy wide temperature-sync table into one CountsTable per sample."""
 
@@ -426,10 +336,6 @@ def _normalize_cycle_key(value: Any) -> str:
     return str(numeric_value)
 
 
-def _cycle_keys(df: pd.DataFrame) -> list[str]:
-    return [str(value) for value in pd.unique(df["_inptk_cycle_key"])]
-
-
 def _iter_cycle_dataframes(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
     frames: list[tuple[str, pd.DataFrame]] = []
     for cycle_key, cycle_df in df.groupby("_inptk_cycle_key", sort=False):
@@ -437,154 +343,25 @@ def _iter_cycle_dataframes(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
     return frames
 
 
-def _metadata_from_path(source: str | Path | pd.DataFrame) -> dict[str, SampleMetadata]:
-    if isinstance(source, pd.DataFrame):
-        return {}
-    _, metadata = read_metadata(source)
-    return metadata
-
-
-def _metadata_for_sample_id(metadata: Any, sample_id: str) -> SampleMetadata:
-    if isinstance(metadata, SampleMetadata):
-        return _metadata_with_sample_id(metadata, sample_id)
-    if isinstance(metadata, dict):
-        value = metadata.get(sample_id)
-        if isinstance(value, SampleMetadata):
-            return _metadata_with_sample_id(value, sample_id)
+def _metadata_for_sample_id(metadata: dict[str, SampleMetadata], sample_id: str) -> SampleMetadata:
+    value = metadata.get(sample_id)
+    if isinstance(value, SampleMetadata):
+        return _metadata_with_sample_id(value, sample_id)
     return SampleMetadata(sample_id=sample_id)
 
 
 def _metadata_mapping_for_sample_ids(
-    metadata_source: Any,
+    metadata_source: dict[str, SampleMetadata],
     sample_ids: list[str],
 ) -> dict[str, SampleMetadata]:
-    metadata_by_sample = _metadata_mapping_from_source(metadata_source, sample_ids=sample_ids)
+    metadata_by_sample = {
+        str(sample_id): _metadata_with_sample_id(metadata, str(sample_id))
+        for sample_id, metadata in metadata_source.items()
+    }
     return {
         sample_id: _metadata_for_sample_id(metadata_by_sample, sample_id)
         for sample_id in sample_ids
     }
-
-
-def _metadata_mapping_from_source(
-    source: Any,
-    *,
-    sample_ids: list[str] | None = None,
-) -> dict[str, SampleMetadata]:
-    if source is None:
-        return {}
-    if isinstance(source, pd.DataFrame):
-        return _metadata_mapping_from_dataframe(source, sample_ids=sample_ids)
-    if isinstance(source, dict):
-        if not source:
-            return {}
-        if all(isinstance(value, SampleMetadata) for value in source.values()):
-            return {
-                str(sample_id): _metadata_with_sample_id(metadata, str(sample_id))
-                for sample_id, metadata in source.items()
-            }
-        if _looks_like_metadata_record(source):
-            return _metadata_mapping_from_record(source, sample_ids=sample_ids)
-        metadata_by_sample_id: dict[str, SampleMetadata] = {}
-        for key, value in source.items():
-            sample_id = str(key)
-            if isinstance(value, SampleMetadata):
-                metadata_by_sample_id[sample_id] = _metadata_with_sample_id(value, sample_id)
-            elif isinstance(value, dict):
-                metadata_by_sample_id[sample_id] = _sample_metadata_from_mapping(
-                    value,
-                    sample_id,
-                )
-            else:
-                metadata_by_sample_id.update(_metadata_mapping_from_source(value))
-        return metadata_by_sample_id
-    if isinstance(source, SampleMetadata):
-        if source.sample_id:
-            return {source.sample_id: source}
-        if sample_ids is not None:
-            return {sample_id: replace(source, sample_id=sample_id) for sample_id in sample_ids}
-        return {}
-    if isinstance(source, (list, tuple)):
-        metadata_by_sample_id = {}
-        for table in source:
-            metadata_by_sample_id.update(
-                _metadata_mapping_from_source(getattr(table, "metadata", None))
-            )
-        return metadata_by_sample_id
-    metadata = getattr(source, "metadata", None)
-    if metadata is not None:
-        return _metadata_mapping_from_source(metadata)
-    return {}
-
-
-def _metadata_mapping_from_dataframe(
-    df: pd.DataFrame,
-    *,
-    sample_ids: list[str] | None,
-) -> dict[str, SampleMetadata]:
-    if "sample_id" not in df:
-        if sample_ids is not None and len(sample_ids) == 1:
-            df = df.copy()
-            df["sample_id"] = sample_ids[0]
-        else:
-            raise ValueError("Metadata DataFrame must include a sample_id column")
-
-    metadata_by_sample_id: dict[str, SampleMetadata] = {}
-    for _, row in df.iterrows():
-        row_dict = row.to_dict()
-        sample_id = _metadata_text(row_dict.get("sample_id"))
-        if not sample_id:
-            raise ValueError("Metadata DataFrame contains an empty sample_id")
-        if sample_id in metadata_by_sample_id:
-            raise ValueError(f"Duplicate metadata row for sample_id {sample_id!r}")
-        metadata_by_sample_id[sample_id] = _sample_metadata_from_mapping(row_dict, sample_id)
-    return metadata_by_sample_id
-
-
-def _metadata_mapping_from_record(
-    values: dict[Any, Any],
-    *,
-    sample_ids: list[str] | None,
-) -> dict[str, SampleMetadata]:
-    if sample_ids is None:
-        sample_id = _metadata_text(values.get("sample_id"))
-        return {sample_id: _sample_metadata_from_mapping(values, sample_id)} if sample_id else {}
-    return {sample_id: _sample_metadata_from_mapping(values, sample_id) for sample_id in sample_ids}
-
-
-def _looks_like_metadata_record(values: dict[Any, Any]) -> bool:
-    return any(str(key) in SAMPLE_METADATA_FIELDS for key in values)
-
-
-def _sample_metadata_from_mapping(values: dict[Any, Any], sample_id: str) -> SampleMetadata:
-    raw_sample_metadata = {
-        str(key): _metadata_text(value)
-        for key, value in values.items()
-        if key not in ("raw_preamble", "raw_sample_metadata")
-    }
-    if isinstance(values.get("raw_sample_metadata"), dict):
-        raw_sample_metadata.update(
-            {
-                str(key): _metadata_text(value)
-                for key, value in values["raw_sample_metadata"].items()
-            }
-        )
-    raw_preamble = (
-        {str(key): _metadata_text(value) for key, value in values["raw_preamble"].items()}
-        if isinstance(values.get("raw_preamble"), dict)
-        else {}
-    )
-
-    kwargs: dict[str, Any] = {
-        str(key): value
-        for key, value in values.items()
-        if str(key) in SAMPLE_METADATA_FIELDS
-        and str(key) not in ("sample_id", "raw_preamble", "raw_sample_metadata")
-        and not _is_missing_metadata_value(value)
-    }
-    kwargs["sample_id"] = sample_id
-    kwargs["raw_preamble"] = raw_preamble
-    kwargs["raw_sample_metadata"] = raw_sample_metadata
-    return SampleMetadata(**kwargs)
 
 
 def _metadata_with_sample_id(metadata: SampleMetadata, sample_id: str) -> SampleMetadata:
@@ -593,10 +370,6 @@ def _metadata_with_sample_id(metadata: SampleMetadata, sample_id: str) -> Sample
     if not metadata.sample_id:
         return replace(metadata, sample_id=sample_id)
     return metadata
-
-
-def _metadata_text(value: Any) -> str:
-    return "" if _is_missing_metadata_value(value) else str(value)
 
 
 def _is_missing_metadata_value(value: Any) -> bool:
@@ -609,55 +382,6 @@ def _is_missing_metadata_value(value: Any) -> bool:
     if isinstance(missing, (bool, np.bool_)):
         return bool(missing)
     return False
-
-
-def _count_column_names() -> set[str]:
-    return set(_ordered_count_columns())
-
-
-def _ordered_count_columns() -> tuple[str, ...]:
-    return (
-        "sample_id",
-        "temperature_C",
-        "n_total",
-        "n_frozen",
-        "time_s",
-        "cycle",
-        "observation_id",
-    )
-
-
-def _resolve_counts_format(df: pd.DataFrame, format: CountInputFormat) -> Literal["long", "wide"]:
-    normalized = format.casefold()
-    if normalized in ("long", "canonical"):
-        _require_long_count_columns(df)
-        return "long"
-    if normalized in ("icescopy", "icescopy_wide", "wide"):
-        _require_wide_count_columns(df)
-        return "wide"
-    if normalized != "auto":
-        raise ValueError(
-            "format must be one of auto, long, canonical, icescopy, icescopy_wide, wide"
-        )
-    if _has_long_count_columns(df):
-        return "long"
-    if _has_wide_count_columns(df):
-        return "wide"
-    raise ValueError(
-        "Could not detect counts input format. Supported formats are canonical long "
-        "columns (sample_id, temperature_C, n_total, n_frozen) or Icescopy wide "
-        "'number total'/'number frozen' column pairs."
-    )
-
-
-def _has_long_count_columns(df: pd.DataFrame) -> bool:
-    return LONG_COUNT_COLUMNS.issubset(set(df.columns))
-
-
-def _require_long_count_columns(df: pd.DataFrame) -> None:
-    missing = sorted(LONG_COUNT_COLUMNS - set(df.columns))
-    if missing:
-        raise ValueError(f"Long count table is missing required columns: {', '.join(missing)}")
 
 
 def _has_wide_count_columns(df: pd.DataFrame) -> bool:
