@@ -113,7 +113,7 @@ def test_cli_full_and_explicit_grid_span_match_saved_and_stepwise_results(tmp_pa
 def test_cut_can_exclude_invalid_history_without_hiding_invalid_retained_counts():
     data = experiment()
     raw = data.counts.to_dataframe()
-    raw.loc[raw.measurement_id.eq("B") & raw.temperature_C.eq(-5.5), "n_total"] = 12
+    raw.loc[raw.measurement_id.eq("B") & raw.temperature_C.eq(-6.2), "n_total"] = 12
     source = inptk.Experiment(inptk.CountsTable(raw), data.samples, data.measurements,
                               water_blank_map={})
     with pytest.raises(ValueError, match="fixed set of wells"):

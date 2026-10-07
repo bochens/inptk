@@ -72,7 +72,7 @@ def estimate_concentration(
     With no curves supplied, each sample/run/cycle remains separate. Explicit
     curves can span runs but select only one cycle from each run. Observations
     align only where needed, using latest warmer states at observed targets.
-    MLE fits complete freezing histories with monotone sample and blank curves;
+    MLE fits selected freezing histories with monotone sample and blank curves;
     Average estimates each target separately. Original count rows stay unchanged.
     temperature_step_C instead selects count pairs on a regular grid before
     either estimator. latest/max use warmer states; window uses a full-width
@@ -80,13 +80,14 @@ def estimate_concentration(
     Optional start/end bounds are exact warm/cold grid endpoints; omitted
     bounds use observed limits. Both endpoints are retained without rounding.
     Rows outside original sample freezing limits retain their identities with
-    NaN concentrations and errors. MLE still uses raw observations there.
+    NaN concentrations and errors. Each MLE input contributes only within its
+    own original first-to-last freezing interval.
     Combined Average uses positive sample counts inside each input's event
     interval, intersected with user ranges. Input temperature
     ranges select aligned calculation states only; selecting the full useful
-    span retains MLE's outside reporting constraints. Ranges apply only to curves
+    span is equivalent to leaving its limits unset. Ranges apply only to curves
     combining several physical inputs. Individual
-    curves use the complete input trajectory, independently of those exclusions.
+    curves use their own freezing interval, independently of those exclusions.
     water_blank_temperature_range_C is one observation range shared by all assigned
     controls; it does not restrict sample temperatures. water_blank_after_first_freeze
     optionally fixes each run/cycle's background at zero before its combined control's
@@ -117,13 +118,11 @@ def estimate_concentration(
         temperature_ranges_C, measurement_ids=set(experiment.measurements) - blank_ids
     )
     groups = resolve_curves(curves, experiment, frame)
-    input_intervals = {}
-    if method == "average":
-        input_groups = {
-            (member["measurement_id"], member["run_id"], member["cycle_id"]): {"members": [member]}
-            for group in groups.values() for member in group["members"]
-        }
-        input_intervals = freezing_intervals(source, input_groups, {})
+    input_groups = {
+        (member["measurement_id"], member["run_id"], member["cycle_id"]): {"members": [member]}
+        for group in groups.values() for member in group["members"]
+    }
+    input_intervals = freezing_intervals(source, input_groups, {})
     records, notices, group_alignment, cache = [], [], {}, {}
     joint_fits, controls, resolved_ranges, intervals = {}, {}, {}, {}
     raw_counts = experiment.counts.to_dataframe() if (
@@ -159,12 +158,12 @@ def estimate_concentration(
             temperature_end_C=temperature_end_C,
             temperature_method=temperature_method,
             temperature_window_C=temperature_window_C,
-            retain_full_range_constraints=method == "mle",
+            require_partial_freezing=method == "average",
             sample_freezing_intervals_C={
                 member["measurement_id"]: input_intervals[
                     (member["measurement_id"], member["run_id"], member["cycle_id"])
                 ] for member in members
-            } if method == "average" and not individual else None,
+            } if method == "mle" or not individual else None,
         )
         resolved_ranges[curve_id] = points[0].range_details
         intervals.update(freezing_intervals(

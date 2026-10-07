@@ -75,7 +75,7 @@ def test_original_observations_are_primary_and_identical_states_do_not_gain_prec
     for column in ("concentration", "lower_error", "upper_error"):
         assert combined[column].iloc[1] == pytest.approx(combined[column].iloc[2], rel=1e-7)
     sources = combined.source_observations.map(json.loads)
-    assert all(len(items) == 2 for items in sources)
+    assert sources.map(len).tolist() == ([0, 2, 2, 2] if method == "mle" else [2] * 5)
     assert sources.iloc[1][0]["observation_id"] != sources.iloc[2][0]["observation_id"]
     assert [
         {k: item[k] for k in ("measurement_id", "run_id", "cycle_id")}
@@ -118,11 +118,9 @@ def test_explicit_cross_run_group_keeps_own_blank_and_cycle_provenance(method):
     a_sources = {("a", "R1", "01"), ("wa", "R1", "01")}
     b_sources = {("b", "R2", "02"), ("wb", "R2", "02")}
     for row in frame.itertuples():
-        expected = a_sources | b_sources
-        if method == "average":
-            expected = (a_sources if -7 <= row.temperature_C <= -5.8 else set())
-            if -7 <= row.temperature_C <= -6.2:
-                expected |= b_sources
+        expected = (a_sources if -7 <= row.temperature_C <= -5.8 else set())
+        if -7 <= row.temperature_C <= -6.2:
+            expected |= b_sources
         items = json.loads(row.source_observations)
         assert {(item["measurement_id"], item["run_id"], item["cycle_id"])
                 for item in items} == expected

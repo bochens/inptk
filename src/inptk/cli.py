@@ -472,7 +472,7 @@ def _capabilities(parser):
         temperature_range_selection={
             "domain": "calculation targets; select counts before applying input limits",
             "boundaries": "inclusive; original source rows unchanged",
-            "full_range": "selecting the full useful span preserves MLE reporting constraints",
+            "full_range": "each sample uses its first-to-last freezing interval; explicit full limits are equivalent",
             "resolved_settings": "resolved_temperature_ranges_C, keyed by curve then input",
             "selected_counts": "source_observations in cumulative and excluded curve tables",
         },
@@ -485,7 +485,7 @@ def _capabilities(parser):
             "individual": "every selected point between original first and last sample freezes",
             "exclusion_ranges": "combined curves only",
             "decrease_selection": "combined curves only",
-            "fit_observations": "retained outside the reporting interval",
+            "fit_observations": "each sample uses its own freezing interval intersected with selected limits",
             "final_tables": "cumulative",
             "diagnostic_tables": "excluded; unfinalized estimates",
             "csv": "cumulative export omits points outside the interval",

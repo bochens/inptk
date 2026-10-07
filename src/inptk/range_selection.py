@@ -53,6 +53,7 @@ class RangePlanner:
             temperature_ranges_C={m["measurement_id"]: ranges.get(m["measurement_id"], disabled)
                                   for m in self.members},
             sample_freezing_intervals_C=self.freezing_intervals,
+            require_partial_freezing=True,
             **self.grid,
         )
 

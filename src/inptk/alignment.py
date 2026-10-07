@@ -84,13 +84,13 @@ def _in_range(temperature: float, limits: Mapping) -> bool:
     )
 
 
-def _average_sample_eligible(row, temperature, intervals):
-    """Average requires frozen and unfrozen wells within the input's interval."""
+def _sample_eligible(row, temperature, intervals, *, require_partial_freezing=False):
+    """Use the input's freezing interval; Average also needs frozen and unfrozen wells."""
     if intervals is None:
         return True
     limits = intervals[str(row["measurement_id"])]
-    return (0 < row["n_frozen"] < row["n_total"] and limits["min_C"] is not None
-            and _in_range(temperature, limits))
+    return (limits["min_C"] is not None and _in_range(temperature, limits)
+            and (not require_partial_freezing or 0 < row["n_frozen"] < row["n_total"]))
 
 
 def _latest_position(rows: pd.DataFrame, temperature: float, limits: Mapping) -> int | None:
@@ -125,7 +125,7 @@ def align_observations(
     temperature_method: str = "latest",
     temperature_window_C: float | None = None,
     sample_freezing_intervals_C: Mapping[str, Mapping] | None = None,
-    retain_full_range_constraints: bool = False,
+    require_partial_freezing: bool = False,
 ) -> list[AlignedPoint]:
     """Keep native sequences, or explicitly select counts on a regular grid.
 
@@ -135,8 +135,8 @@ def align_observations(
     Each physical blank enters a point once. Matching sample/blank acquisitions
     move together for synchronized runs. No source sequence is cooling-trimmed.
     An explicit grid selects samples and blanks independently by the same rule.
-    Limits choose targets after count selection. Joint MLE can retain outside
-    reporting constraints when a limit selects an input's full useful edge.
+    Limits choose targets after count selection. Sample freezing intervals
+    restrict the selected states before concentration estimation.
     """
     from .temperature_selection import grid_points, validate_temperature_selection
 
@@ -184,7 +184,7 @@ def align_observations(
             step_C=temperature_step_C, start_C=temperature_start_C, end_C=temperature_end_C,
             method=temperature_method, window_C=temperature_window_C,
             sample_freezing_intervals_C=sample_freezing_intervals_C,
-            retain_full_range_constraints=retain_full_range_constraints,
+            require_partial_freezing=require_partial_freezing,
         )
 
     blank_streams: dict[tuple[str, str, str], pd.DataFrame] = {}
@@ -231,8 +231,6 @@ def align_observations(
         support = values[(values >= rows.temperature_C.min()) & (values <= rows.temperature_C.max())]
         requested = ranges.get(key[0], {})
         limits, details = resolve_sample_range(rows, support, requested)
-        if not retain_full_range_constraints:
-            limits = requested
         range_details[key[0]] = {
             "run_id": key[1], "cycle_id": key[2], **details, "calculation_limits_C": limits,
         }
@@ -264,14 +262,18 @@ def align_observations(
                     row = streams[key].iloc[position]
                     limits = ranges.get(key[0], {})
                     if (_in_range(temperature, limits)
-                            and _average_sample_eligible(row, temperature, sample_freezing_intervals_C)):
+                            and _sample_eligible(row, temperature, sample_freezing_intervals_C,
+                                                 require_partial_freezing=require_partial_freezing)):
                         selected[key] = (row, position)
             else:
                 for key in keys:
                     position = _latest_position(streams[key], temperature, ranges.get(key[0], {}))
                     if position is not None:
                         row = streams[key].iloc[position]
-                        if _average_sample_eligible(row, temperature, sample_freezing_intervals_C):
+                        if _sample_eligible(
+                            row, temperature, sample_freezing_intervals_C,
+                            require_partial_freezing=require_partial_freezing,
+                        ):
                             selected[key] = (row, position)
 
         blank_positions: dict[tuple[str, str, str], list[int]] = {}

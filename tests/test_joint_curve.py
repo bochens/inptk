@@ -139,11 +139,11 @@ def test_raw_shared_blank_is_counted_once_and_its_sample_size_changes_uncertaint
 
 
 @pytest.mark.parametrize("field,values,message", [
-    ("n_total", [20, 19, 18], "changing total"),
-    ("n_frozen", [1, 4, 3], "first-freezing"),
+    ("n_total", [20, 19, 18, 18], "changing total"),
+    ("n_frozen", [1, 4, 3, 8], "first-freezing"),
 ])
 def test_invalid_event_histories_are_rejected_without_a_pointwise_fallback(field, values, message):
-    data = experiment([("A", 20, [1, 4, 8], 1, 50)])
+    data = experiment([("A", 20, [1, 4, 8, 12], 1, 50)])
     frame = data.counts.to_dataframe()
     frame[field] = values
     invalid = inptk.read_counts(frame, metadata=[vars(data.measurements["A"])])

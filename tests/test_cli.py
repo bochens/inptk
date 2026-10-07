@@ -92,15 +92,12 @@ def test_cli_temperature_ranges_match_python_and_keep_inclusive_boundaries(
     )
     pd.testing.assert_frame_equal(result.to_dataframe(), expected.to_dataframe())
     rows = all_points(result).to_dataframe().set_index("temperature_C")
-    # At a full useful warm edge, MLE retains the preceding zero-count
-    # constraint. It remains outside the reported spectrum.
+    # Limits constrain inputs before estimation, including an input's full warm edge.
     assert rows.contributor_count.to_dict() == {
-        -5.0: 0 if method == "average" else 1, -6.0: 1, -7.0: 2, -8.0: 2, -9.0: 1,
+        -5.0: 0, -6.0: 1, -7.0: 2, -8.0: 2, -9.0: 1,
     }
     assert np.isnan(rows.loc[-5, "concentration"])
-    assert rows.loc[-5, "selection_status"] == (
-        "no_eligible_measurements" if method == "average" else "single"
-    )
+    assert rows.loc[-5, "selection_status"] == "no_eligible_measurements"
     assert rows.loc[-6, "source_measurement_id"] == "001"
     assert rows.loc[-9, "source_measurement_id"] == "01"
     assert set(json.loads(rows.loc[-8, "contributing_measurement_ids"])) == {"001", "01"}

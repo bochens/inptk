@@ -159,6 +159,46 @@ def check_files_and_session(executable, counts, metadata, blanks, env):
         exported = folder / "exported counts.csv"
         command("export-csv", final, "--table", "counts", "--out", exported)
         assert len(pd.read_csv(exported)) == len(counts)
+
+        # Inspect actual MLE streams, not only the temperatures left in the output.
+        range_counts, range_metadata = [], []
+        for name, frozen, dilution in (("early", [0, 1, 4, 4, 4], 1),
+                                       ("late", [0, 0, 0, 1, 2], 10),
+                                       ("never", [0, 0, 0, 0, 0], 100)):
+            range_metadata.append({"measurement_id": name, "sample_id": "sample",
+                                   "dilution": dilution, "droplet_volume_uL": 50})
+            range_counts.extend({"measurement_id": name, "cycle_id": "1",
+                                 "temperature_C": -5-i, "time_s": i,
+                                 "n_total": 20, "n_frozen": n} for i, n in enumerate(frozen))
+        count_path, metadata_path = folder / "ranges.csv", folder / "range metadata.csv"
+        pd.DataFrame(range_counts).to_csv(count_path, index=False)
+        pd.DataFrame(range_metadata).to_csv(metadata_path, index=False)
+        limits = {"early": {"min_C": -7, "max_C": -6},
+                  "late": {"min_C": -9, "max_C": -8}}
+        curves = {"sample": {"inputs": ["early", "late", "never"], "cycle": "1"}}
+        range_results = []
+        for label, selected in (("full", {}), ("manual", limits)):
+            destination = folder / f"range {label}.inptk"
+            command("analyze", count_path, "--metadata", metadata_path, "--method", "mle",
+                    "--curves", json.dumps(curves), "--temperature-ranges", json.dumps(selected),
+                    "--temperature-step-C", "0.5", "--temperature-start-C", "0",
+                    "--temperature-end-C", "-10", "--out", destination)
+            result = inptk.load(destination)
+            fit = next(h for h in result.history if h["operation"] == "estimate_concentration")[
+                "joint_curve_fits"]["sample"]
+            assert fit["physical_droplets"] == 40
+            assert {s["measurement_id"] for s in fit["sources"]} == {"early", "late"}
+            for stream in fit["sources"]:
+                bounds = limits[stream["measurement_id"]]
+                assert all(bounds["min_C"] <= t <= bounds["max_C"]
+                           for t in stream["fit_temperatures_C"])
+            frame = result.to_dataframe()
+            np.testing.assert_allclose(
+                frame.loc[frame.temperature_C.isin([-6, -7]), "concentration"],
+                -np.log1p(-np.array([1, 4]) / 20) / .05, rtol=1e-5,
+            )
+            range_results.append(frame)
+        pd.testing.assert_frame_equal(*range_results)
         command("finalize", converted, "--out", final, success=False)
 
         csv = (
@@ -300,6 +340,7 @@ def check_files_and_session(executable, counts, metadata, blanks, env):
             ], replies
             assert "Courbe 冰" in inptk.load(folder / "saved session.inptk").curves
     print("Executable passed saved stages, CSV/project input, Unicode paths and session recovery.")
+    print("MLE Full and manual ranges use only each input's first-to-last freezing interval.")
 
 
 if __name__ == "__main__":

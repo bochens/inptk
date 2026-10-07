@@ -114,7 +114,7 @@ class CountSelector:
 
 def grid_points(
     frame, members, *, water_blank_map, ranges, step_C, method, window_C, start_C=None, end_C=None,
-    sample_freezing_intervals_C=None, retain_full_range_constraints=False,
+    sample_freezing_intervals_C=None, require_partial_freezing=False,
 ):
     """Select each sample and blank independently; never pool repeated counts.
 
@@ -122,7 +122,7 @@ def grid_points(
     fit_temperature_C records where the selected state will enter the fit.
     Empty sample windows create gaps; missing required blank states are errors.
     """
-    from .alignment import AlignedPoint, _average_sample_eligible, _in_range, _ordered_rows
+    from .alignment import AlignedPoint, _sample_eligible, _in_range, _ordered_rows
     from .reporting import resolve_sample_range
 
     keys = [(str(m["measurement_id"]), str(m["run_id"]), str(m["cycle_id"])) for m in members]
@@ -149,29 +149,31 @@ def grid_points(
         choices = {t: selector.select(t, method=method, window_C=window_C)
                    for t in targets if cold <= t <= warm}
         if key not in blank_keys:
-            requested = limits
             limits, details = resolve_sample_range(
                 rows, [t for t, row in choices.items() if row is not None], limits
             )
-            if not retain_full_range_constraints:
-                limits = requested
             range_details[key[0]] = {
                 "run_id": key[1], "cycle_id": key[2], **details, "calculation_limits_C": limits,
             }
-        if any(value is not None for value in limits.values()):
-            # Validate the retained observation span without changing selection.
-            # Source rows just outside a target boundary may supply its counts.
-            source_ids = [row["observation_id"] for t, row in choices.items()
-                          if row is not None and _in_range(t, limits)]
-            covered = rows.temperature_C.between(
-                -np.inf if limits.get("min_C") is None else limits["min_C"],
-                np.inf if limits.get("max_C") is None else limits["max_C"],
-            ) | rows.observation_id.isin(source_ids)
-            observed = rows.loc[covered]
-            fixed = observed.n_total.nunique() <= 1
-            cumulative = not observed.n_frozen.diff().lt(0).any()
-            for t, row in choices.items():
-                if row is not None and _in_range(t, limits):
+        if key not in blank_keys and (sample_freezing_intervals_C is not None
+                                      or any(value is not None for value in limits.values())):
+            retained = {
+                t: row for t, row in choices.items()
+                if row is not None and _in_range(t, limits)
+                and _sample_eligible(row, t, sample_freezing_intervals_C,
+                                     require_partial_freezing=require_partial_freezing)
+            }
+            if retained:
+                # Validate the retained trajectory, including off-grid source rows.
+                # Full and explicit full limits must validate the same observations.
+                source_ids = [row["observation_id"] for row in retained.values()]
+                covered = rows.temperature_C.between(min(retained), max(retained)) | (
+                    rows.observation_id.isin(source_ids)
+                )
+                observed = rows.loc[covered]
+                fixed = observed.n_total.nunique() <= 1
+                cumulative = not observed.n_frozen.diff().lt(0).any()
+                for row in retained.values():
                     row["source_total_is_fixed"] = fixed
                     row["source_frozen_is_cumulative"] = cumulative
         selections[key], resolved[key] = choices, limits
@@ -185,8 +187,9 @@ def grid_points(
         samples, needed = [], set()
         for key in keys:
             row = select(key, target)
-            if row is not None and _average_sample_eligible(
-                row, target, sample_freezing_intervals_C
+            if row is not None and _sample_eligible(
+                row, target, sample_freezing_intervals_C,
+                require_partial_freezing=require_partial_freezing,
             ):
                 samples.append(row)
                 needed.update((str(b), key[1], key[2]) for b in water_blank_map.get(key[0], []))

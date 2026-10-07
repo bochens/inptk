@@ -79,9 +79,8 @@ def resolve_sample_range(rows, temperatures, limits):
     """Resolve a use range on available calculation temperatures, after alignment.
 
     The full useful span is the existing calculation points inside the original
-    first-to-last freezing interval. Selecting either full edge is no exclusion:
-    MLE retains its outside reporting observations as fitting constraints. A cut
-    inside that span restricts calculation targets, never the source count rows.
+    first-to-last freezing interval. Explicit limits restrict calculation targets
+    without changing their source count rows or widening the requested range.
     """
     previous = rows.n_frozen.cummax().shift(fill_value=0)
     events = rows.loc[rows.n_frozen.gt(previous), "temperature_C"]
@@ -92,10 +91,4 @@ def resolve_sample_range(rows, temperatures, limits):
                       & (useful <= (np.inf if limits.get("max_C") is None else limits["max_C"]))]
     extent = ({"min_C": float(selected.min()), "max_C": float(selected.max())}
               if selected.size else None)
-    effective = dict(limits)
-    if full is not None:
-        if limits.get("min_C") is not None and limits["min_C"] <= full["min_C"]:
-            effective["min_C"] = None
-        if limits.get("max_C") is not None and limits["max_C"] >= full["max_C"]:
-            effective["max_C"] = None
-    return effective, {"full_range_C": full, "selected_range_C": extent}
+    return dict(limits), {"full_range_C": full, "selected_range_C": extent}

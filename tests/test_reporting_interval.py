@@ -1,4 +1,4 @@
-"""Report freezing intervals while retaining the observations that constrain fits."""
+"""Report freezing intervals while retaining original observations in the experiment."""
 
 import json
 
