@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 import inptk
-from inptk import _engine as engine
+from inptk._engine.models import SampleMetadata
 from inptk.cli import main
 
 
@@ -166,14 +166,14 @@ def test_catalog_blank_volume_still_requires_a_real_positive_value(catalog, volu
 
 def test_engine_catalog_normalization_retains_raw_fields():
     raw = {"sample_type": "water blank", "dilution": "inactive"}
-    sample = engine.SampleMetadata(sample_type=" Water Blank ", dilution="inactive",
-                                   well_volume_uL=25, air_volume_L="inactive",
-                                   raw_sample_metadata=raw)
+    sample = SampleMetadata(sample_type=" Water Blank ", dilution="inactive",
+                            well_volume_uL=25, air_volume_L="inactive",
+                            raw_sample_metadata=raw)
     assert sample.sample_type == "water blank" and sample.dilution == 1
     assert sample.well_volume_uL == 25 and sample.air_volume_L is None
     assert sample.raw_sample_metadata == raw
     with pytest.raises(ValueError):
-        engine.SampleMetadata(sample_type="air", dilution="inactive", well_volume_uL=25)
+        SampleMetadata(sample_type="air", dilution="inactive", well_volume_uL=25)
 
 
 def test_persistent_client_import_supports_typed_blanks_and_empty_override(catalog, monkeypatch,

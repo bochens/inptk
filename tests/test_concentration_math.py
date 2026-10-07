@@ -2,8 +2,8 @@
 
 import numpy as np
 import pytest
+from reference_concentration_math import binomial_poisson_mle_with_profile_errors
 
-from inptk._engine.math import binomial_poisson_mle_with_profile_errors
 from inptk._engine.water_blank_math import fit_concentration
 
 
