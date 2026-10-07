@@ -175,17 +175,6 @@ def _metadata_for_sample(metadata: MetadataLike, sample_id: str) -> SampleMetada
     return metadata.get(sample_id)
 
 
-def _dataframe_like_getitem(table: Any, key: Any) -> Any:
-    return table.to_dataframe().__getitem__(key)
-
-
-def _dataframe_like_to_numpy(table: Any, columns: list[str] | tuple[str, ...] | None) -> np.ndarray:
-    df = table.to_dataframe()
-    if columns is not None:
-        df = df.loc[:, list(columns)]
-    return df.to_numpy(copy=True)
-
-
 @dataclass(frozen=True, kw_only=True)
 class CountsTable:
     """Raw count observations before temperature binning or concentration conversion."""
@@ -256,23 +245,6 @@ class CountsTable:
             else None,
             metadata=metadata,
         )
-
-    @property
-    def sample_metadata(self) -> MetadataLike:
-        return self.metadata
-
-    @property
-    def columns(self) -> tuple[str, ...]:
-        return tuple(self.to_dataframe().columns)
-
-    def __len__(self) -> int:
-        return len(self.sample_id)
-
-    def __getitem__(self, key: Any) -> Any:
-        return _dataframe_like_getitem(self, key)
-
-    def to_numpy(self, columns: list[str] | tuple[str, ...] | None = None) -> np.ndarray:
-        return _dataframe_like_to_numpy(self, columns)
 
     def to_dataframe(self) -> pd.DataFrame:
         data: dict[str, Any] = {
