@@ -55,8 +55,8 @@ def validate_temperature_ranges(
 ) -> dict[str, dict[str, float | None]]:
     """Copy and normalize optional, inclusive ranges keyed by exact measurement names.
 
-    A missing or None boundary is unlimited. An omitted measurement uses its full
-    observed temperature support. Callers supply sample measurement IDs only, so
+    Missing or None boundaries add no restriction to the input freezing interval.
+    Callers supply sample measurement IDs only, so
     mapped water blanks cannot receive sample eligibility ranges. Returned values
     are plain dictionaries containing Python floats or None, suitable for JSON.
     """

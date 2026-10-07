@@ -168,3 +168,44 @@ def test_persistent_cli_full_and_stepwise_manual_full_fit_the_same_inputs(tmp_pa
     pd.testing.assert_frame_equal(full.to_dataframe(), step.tables["cumulative"].to_dataframe())
     assert fit_details(full)["physical_droplets"] == 40
     assert {s["measurement_id"] for s in fit_details(full)["sources"]} == {"A", "B"}
+
+
+@pytest.mark.parametrize("separate_runs", [False, True])
+@pytest.mark.parametrize("blank", [False, True])
+def test_native_alignment_fits_at_selected_targets_inside_manual_range(separate_runs, blank):
+    rows, metadata = [], []
+    for name, temperatures in (("A", [-5.7, -6.7, -7.7, -8.7]),
+                               ("B", [-6, -7, -8, -9])):
+        run = name if separate_runs else "R"
+        for identity, frozen in ((name, [0, 1, 2, 3]), ("water_" + name, [0, 0, 0, 1])):
+            if identity != name and not blank:
+                continue
+            metadata.append(dict(measurement_id=identity, sample_id="sample", run_id=run,
+                                 droplet_volume_uL=50, dilution=1))
+            observed_temperatures = temperatures if identity == name else [-5, -6, -7, -8, -9, -10]
+            observed_frozen = frozen if identity == name else [0, 0, 0, 0, 1, 2]
+            rows.extend(dict(measurement_id=identity, run_id=run, cycle_id="1", time_s=i,
+                             temperature_C=t, n_total=20, n_frozen=n)
+                        for i, (t, n) in enumerate(zip(observed_temperatures, observed_frozen)))
+    blank_map = {n: ["water_" + n] if separate_runs else ["water_A", "water_B"]
+                 for n in ["A", "B"]} if blank else {}
+    source = inptk.read_counts(rows, metadata=metadata, water_blank_map=blank_map)
+    original = source.counts.to_dataframe()
+    settings = dict(curves={"sample": {"inputs": ["A", "B"], "cycle": "1"}},
+                    method="mle", temperature_step_C=None)
+    result = inptk.analyze_concentration(
+        source, **settings, temperature_ranges_C={"A": {"min_C": -8, "max_C": -7}})
+    stream = next(s for s in fit_details(result)["sources"] if s["measurement_id"] == "A")
+    assert min(stream["fit_temperatures_C"]) >= -8
+    assert max(stream["fit_temperatures_C"]) <= -7
+    first = next(r for r in all_points(result).to_dataframe().itertuples()
+                 if r.temperature_C == -7)
+    observation = next(s for s in json.loads(first.source_observations)
+                       if s["measurement_id"] == "A")
+    assert observation["observed_temperature_C"] == -6.7
+    full = inptk.analyze_concentration(source, **settings)
+    selected = inptk.analyze_concentration(
+        source, **settings, temperature_ranges_C={"A": {"min_C": -8.7, "max_C": -6.7},
+                                                 "B": {"min_C": -9, "max_C": -7}})
+    pd.testing.assert_frame_equal(full.to_dataframe(), selected.to_dataframe())
+    pd.testing.assert_frame_equal(source.counts.to_dataframe(), original)

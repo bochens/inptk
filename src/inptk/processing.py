@@ -63,7 +63,7 @@ def cumulative_spectrum(
 ) -> CumulativeSpectrumTable:
     """Estimate individual spectra using the same method as the named-curve workflow.
 
-    MLE fits each physical input's full freezing trajectory and its raw blanks.
+    MLE uses each input's first-to-last freezing interval and its raw blanks.
     Average retains separate temperature estimates. All original observation
     rows remain in this table by default; fitted values use their temperatures.
     With temperature_step_C, return selected grid states with original source

@@ -199,6 +199,19 @@ def check_files_and_session(executable, counts, metadata, blanks, env):
             )
             range_results.append(frame)
         pd.testing.assert_frame_equal(*range_results)
+        native_counts = pd.DataFrame(range_counts).astype({"temperature_C": float})
+        native_counts.loc[native_counts.measurement_id.eq("early"), "temperature_C"] += .3
+        native_counts.to_csv(count_path, index=False)
+        native_result = folder / "native ranges.inptk"
+        command("analyze", count_path, "--metadata", metadata_path, "--method", "mle",
+                "--curves", json.dumps(curves), "--temperature-ranges",
+                json.dumps({"early": {"min_C": -6.5, "max_C": -6}}),
+                "--out", native_result)
+        native = inptk.load(native_result)
+        native_fit = next(h for h in native.history if h["operation"] == "estimate_concentration")[
+            "joint_curve_fits"]["sample"]
+        early = next(s for s in native_fit["sources"] if s["measurement_id"] == "early")
+        assert early["fit_temperatures_C"] == [-6.0]
         command("finalize", converted, "--out", final, success=False)
 
         csv = (

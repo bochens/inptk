@@ -57,7 +57,13 @@ def _trajectory(rows, *, name):
 
 def fit_curve(points, experiment, *, z, fit_step_C=None, blank_controls=None):
     """Fit selected streams and evaluate estimates and bounds at their temperatures."""
-    sample_pieces = [point.samples for point in points if not point.samples.empty]
+    # A native latest-warmer state enters at its selected calculation temperature.
+    # Original acquisition temperatures remain in the point's source observations.
+    sample_pieces = [
+        point.samples if "fit_temperature_C" in point.samples else
+        point.samples.assign(temperature_C=point.temperature_C)
+        for point in points if not point.samples.empty
+    ]
     if not sample_pieces:
         return {}, {"physical_droplets": 0, "observation_count": 0}
     blank_pieces = [point.blanks for point in points if not point.blanks.empty]
