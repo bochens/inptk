@@ -17,7 +17,6 @@ from .models import (
     SampleMetadata,
     _optional_float,
     _optional_int,
-    processing_metadata_for,
 )
 
 SAMPLE_METADATA_FIELDS = {field.name for field in fields(SampleMetadata)}
@@ -179,22 +178,9 @@ def _preserve_count_cycles(tables: list[CountsTable]) -> dict[str, list[CountsTa
                 CountsTable.from_dataframe(
                     cycle_df.reset_index(drop=True),
                     metadata=table.metadata,
-                    processing_metadata=processing_metadata_for(
-                        "read_counts",
-                        inputs=(table,),
-                        parameters={},
-                        source_sample_ids=_sample_ids_from_dataframe(cycle_df),
-                        source_cycles=(cycle_key,),
-                    ),
                 )
             )
     return grouped
-
-
-def _sample_ids_from_dataframe(df: pd.DataFrame) -> tuple[str, ...]:
-    if "sample_id" not in df:
-        return ()
-    return tuple(str(value) for value in pd.Series(df["sample_id"]).dropna().unique())
 
 
 def split_metadata_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -262,10 +248,6 @@ def parse_sync_wide(
                 CountsTable.from_dataframe(
                     pd.DataFrame.from_records(records),
                     metadata=_metadata_for_sample_id(metadata_by_sample, sample_id),
-                    processing_metadata=processing_metadata_for(
-                        "parse_sync_wide",
-                        source_sample_ids=(sample_id,),
-                    ),
                 )
             )
     if not tables:

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
@@ -156,120 +154,6 @@ class SampleMetadata:
 MetadataLike = SampleMetadata | dict[str, SampleMetadata] | None
 
 
-@dataclass(frozen=True)
-class ArtifactRef:
-    """Serializable reference to an INP-toolkit table artifact."""
-
-    artifact_id: str
-    table_type: str
-    role: str = "predecessor"
-    sample_ids: tuple[str, ...] = ()
-    content_hash: str = ""
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "artifact_id", _text_or_empty(self.artifact_id))
-        object.__setattr__(self, "table_type", _text_or_empty(self.table_type))
-        object.__setattr__(self, "role", _text_or_empty(self.role) or "predecessor")
-        object.__setattr__(self, "sample_ids", _string_tuple(self.sample_ids))
-        object.__setattr__(self, "content_hash", _text_or_empty(self.content_hash))
-
-
-@dataclass(frozen=True)
-class ProcessingStep:
-    """One lightweight provenance step in an INP-toolkit processing chain."""
-
-    operation: str
-    parameters: dict[str, Any] = field(default_factory=dict)
-    inputs: tuple[ArtifactRef, ...] = ()
-    source_sample_ids: tuple[str, ...] = ()
-    source_cycles: tuple[str, ...] = ()
-    source_dilutions: tuple[Any, ...] = ()
-    details: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "operation", _text_or_empty(self.operation))
-        object.__setattr__(self, "parameters", _plain_mapping(self.parameters))
-        object.__setattr__(self, "inputs", tuple(copy.deepcopy(self.inputs or ())))
-        object.__setattr__(self, "source_sample_ids", _string_tuple(self.source_sample_ids))
-        object.__setattr__(self, "source_cycles", _string_tuple(self.source_cycles))
-        object.__setattr__(self, "source_dilutions", _plain_tuple(self.source_dilutions))
-        object.__setattr__(self, "details", _plain_mapping(self.details))
-
-
-@dataclass(frozen=True)
-class ProcessingMetadata:
-    """Provenance for one table: current step plus lightweight history."""
-
-    artifact_id: str = ""
-    generated_by: ProcessingStep | None = None
-    history_snapshot: tuple[ProcessingStep, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "artifact_id", _text_or_empty(self.artifact_id))
-        object.__setattr__(
-            self,
-            "generated_by",
-            copy.deepcopy(self.generated_by) if self.generated_by is not None else None,
-        )
-        object.__setattr__(
-            self,
-            "history_snapshot",
-            tuple(copy.deepcopy(self.history_snapshot or ())),
-        )
-
-
-def artifact_ref(table: Any, *, role: str = "predecessor") -> ArtifactRef:
-    """Return a stable lightweight reference for an INP-toolkit table."""
-
-    processing = getattr(table, "processing_metadata", ProcessingMetadata())
-    content_hash = _table_content_hash(table)
-    artifact_id = processing.artifact_id or f"{type(table).__name__}:{content_hash[:16]}"
-    sample_ids = tuple(pd.Series(table.sample_id).astype(str).dropna().unique())
-    return ArtifactRef(
-        artifact_id=artifact_id,
-        table_type=type(table).__name__,
-        role=role,
-        sample_ids=sample_ids,
-        content_hash=content_hash,
-    )
-
-
-def processing_metadata_for(
-    operation: str,
-    *,
-    inputs: tuple[Any, ...] | list[Any] = (),
-    parameters: dict[str, Any] | None = None,
-    source_sample_ids: tuple[str, ...] | list[str] = (),
-    source_cycles: tuple[str, ...] | list[str] = (),
-    source_dilutions: tuple[Any, ...] | list[Any] = (),
-    details: dict[str, Any] | None = None,
-) -> ProcessingMetadata:
-    """Build processing metadata from immediate predecessor tables or refs."""
-
-    input_refs: list[ArtifactRef] = []
-    history: list[ProcessingStep] = []
-    for value in inputs:
-        if isinstance(value, ArtifactRef):
-            input_refs.append(value)
-            continue
-        input_refs.append(artifact_ref(value))
-        processing = getattr(value, "processing_metadata", None)
-        if isinstance(processing, ProcessingMetadata):
-            history.extend(processing.history_snapshot)
-
-    step = ProcessingStep(
-        operation=operation,
-        parameters=parameters or {},
-        inputs=tuple(input_refs),
-        source_sample_ids=tuple(source_sample_ids),
-        source_cycles=tuple(source_cycles),
-        source_dilutions=tuple(source_dilutions),
-        details=details or {},
-    )
-    history.append(step)
-    return ProcessingMetadata(generated_by=step, history_snapshot=tuple(history))
-
-
 def _normalize_metadata(metadata: MetadataLike) -> MetadataLike:
     if metadata is None or isinstance(metadata, SampleMetadata):
         return copy.deepcopy(metadata)
@@ -283,74 +167,12 @@ def _normalize_metadata(metadata: MetadataLike) -> MetadataLike:
     return copy.deepcopy(metadata)
 
 
-def _normalize_processing_metadata(
-    processing_metadata: ProcessingMetadata | None,
-) -> ProcessingMetadata:
-    if processing_metadata is None:
-        return ProcessingMetadata()
-    if not isinstance(processing_metadata, ProcessingMetadata):
-        raise TypeError("processing_metadata must be a ProcessingMetadata object or None")
-    return copy.deepcopy(processing_metadata)
-
-
 def _metadata_for_sample(metadata: MetadataLike, sample_id: str) -> SampleMetadata | None:
     if metadata is None:
         return None
     if isinstance(metadata, SampleMetadata):
         return metadata
     return metadata.get(sample_id)
-
-
-def _string_tuple(values: Any) -> tuple[str, ...]:
-    if values is None:
-        return ()
-    if isinstance(values, str):
-        return (values,)
-    return tuple(_text_or_empty(value) for value in values)
-
-
-def _plain_tuple(values: Any) -> tuple[Any, ...]:
-    if values is None:
-        return ()
-    if isinstance(values, (str, bytes)):
-        return (values,)
-    return tuple(_plain_value(value) for value in values)
-
-
-def _plain_mapping(values: dict[str, Any] | None) -> dict[str, Any]:
-    if values is None:
-        return {}
-    return {str(key): _plain_value(value) for key, value in values.items()}
-
-
-def _plain_value(value: Any) -> Any:
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return [_plain_value(item) for item in value.tolist()]
-    if isinstance(value, (list, tuple)):
-        return [_plain_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _plain_value(item) for key, item in value.items()}
-    return value
-
-
-def _table_content_hash(table: Any) -> str:
-    payload = {
-        "table_type": type(table).__name__,
-        "data": table.to_dataframe().to_dict(orient="list"),
-        "sample_metadata": _metadata_hash_payload(getattr(table, "metadata", None)),
-    }
-    encoded = json.dumps(_plain_value(payload), sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _metadata_hash_payload(metadata: MetadataLike) -> Any:
-    if metadata is None:
-        return None
-    if isinstance(metadata, SampleMetadata):
-        return asdict(metadata)
-    return {str(key): asdict(value) for key, value in sorted(metadata.items())}
 
 
 def _dataframe_like_getitem(table: Any, key: Any) -> Any:
@@ -376,7 +198,6 @@ class CountsTable:
     cycle: Any | None = None
     observation_id: Any | None = None
     metadata: MetadataLike = None
-    processing_metadata: ProcessingMetadata | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -399,11 +220,6 @@ class CountsTable:
             self, "observation_id", _optional_array(self.observation_id, dtype=object)
         )
         object.__setattr__(self, "metadata", _normalize_metadata(self.metadata))
-        object.__setattr__(
-            self,
-            "processing_metadata",
-            _normalize_processing_metadata(self.processing_metadata),
-        )
         lengths = {
             "sample_id": len(self.sample_id),
             "temperature_C": len(self.temperature_C),
@@ -427,7 +243,6 @@ class CountsTable:
         df: pd.DataFrame,
         *,
         metadata: MetadataLike = None,
-        processing_metadata: ProcessingMetadata | None = None,
     ) -> CountsTable:
         return cls(
             sample_id=df["sample_id"].to_numpy(dtype=object),
@@ -440,7 +255,6 @@ class CountsTable:
             if "observation_id" in df
             else None,
             metadata=metadata,
-            processing_metadata=processing_metadata,
         )
 
     @property
@@ -459,9 +273,6 @@ class CountsTable:
 
     def to_numpy(self, columns: list[str] | tuple[str, ...] | None = None) -> np.ndarray:
         return _dataframe_like_to_numpy(self, columns)
-
-    def artifact_ref(self, *, role: str = "predecessor") -> ArtifactRef:
-        return artifact_ref(self, role=role)
 
     def to_dataframe(self) -> pd.DataFrame:
         data: dict[str, Any] = {
