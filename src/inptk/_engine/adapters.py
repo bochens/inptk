@@ -5,7 +5,6 @@ import io
 import re
 from collections.abc import Iterable
 from dataclasses import fields, replace
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -24,8 +23,6 @@ SAMPLE_METADATA_FIELDS = {field.name for field in fields(SampleMetadata)}
 __all__ = [
     "parse_sync_wide",
     "read_counts",
-    "read_preamble",
-    "read_sync",
     "split_metadata_rows",
 ]
 
@@ -47,30 +44,6 @@ METADATA_ROW_LABELS = {
     "dry_mass_g",
     "sample_note",
 }
-
-
-def read_preamble(path: str | Path) -> dict[str, str]:
-    """Read leading '# key: value' session preamble lines from a CSV file."""
-
-    preamble: dict[str, str] = {}
-    with Path(path).open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.startswith("#"):
-                break
-            body = line[1:].strip()
-            if _is_sample_metadata_row(body):
-                continue
-            if ":" in body:
-                key, value = body.split(":", 1)
-                preamble[key.strip()] = value.strip()
-    return preamble
-
-
-def read_sync(path: str | Path) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Read an Icescopy temperature-sync CSV with optional commented preamble."""
-
-    preamble = read_preamble(path)
-    return _read_sync_data(path), preamble
 
 
 def _read_sync_data(source):
