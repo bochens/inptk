@@ -49,6 +49,53 @@ def _sources(point) -> list[dict]:
     return records
 
 
+def _point_record(
+    point, contributors, *, group, curve_id, individual, ids, supports, experiment, method
+) -> dict:
+    """One output row for a curve point, before its concentration is filled in."""
+    available = sorted(
+        key for key, (cold, warm) in supports.items() if cold <= point.temperature_C <= warm
+    )
+    return {
+        "sample_id": group["sample_id"],
+        "curve_id": curve_id,
+        "curve_kind": "individual" if individual else "combined",
+        "point_id": point.point_id,
+        "point_order": point.point_order,
+        "temperature_C": point.temperature_C,
+        "alignment": point.alignment,
+        "concentration": np.nan,
+        "lower_error": np.nan,
+        "upper_error": np.nan,
+        "unit": "INP_per_mL_suspension",
+        "basis": "suspension",
+        "qc_flag": 1,
+        "source_measurement_ids": json.dumps(ids),
+        "available_measurement_ids": json.dumps(available),
+        "contributing_measurement_ids": json.dumps(contributors),
+        "contributor_count": len(contributors),
+        "source_measurement_id": contributors[0] if len(contributors) == 1 else "",
+        "selection_status": "no_eligible_measurements"
+        if not contributors
+        else "single"
+        if len(contributors) == 1
+        else "combined",
+        "dilution_fold": experiment.measurements[contributors[0]].dilution
+        if len(contributors) == 1
+        else np.nan,
+        "water_blank_ids": json.dumps(
+            sorted(str(row["measurement_id"]) for row in point.blank_records)
+        ),
+        "source_observations": json.dumps(_sources(point)),
+        "uncertainty_method": "joint_curve_profile_likelihood"
+        if method == "mle"
+        else "propagated_wilson_binomial_bounds",
+        "correction_state": "water_blank_corrected"
+        if experiment.water_blank_map
+        else "uncorrected",
+    }
+
+
 def estimate_concentration(
     fractions: FrozenFractionTable,
     *,
@@ -190,47 +237,10 @@ def estimate_concentration(
         group_alignment[curve_id] = sorted({point.alignment for point in points})
         for point in points:
             contributors = sorted(str(row["measurement_id"]) for row in point.sample_records)
-            available = sorted(
-                key for key, (cold, warm) in supports.items() if cold <= point.temperature_C <= warm
+            record = _point_record(
+                point, contributors, group=group, curve_id=curve_id, individual=individual,
+                ids=ids, supports=supports, experiment=experiment, method=method,
             )
-            record = {
-                "sample_id": group["sample_id"],
-                "curve_id": curve_id,
-                "curve_kind": "individual" if individual else "combined",
-                "point_id": point.point_id,
-                "point_order": point.point_order,
-                "temperature_C": point.temperature_C,
-                "alignment": point.alignment,
-                "concentration": np.nan,
-                "lower_error": np.nan,
-                "upper_error": np.nan,
-                "unit": "INP_per_mL_suspension",
-                "basis": "suspension",
-                "qc_flag": 1,
-                "source_measurement_ids": json.dumps(ids),
-                "available_measurement_ids": json.dumps(available),
-                "contributing_measurement_ids": json.dumps(contributors),
-                "contributor_count": len(contributors),
-                "source_measurement_id": contributors[0] if len(contributors) == 1 else "",
-                "selection_status": "no_eligible_measurements"
-                if not contributors
-                else "single"
-                if len(contributors) == 1
-                else "combined",
-                "dilution_fold": experiment.measurements[contributors[0]].dilution
-                if len(contributors) == 1
-                else np.nan,
-                "water_blank_ids": json.dumps(
-                    sorted(str(row["measurement_id"]) for row in point.blank_records)
-                ),
-                "source_observations": json.dumps(_sources(point)),
-                "uncertainty_method": "joint_curve_profile_likelihood"
-                if method == "mle"
-                else "propagated_wilson_binomial_bounds",
-                "correction_state": "water_blank_corrected"
-                if experiment.water_blank_map
-                else "uncorrected",
-            }
             if contributors:
                 if method == "mle":
                     estimate, lower, upper = estimates[point.temperature_C]
