@@ -19,6 +19,12 @@ from .processing import (
 )
 from .settings import DEFAULTS, AnalysisSettings, validate_decrease_policy
 from .tables import UNITS, CumulativeSpectrumTable, CurveSpectrumTable
+from .warming import (
+    DEFAULT_WARMING_HYSTERESIS_C,
+    validate_warming_settings,
+    warming_settings,
+)
+from .warming import drop_warming as _drop_warming
 
 SpectrumT = TypeVar("SpectrumT", bound=CumulativeSpectrumTable)
 
@@ -281,8 +287,14 @@ def analyze_concentration(
     water_blank_after_first_freeze: bool = DEFAULTS.water_blank_after_first_freeze,
     water_blank_temperature_range_C=None,
     decrease_policy: Literal["stop_at_decrease", "skip_decreases"] = DEFAULTS.decrease_policy,
+    drop_warming: bool = False,
+    warming_hysteresis_C: float = DEFAULT_WARMING_HYSTERESIS_C,
 ) -> AnalysisResult:
-    """Run the public calculation steps using native or initially gridded counts."""
+    """Run the public calculation steps using native or initially gridded counts.
+
+    drop_warming leaves out warming observations before every step (see
+    inptk.drop_warming); the result keeps the complete original experiment.
+    """
     from .water_blank import analysis_experiment
 
     AnalysisSettings(
@@ -301,6 +313,10 @@ def analyze_concentration(
         differential=differential,
         decrease_policy=decrease_policy,
     )
+    validate_warming_settings(drop_warming, warming_hysteresis_C)
+    original = experiment
+    if drop_warming:
+        experiment = _drop_warming(experiment, warming_hysteresis_C=warming_hysteresis_C)
     source = analysis_experiment(experiment, water_blank_correction=water_blank_correction)
     fractions = frozen_fraction(source)
     observed_fractions = fractions if source is experiment else frozen_fraction(experiment)
@@ -381,6 +397,7 @@ def analyze_concentration(
         "decrease_policy": decrease_policy,
         "reporting_rule": "observed_sample_freezing_interval",
         "reporting_intervals_C": combined.history[-1]["reporting_intervals_C"],
+        **warming_settings(drop_warming, warming_hysteresis_C),
     }
     history = final.history
     warnings = list(
@@ -396,7 +413,7 @@ def analyze_concentration(
     from .results import assemble_curves
 
     return AnalysisResult(
-        experiment=experiment,
+        experiment=original,
         frozen_fraction=observed_fractions,
         curves=assemble_curves(
             final,

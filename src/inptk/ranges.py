@@ -18,6 +18,12 @@ from .processing import frozen_fraction
 from .range_selection import RangePlanner
 from .settings import DEFAULTS, EstimationSettings
 from .tables import FrozenFractionTable
+from .warming import (
+    DEFAULT_WARMING_HYSTERESIS_C,
+    validate_warming_settings,
+    warming_settings,
+)
+from .warming import drop_warming as _drop_warming
 from .water_blank import analysis_experiment, estimate_point
 
 
@@ -188,6 +194,8 @@ def suggest_temperature_ranges(
     temperature_end_C: float | None = DEFAULTS.temperature_end_C,
     temperature_method: str = DEFAULTS.temperature_method,
     temperature_window_C: float | None = DEFAULTS.temperature_window_C,
+    drop_warming: bool = False,
+    warming_hysteresis_C: float = DEFAULT_WARMING_HYSTERESIS_C,
 ) -> RangeSuggestions:
     """Suggest nonoverlapping Average ranges for nonnegative, nondecreasing output.
 
@@ -212,6 +220,7 @@ def suggest_temperature_ranges(
     confidence intervals do not include the uncertainty of selecting these ranges.
     Set include_observations=False for limits and reasons without constructing the
     per-observation diagnostic report. This does not change the proposed limits.
+    drop_warming leaves out warming observations first, as in analyze_concentration.
     """
     if not isinstance(include_observations, bool):
         raise TypeError("include_observations must be a bool (True or False)")
@@ -234,6 +243,9 @@ def suggest_temperature_ranges(
     }
     min_frozen = _positive_count(min_frozen, "min_frozen")
     min_unfrozen = _positive_count(min_unfrozen, "min_unfrozen")
+    validate_warming_settings(drop_warming, warming_hysteresis_C)
+    if drop_warming:
+        experiment = _drop_warming(experiment, warming_hysteresis_C=warming_hysteresis_C)
     view = analysis_experiment(experiment, water_blank_correction=water_blank_correction)
     fractions = frozen_fraction(view)
     frame = fractions.to_dataframe()
@@ -326,6 +338,9 @@ def suggest_temperature_ranges(
         "uncertainty": "log-transformed Wilson binomial bounds with approximate propagation; "
         "excludes range-selection uncertainty",
         "inputs": proposals,
+        **warming_settings(drop_warming, warming_hysteresis_C),
+        **({"drop_warming_warnings": experiment.counts.history[-1]["warnings"]}
+           if drop_warming else {}),
     }
     return RangeSuggestions(
         proposals,

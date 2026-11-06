@@ -25,6 +25,7 @@ from .tables import (
     DifferentialSpectrumTable,
     FrozenFractionTable,
 )
+from .warming import drop_warming
 from .workflows import (
     analyze_concentration,
     convert_concentration,
@@ -52,6 +53,7 @@ __all__ = [
     "cumulative_spectrum",
     "differential_spectrum",
     "differentiate_spectrum",
+    "drop_warming",
     "estimate_concentration",
     "finalize_spectrum",
     "frozen_fraction",

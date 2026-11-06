@@ -14,6 +14,7 @@ from . import (
     __version__,
     analyze_concentration,
     cumulative_spectrum,
+    drop_warming,
     estimate_concentration,
     frozen_fraction,
     read_counts,
@@ -24,17 +25,18 @@ from . import (
 from .cli_steps import (
     complete_step_metadata,
     counts_from_step,
-    fraction_step,
     select_table,
     table_summary,
     transform_step,
 )
+from .cli_steps import fraction_step as _fraction_step
 from .cli_store import ResultStore
 from .experiment import Experiment, ProcessingResult
 from .io import FORMAT_VERSION, _encode, _table_frame, _table_payload
 from .readers import _default_water_blank_map
 from .settings import DEFAULTS
 from .tables import CountsTable
+from .warming import DEFAULT_WARMING_HYSTERESIS_C, validate_warming_settings
 
 CLI_PROTOCOL_VERSION = 2
 _CLIENT_WRITER: ContextVar[Callable[[dict], None] | None] = ContextVar(
@@ -113,6 +115,30 @@ def _analysis_input_arguments(parser):
     parser.add_argument(
         "--cycle", action="append", help="Exact cycle ID to analyze; repeat to select several"
     )
+    _warming_arguments(parser)
+
+
+def _warming_arguments(parser):
+    parser.add_argument(
+        "--drop-warming",
+        action="store_true",
+        help=(
+            "Before any calculation, leave out observations warmer than their cycle's "
+            "coldest temperature so far plus the hysteresis, once it is below 0 C"
+        ),
+    )
+    parser.add_argument(
+        "--warming-hysteresis-C",
+        type=float,
+        default=DEFAULT_WARMING_HYSTERESIS_C,
+        help="Warming allowed before an observation is left out with --drop-warming",
+    )
+
+
+def _drop_warming_from(args, source):
+    if not args.drop_warming:
+        return source
+    return drop_warming(source, warming_hysteresis_C=args.warming_hysteresis_C)
 
 
 def build_parser():
@@ -245,6 +271,7 @@ def _observation_arguments(parser):
         "--sample-map", help="JSON object or file mapping Icescopy inputs to samples"
     )
     parser.add_argument("--run-id", default="1")
+    _warming_arguments(parser)
 
 
 def _estimation_arguments(parser, *, individual=False):
@@ -548,6 +575,8 @@ def _preview(args, store):
         imported = counts.history[-1]
         metadata = imported["measurement_metadata"]
         provisional = imported["provisional_sample_assignments"]
+    validate_warming_settings(args.drop_warming, args.warming_hysteresis_C)
+    counts = _drop_warming_from(args, counts)
     if blank_map is None:
         blank_map = _default_water_blank_map(metadata)
     # Check concentration metadata with the same importer, without any fitting.
@@ -599,6 +628,10 @@ def _preview(args, store):
             "missing_fields": {key: value for key, value in missing.items() if value},
         },
         analysis_performed=False,
+        **(
+            {"warnings": counts.history[-1]["warnings"], "drop_warming": counts.history[-1]}
+            if args.drop_warming else {}
+        ),
     )
 
 
@@ -664,6 +697,11 @@ def _read_analysis_input(args, store, *, saved=None):
 
 
 def _fraction_input(args, store):
+    validate_warming_settings(args.drop_warming, args.warming_hysteresis_C)
+
+    def fraction_step(counts, *, experiment=None):
+        return _fraction_step(_drop_warming_from(args, counts), experiment=experiment)
+
     blank_map = _json_object(args.water_blank_map, "--water-blank-map")
     if args.format == "saved":
         source = store.load(args.input)
@@ -720,6 +758,8 @@ def _estimate_step(args, store):
         raise ValueError("--temperature-ranges applies to combined curves, not --individual")
     source = store.load(args.input) if args.format == "saved" else None
     experiment = _read_analysis_input(args, store, saved=source)
+    validate_warming_settings(args.drop_warming, args.warming_hysteresis_C)
+    analyzed = _drop_warming_from(args, experiment)
     tables = table_summary(source) if source is not None else {}
     if "frozen_fraction" in tables and getattr(source, "experiment", None) is not None:
         fractions = select_table(source, "frozen_fraction")
@@ -729,15 +769,16 @@ def _estimate_step(args, store):
                 measurement_id=list(experiment.measurements),
                 cycle_id=selected.cycle_id.unique().tolist(),
             )
+        fractions = _drop_warming_from(args, fractions)
     else:
-        fractions = frozen_fraction(experiment)
+        fractions = frozen_fraction(analyzed)
     settings = _estimation_settings(args)
     if args.individual:
         settings.pop("curves")
         settings.pop("temperature_ranges_C")
-        estimated = cumulative_spectrum(fractions, experiment=experiment, **settings)
+        estimated = cumulative_spectrum(fractions, experiment=analyzed, **settings)
     else:
-        estimated = estimate_concentration(fractions, experiment=experiment, **settings)
+        estimated = estimate_concentration(fractions, experiment=analyzed, **settings)
     return ProcessingResult({"frozen_fraction": fractions, "cumulative": estimated}, experiment)
 
 
@@ -866,6 +907,8 @@ def _suggest_ranges_command(args, store, command):
         water_blank_temperature_range_C=_json_object(
             args.water_blank_temperature_range, "--water-blank-temperature-range"
         ),
+        drop_warming=args.drop_warming,
+        warming_hysteresis_C=args.warming_hysteresis_C,
     )
     complete = all(item["range_C"] is not None for item in proposal.inputs.values())
     _print_json(
@@ -880,11 +923,12 @@ def _suggest_ranges_command(args, store, command):
                 if proposal.observations is not None
                 else {}
             ),
-            warnings=[]
-            if complete
-            else [
-                "Some inputs have no usable range. Review thresholds or selected inputs."
-            ],
+            warnings=proposal.settings.get("drop_warming_warnings", [])
+            + (
+                []
+                if complete
+                else ["Some inputs have no usable range. Review thresholds or selected inputs."]
+            ),
         )
     )
     return 0
@@ -952,6 +996,8 @@ def _analyze_command(args, store, json_mode, command):
         output_basis=args.output_basis,
         differential=args.differential,
         decrease_policy=args.decrease_policy,
+        drop_warming=args.drop_warming,
+        warming_hysteresis_C=args.warming_hysteresis_C,
     )
     store.save(result, args.out)
     if json_mode:

@@ -181,6 +181,21 @@ limits when omitted. Temperature-selection methods are `latest`, `max`, and `win
 `window` requires `temperature_window_C`. Use the same grid and settings for range
 suggestions and analysis.
 
+### Warming observations
+
+All observed rows are kept by default, including a warm-up after the run. Set
+`drop_warming=True` (CLI `--drop-warming`) to leave out warming rows before any
+calculation. Within each measurement, run and cycle, once the temperature has gone
+below 0 °C, a row warmer than the coldest temperature so far plus
+`warming_hysteresis_C` (default 0.2 °C, CLI `--warming-hysteresis-C`) is left out.
+Rows before the cycle goes below 0 °C are kept. Frozen counts stay cumulative: the
+next kept row carries freezes recorded on left-out rows, and freezes after a cycle's
+last kept row produce a warning. `inptk.drop_warming()` applies the same rule to an
+experiment or counts table for the separate steps.
+
+The saved analysis keeps every original count row. Its frozen-fraction history lists
+each left-out row with the reason `warming`, and its settings record the option.
+
 ## Command-line workflow
 
 ```bash
