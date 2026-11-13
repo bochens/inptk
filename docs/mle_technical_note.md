@@ -22,16 +22,16 @@ single monotone curve $K(T)$ that makes the observed counts most probable.
 
 | Symbol | Meaning |
 |---|---|
-| $s$ | one *droplet set*: one measurement, run and cycle, with a fixed number of droplets |
-| $N_s$ | number of droplets in set $s$ |
+| $s$ | one *dilution*: the droplets of one dilution in one measurement, run and cycle (a water blank counts as one too), with a fixed number of droplets |
+| $N_s$ | number of droplets in dilution $s$ |
 | $V_s$ | volume of each droplet, mL (inptk reads µL and divides by 1000) |
-| $d_s$ | dilution factor of set $s$ (1 = undiluted) |
-| $T_{s,0} > T_{s,1} > \dots > T_{s,J_s}$ | the temperatures kept for set $s$, warm to cold |
+| $d_s$ | dilution factor of dilution $s$ (1 = undiluted) |
+| $T_{s,0} > T_{s,1} > \dots > T_{s,J_s}$ | the temperatures kept for dilution $s$, warm to cold |
 | $F_{s,j}$ | cumulative number frozen at $T_{s,j}$ |
 | $n_{s,j} = F_{s,j} - F_{s,j-1}$ | droplets that froze between $T_{s,j-1}$ and $T_{s,j}$ (with $F_{s,-1} = 0$) |
 | $K(T)$ | cumulative INP concentration of the sample, per mL suspension |
 | $B_r(T)$ | cumulative background (water blank) concentration for run and cycle $r$, per mL |
-| $\lambda_s(T)$ | expected number of active INPs in one droplet of set $s$ at $T$ |
+| $\lambda_s(T)$ | expected number of active INPs in one droplet of dilution $s$ at $T$ |
 
 ## 3. Physical model
 
@@ -50,7 +50,7 @@ Poisson chance that it holds none is $e^{-\lambda}$. So
 P(\text{droplet still liquid at } T) = e^{-\lambda_s(T)} .
 ```
 
-A droplet of set $s$ holds $V_s/d_s$ mL of the original suspension and $V_s$ mL
+A droplet of dilution $s$ holds $V_s/d_s$ mL of the original suspension and $V_s$ mL
 of liquid in total. The expected number of active INPs is
 
 ```math
@@ -59,12 +59,12 @@ of liquid in total. The expected number of active INPs is
 
 Here $B_r$ is the background measured by the water blanks of the same run and
 cycle. It scales with the whole droplet volume, and it does not depend on
-dilution. A water-blank set has $d_s \to \infty$, so for it
+dilution. A water blank has $d_s \to \infty$, so for it
 $\lambda_s(T) = V_s B_r(T)$. In the code these two factors are
 `sample_exposure` $= V_s/d_s$ and `blank_exposure` $= V_s$. If water-blank
 correction is off, or no blank is mapped to the run, the $B_r$ term is absent.
 
-## 4. Likelihood of one droplet set
+## 4. Likelihood of one dilution
 
 Write $\lambda_{s,j} = \lambda_s(T_{s,j})$ and $\lambda_{s,-1} = 0$. Each
 droplet ends up in exactly one of $J_s + 2$ outcomes:
@@ -147,8 +147,8 @@ frozen at $-16$. Treating each image as a new, independent binomial trial would
 count each droplet many times and give intervals that are far too narrow. The
 likelihood above counts each droplet once: by the interval in which it first froze.
 
-**All droplet sets.** Different droplet sets (other dilutions, other runs,
-blanks) are independent, so their likelihoods multiply and their logs add.
+**All dilutions.** Different dilutions (including those from other runs,
+and the blanks) are independent, so their likelihoods multiply and their logs add.
 The quantity inptk minimizes is the negative log-likelihood:
 
 ```math
@@ -241,7 +241,7 @@ inptk minimizes $\ell$ with L-BFGS-B, with bounds $x \ge 0$
 
 **Columns that look the same.** Two increments $\kappa_k$ and $\kappa_{k'}$
 can enter every $a_{s,j}$ in exactly the same way, for example two grid
-temperatures with no observation of any set between them. The data cannot
+temperatures with no observation of any dilution between them. The data cannot
 tell them apart. inptk merges them into one column, fits the sum, and reports
 the whole sum at the colder of the two temperatures (`_reduced` and the
 loop at the end of `CurveLikelihood.__init__`). This means the cumulative curve rises at the last temperature
@@ -260,7 +260,7 @@ interval. Outside it, the value and its errors are `NaN`.
 
 ## 8. Preparing the counts
 
-Before the fit, each droplet set's history is cleaned up in ways that leave
+Before the fit, each dilution's history is cleaned up in ways that leave
 the likelihood unchanged:
 
 1. **A fixed set of droplets.** $N_s$ must be constant and $F_{s,j}$ must never
@@ -269,7 +269,7 @@ the likelihood unchanged:
 2. **One state per temperature.** If the temperature holds or briefly warms,
    inptk uses the latest observation at or warmer than each target temperature
    (the "latest-warmer" rule). The original rows are kept in the experiment.
-3. **Dropping observations where nothing froze.** Suppose no droplet of set
+3. **Dropping observations where nothing froze.** Suppose no droplet of dilution
    $s$ froze between $T_{s,j}$ and $T_{s,m}$, so the frozen count stays at
    $F$. Each of those intervals then adds only
    $(N_s - F)(\lambda_{s,i} - \lambda_{s,i-1})$ to the cost, the price paid by
@@ -283,9 +283,9 @@ the likelihood unchanged:
    inptk keeps both edges of every increase, plus the first and last
    observation (`_trajectory` in `curve_fit.py`).
 
-## 9. Check: one droplet set gives the Vali formula
+## 9. Check: one dilution gives the Vali formula
 
-Take a single droplet set with no water blank, and let the grid be its own
+Take a single dilution with no water blank, and let the grid be its own
 observation temperatures. Write $u_j = \lambda_j - \lambda_{j-1} =
 (V/d)\,\kappa_j \ge 0$. The negative log-likelihood separates into one term per
 interval:
@@ -311,7 +311,7 @@ frozen fraction. So
 ```
 
 which is exactly Vali's formula. The MLE reproduces the classic result when
-there is only one droplet set, and it extends that result consistently to many sets.
+there is only one dilution, and it extends that result consistently to many dilutions.
 
 **With a water blank of the same droplet volume**, the same reasoning gives
 $V B(T_j) = -\ln(1 - f^{\text{blank}}_j)$, and
@@ -403,7 +403,7 @@ between two freezing events.
 
 ### Check against the binomial likelihood-ratio interval
 
-For one droplet set without a blank, holding $\lambda_j$ fixed and optimizing
+For one dilution without a blank, holding $\lambda_j$ fixed and optimizing
 the other steps leaves a binomial likelihood for the $F_j$ frozen out of $N$.
 The likelihood ratio does not depend on how the parameter is written, so the profile
 interval for $K(T_j)$ is the binomial likelihood-ratio interval for $f_j$,
@@ -438,7 +438,7 @@ five significant figures.
 ## 12. Combining several inputs
 
 A combined curve (for example, five dilutions of one sample) has one shared
-$K(T)$. Each droplet set enters with its own $V_s/d_s$, and all sets add their
+$K(T)$. Each dilution enters with its own $V_s/d_s$, and all dilutions add their
 log-likelihoods. Nothing is averaged by hand. A dilution contributes most at
 temperatures where its droplets are partly frozen, because there its freezing
 counts carry the most information about $K$. A dilution that is fully frozen
@@ -487,7 +487,7 @@ bounds are scaled by the same factor.
 2. INPs are Poisson-distributed among droplets, and droplets freeze independently.
 3. The water background is proportional to droplet volume, does not depend on
    dilution, and is the same for all wells in one run and cycle.
-4. Each droplet is counted once, at its first freezing. The droplet sets in
+4. Each droplet is counted once, at its first freezing. The dilutions in
    one curve are physically different droplets.
 5. Uncertainty comes from Wilks' theorem: approximate and pointwise.
 
@@ -495,7 +495,7 @@ bounds are scaled by the same factor.
 
 | What | Where |
 |---|---|
-| Build droplet-set histories, latest-warmer rule, dropping no-event points | `src/inptk/curve_fit.py` (`_trajectory`, `fit_curve`) |
+| Build per-dilution histories, latest-warmer rule, dropping no-event points | `src/inptk/curve_fit.py` (`_trajectory`, `fit_curve`) |
 | Design vectors $a_{s,j}$, $c$, $\Delta_e$, merged and unbounded columns | `CurveLikelihood.__init__`, `_reduced` in `src/inptk/_engine/curve_likelihood.py` |
 | $\ell(x)$, gradient, L-BFGS-B fit | `_Likelihood.value_gradient`, `_Likelihood.fit` |
 | Profile bounds | `_Likelihood.endpoint`, `CurveLikelihood.estimate` |
