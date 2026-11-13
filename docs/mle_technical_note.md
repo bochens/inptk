@@ -66,29 +66,80 @@ correction is off, or no blank is mapped to the run, the $B_r$ term is absent.
 
 ## 4. Likelihood of one droplet set
 
-Each droplet ends up in exactly one of these outcomes:
+Write $\lambda_{s,j} = \lambda_s(T_{s,j})$ and $\lambda_{s,-1} = 0$. Each
+droplet ends up in exactly one of $J_s + 2$ outcomes:
 
-- it froze between two kept observations $T_{s,j-1}$ and $T_{s,j}$, or
-  already by the first observation $T_{s,0}$;
+- it first froze in the interval ending at $T_{s,j}$, for $j = 0, \dots, J_s$
+  (for $j = 0$, already by the first observation);
 - it was still liquid at the last observation $T_{s,J_s}$.
 
-Write $\lambda_{s,j} = \lambda_s(T_{s,j})$ and $\lambda_{s,-1} = 0$. The
-probability of freezing in the interval ending at $T_{s,j}$ is
+The likelihood follows from these outcomes in five steps.
+
+**Step 1: probability of each outcome.** A droplet first freezes in interval
+$j$ if it was liquid at $T_{s,j-1}$ but not at $T_{s,j}$:
 
 ```math
-e^{-\lambda_{s,j-1}} - e^{-\lambda_{s,j}}
-= e^{-\lambda_{s,j-1}}\left(1 - e^{-(\lambda_{s,j}-\lambda_{s,j-1})}\right),
+p_{s,j} = P(\text{liquid at } T_{s,j-1}) - P(\text{liquid at } T_{s,j})
+= e^{-\lambda_{s,j-1}} - e^{-\lambda_{s,j}}, \qquad j = 0, \dots, J_s .
 ```
 
-and the probability of staying liquid to the end is $e^{-\lambda_{s,J_s}}$.
-These outcomes are mutually exclusive and their counts add up to $N_s$, so the
-counts follow a multinomial distribution. Up to a constant that does not
-depend on $K$ or $B$, the log-likelihood is
+It stays liquid to the end with probability
+
+```math
+q_s = e^{-\lambda_{s,J_s}} .
+```
+
+These probabilities add up to one, because the sum telescopes:
+$\sum_j p_{s,j} + q_s = e^{-\lambda_{s,-1}} = 1$.
+
+**Step 2: the likelihood.** $n_{s,j}$ droplets froze in interval $j$, and
+$N_s - F_{s,J_s}$ stayed liquid. These counts add up to $N_s$. The droplets
+are independent, so the counts follow a multinomial distribution:
+
+```math
+L_s = \frac{N_s!}{\prod_{j} n_{s,j}!\;(N_s - F_{s,J_s})!}\;
+\prod_{j=0}^{J_s} p_{s,j}^{\,n_{s,j}}\; q_s^{\,N_s - F_{s,J_s}} .
+```
+
+The fraction in front is the multinomial coefficient. It counts the ways to
+sort the $N_s$ droplets into groups of these sizes. It depends only on the
+counts, not on $K$ or $B$.
+
+**Step 3: take the log.** The product becomes a sum, and the multinomial
+coefficient becomes a constant:
+
+```math
+\log L_s = \text{const} + \sum_{j=0}^{J_s} n_{s,j}\log p_{s,j}
++ (N_s - F_{s,J_s})\log q_s .
+```
+
+The constant does not change where the maximum is, so inptk leaves it out.
+
+**Step 4: simplify each term.** Factor $e^{-\lambda_{s,j-1}}$ out of
+$p_{s,j}$:
+
+```math
+p_{s,j} = e^{-\lambda_{s,j-1}}\left(1 - e^{-(\lambda_{s,j}-\lambda_{s,j-1})}\right)
+\quad\Longrightarrow\quad
+\log p_{s,j} = -\lambda_{s,j-1} + \log\!\left(1 - e^{-(\lambda_{s,j}-\lambda_{s,j-1})}\right),
+```
+
+and
+
+```math
+\log q_s = -\lambda_{s,J_s} .
+```
+
+**Step 5: substitute.** Putting these into Step 3 and dropping the constant gives
 
 ```math
 \log L_s = \sum_{j=0}^{J_s} n_{s,j}\left[-\lambda_{s,j-1} + \log\!\left(1 - e^{-(\lambda_{s,j}-\lambda_{s,j-1})}\right)\right]
  \;-\; (N_s - F_{s,J_s})\,\lambda_{s,J_s}.
 ```
+
+Read each bracket as two chances multiplied together, written as a sum of
+logs: $-\lambda_{s,j-1}$ is the log of staying liquid until the interval
+starts, and the log term is the log of then freezing within it.
 
 **Why not one binomial per image?** The image at $-15\,^\circ$C and the image at
 $-16\,^\circ$C look at the *same* droplets. A droplet frozen at $-15$ is still
@@ -96,8 +147,15 @@ frozen at $-16$. Treating each image as a new, independent binomial trial would
 count each droplet many times and give intervals that are far too narrow. The
 likelihood above counts each droplet once: by the interval in which it first froze.
 
-Different droplet sets (other dilutions, other runs, blanks) are independent,
-so the total log-likelihood is the sum $\log L = \sum_s \log L_s$.
+**All droplet sets.** Different droplet sets (other dilutions, other runs,
+blanks) are independent, so their likelihoods multiply and their logs add.
+The quantity inptk minimizes is the negative log-likelihood:
+
+```math
+\log L = \sum_s \log L_s, \qquad \ell = -\log L .
+```
+
+Section 5 writes $\ell$ in terms of the curve's steps.
 
 ## 5. A monotone curve as a sum of non-negative steps
 
